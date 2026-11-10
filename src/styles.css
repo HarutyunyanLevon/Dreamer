@@ -238,3 +238,26 @@ button:disabled { cursor: default; }
   .orb { animation: none; }
   * { transition-duration: 0.01ms !important; }
 }
+
+/* ---------- Step 3 additions ---------- */
+.name-input {
+  min-height: 48px; padding: 0 16px; border-radius: 18px; font: inherit; color: var(--ink); user-select: text;
+  border: 1.5px solid var(--accent); background: rgba(255, 255, 255, 0.85);
+}
+.name-input::placeholder { color: var(--muted); }
+.card-body { display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; white-space: pre-wrap; }
+.tags { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 8px; }
+.tag { font-size: 12px; font-weight: 600; padding: 2px 9px; border-radius: 10px; background: var(--accent-soft); color: var(--ink); }
+.empty {
+  position: absolute; left: calc(var(--gap) * 2 + var(--side-w) + (100% - var(--side-w) - var(--chat-w) - var(--gap) * 4) / 2);
+  top: 42%; transform: translate(-50%, -50%); text-align: center; max-width: 360px; color: var(--body);
+}
+.empty-title { font-family: var(--font-title); font-style: italic; font-size: 30px; color: var(--ink); margin-bottom: 6px; }
+.warn-pill { top: calc(var(--gap) + 74px); padding: 8px 16px; font-weight: 600; color: var(--ink); }
+.toast {
+  position: fixed; z-index: 50; left: 50%; bottom: 96px; transform: translateX(-50%);
+  display: flex; align-items: center; gap: 14px; padding: 8px 8px 8px 20px; max-width: 560px;
+  background: rgba(255, 255, 255, 0.92); border: 1px solid var(--accent); border-radius: 28px;
+  color: var(--ink); font-weight: 600; box-shadow: 0 10px 36px var(--ink-shadow); user-select: text;
+}
+.icon-btn:disabled, .tool:disabled { opacity: 0.5; }

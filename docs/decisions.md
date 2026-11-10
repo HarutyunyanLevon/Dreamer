@@ -21,3 +21,20 @@ Newest at the bottom. Each entry: what, why.
 - **Persistence for now:** selected theme id in `localStorage`. Replaced by `workspace.json` in step 3.
 - **Demo cards and disabled chat controls** on the canvas/chat are placeholders to judge the look; real cards arrive in step 4 and chat in step 6.
 - **Sidebar Theme switcher** is a row of four 44px swatches above "New project".
+
+## Step 3: Storage core
+- **Where the logic lives:** `src-tauri/src/storage.rs` (pure Rust, no Tauri types, fully unit-tested), `model.rs` (serde types = the JSON contract with the UI), `watcher.rs`, `state.rs` (workspace root + watcher lifecycle), `commands.rs` (thin Tauri wrappers). Commands are `#[tauri::command(async)]` so file IO never runs on the UI thread.
+- **Workspace location:** `%USERPROFILE%\Dreamer` by default. The chosen root is remembered in the app config dir (`config.json`), not inside the workspace. `DREAMER_WORKSPACE` env var overrides it for dev/tests. `set_workspace_root` exists; a settings UI for it comes later.
+- **Card id = file name.** The `id:` in frontmatter is ignored on read and rewritten from the file name, so copying a card file can never create duplicate ids. IDs are ULIDs; ids and project slugs are validated (`[a-z0-9_-]`, no dots or slashes) so no command can reach outside the workspace.
+- **Links live in card frontmatter (`links[]`), not in `canvas.json`.** `canvas.json` holds `viewport` and per-card `{x, y}`. One source of truth per fact, and git diffs of a card show its links. (The brief listed links under both; this resolves it.)
+- **Unknown frontmatter keys are preserved** on rewrite (`extra`), so hand edits and notes Claude adds are never lost. Unknown `stage`/`source` values fall back to `cloud`/`user`. CRLF and BOM are accepted on read; files are always written with LF.
+- **Body normalisation:** leading/trailing blank lines are trimmed; files end with exactly one newline. This keeps in-memory and on-disk text identical (a test caught a mismatch here).
+- **Lenient loading:** an unreadable card file becomes a warning on the project (shown as a small pill), never a failure. A corrupt `workspace.json` or `canvas.json` is copied to `*.json.bak` and defaults are used, so one bad edit cannot stop the app from starting.
+- **Reconcile on load:** cards created outside the app (Claude Code, git) get a free grid position and it is saved; positions of cards deleted outside the app are dropped.
+- **Delete is always move-to-Trash** (`trash/<id>.md` + `trash/trash.json` with reason label, old position). `restore_card` puts it back at its old position; `empty_trash` is the only permanent delete and the UI must confirm it. `trash_card(reason)` is already there for step 7's "lost to <winner>". Variant folders move with the card.
+- **Atomic writes:** temp file in the same folder, fsync, rename over the target; temp names end in `.tmp` and are ignored by the watcher.
+- **Watcher:** `notify` + debouncer (250ms) on the workspace root, recursive. Emits `workspace-changed` with de-duplicated `{scope, project}` events; the UI reloads the affected project. `.git` and temp files are ignored. The app's own writes also trigger a reload (harmless, idempotent).
+- **YAML crate:** `serde_yaml 0.9` (marked unmaintained upstream but stable and exactly what is needed). Swap later if it becomes a problem; the format is plain YAML.
+- **Theme choice** now lives in `workspace.json` (localStorage is only a first-paint cache) and follows external edits to that file.
+- **UI data layer:** `src/api` exposes one typed `Api`; inside Tauri it calls the Rust commands, in a plain browser (`npm run dev` without Tauri) it uses an in-memory mock so the look can be developed and screenshotted without the Rust core.
+- **Temporary UI in step 3:** the toolbar "Card" button creates a Cloud card titled "New idea" so storage can be exercised; ghost cards' Keep/Dismiss already work (Keep clears `ghost`, Dismiss moves to Trash). Real editing, drag and pan/zoom are step 4.

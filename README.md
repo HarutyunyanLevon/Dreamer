@@ -18,6 +18,12 @@ npm install
 npm run tauri dev
 ```
 
+## Test
+```
+cd src-tauri && cargo test
+npm run check:themes
+```
+
 ## Build installer
 ```
 npm run tauri build
@@ -25,4 +31,3 @@ npm run tauri build
 Installers land in `src-tauri/target/release/bundle/`.
 
 See `docs/decisions.md` for design decisions and `docs/testing.md` for the test plan.
-# Dreamer

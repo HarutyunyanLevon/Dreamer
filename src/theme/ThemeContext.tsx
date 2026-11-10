@@ -1,4 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
+import { api } from "../api";
 import { applyTheme } from "./applyTheme";
 import { BUILTIN_THEMES, DEFAULT_THEME_ID } from "./presets";
 import type { Theme } from "./types";
@@ -27,8 +28,8 @@ export function bootTheme() {
 }
 
 /**
- * Step 2: built-in themes only, choice kept in localStorage.
- * Step 3+ moves the choice to workspace.json and adds user themes + per-project override.
+ * The chosen theme id lives in workspace.json (source of truth). localStorage is only a cache so the
+ * right colors are applied synchronously before first paint. User themes + per-project override: step 8.
  */
 export function ThemeProvider({ children }: { children: ReactNode }) {
   const themes = BUILTIN_THEMES;
@@ -37,8 +38,39 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => applyTheme(theme), [theme]);
 
+  // Sync with workspace.json: on start, and when the file changes on disk (git pull, hand edit).
+  useEffect(() => {
+    let disposed = false;
+    let unsub: (() => void) | undefined;
+    const pull = () =>
+      api
+        .getSettings()
+        .then((s) => {
+          if (disposed || !themes.some((t) => t.id === s.theme)) return;
+          setId(s.theme);
+          try {
+            localStorage.setItem(KEY, s.theme);
+          } catch {
+            /* cache only */
+          }
+        })
+        .catch(() => {});
+    void pull();
+    api
+      .onChange((events) => {
+        if (events.some((e) => e.scope === "settings")) void pull();
+      })
+      .then((u) => (disposed ? u() : (unsub = u)))
+      .catch(() => {});
+    return () => {
+      disposed = true;
+      unsub?.();
+    };
+  }, [themes]);
+
   const setThemeId = useCallback((next: string) => {
     setId(next);
+    api.updateSettings({ theme: next }).catch(() => {});
     try {
       localStorage.setItem(KEY, next);
     } catch {

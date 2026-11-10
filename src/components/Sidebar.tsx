@@ -1,26 +1,53 @@
+import { useEffect, useRef, useState } from "react";
+import type { ProjectSummary } from "../api";
 import { useTheme } from "../theme/ThemeContext";
 import { IconFolder, IconInbox, IconPlus } from "./Icons";
 
-// Placeholder data until the storage core lands in step 3.
-const DEMO_PROJECTS = [{ id: "fish-punk", name: "Fish-punk fishing" }];
+interface Props {
+  projects: ProjectSummary[];
+  active: string | null;
+  onSelect: (slug: string) => void;
+  onCreate: (name: string) => void;
+}
 
-export function Sidebar() {
+export function Sidebar({ projects, active, onSelect, onCreate }: Props) {
   const { themes, theme, setThemeId } = useTheme();
+  const [naming, setNaming] = useState(false);
+  const [name, setName] = useState("");
+  const input = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (naming) input.current?.focus();
+  }, [naming]);
+
+  const submit = () => {
+    const n = name.trim();
+    if (n) onCreate(n);
+    setName("");
+    setNaming(false);
+  };
+
   return (
     <aside className="glass sidebar" aria-label="Projects">
       <div className="wordmark">Dreamer</div>
 
       <nav className="side-section">
         <div className="side-label">Projects</div>
-        <button className="side-row" type="button">
-          <IconInbox />
-          <span>Inbox</span>
-          <span className="badge" aria-label="3 ideas">3</span>
-        </button>
-        {DEMO_PROJECTS.map((p) => (
-          <button key={p.id} className="side-row active" type="button" aria-current="true">
-            <IconFolder />
+        {projects.map((p) => (
+          <button
+            key={p.slug}
+            className={"side-row" + (p.slug === active ? " active" : "")}
+            type="button"
+            aria-current={p.slug === active ? "true" : undefined}
+            onClick={() => onSelect(p.slug)}
+          >
+            {p.is_inbox ? <IconInbox /> : <IconFolder />}
             <span>{p.name}</span>
+            {p.is_inbox && p.card_count > 0 && (
+              <span className="badge" aria-label={`${p.card_count} ideas`}>
+                {p.card_count}
+              </span>
+            )}
           </button>
         ))}
       </nav>
@@ -49,10 +76,30 @@ export function Sidebar() {
         <div className="theme-name">{theme.name}</div>
       </div>
 
-      <button className="new-project" type="button">
-        <IconPlus />
-        New project
-      </button>
+      {naming ? (
+        <input
+          ref={input}
+          className="name-input"
+          aria-label="New project name"
+          placeholder="Project name, then Enter"
+          value={name}
+          maxLength={120}
+          onChange={(e) => setName(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") submit();
+            if (e.key === "Escape") {
+              setName("");
+              setNaming(false);
+            }
+          }}
+          onBlur={submit}
+        />
+      ) : (
+        <button className="new-project" type="button" onClick={() => setNaming(true)}>
+          <IconPlus />
+          New project
+        </button>
+      )}
     </aside>
   );
 }
