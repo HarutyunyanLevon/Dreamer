@@ -3,7 +3,8 @@ import { api, type Card, type Link } from "../api";
 import type { Workspace } from "../state/useWorkspace";
 import { STAGES, STAGE_LABEL, type StageId } from "../theme/types";
 import { renderMarkdown } from "../util/markdown";
-import { IconClose, IconTrash } from "./Icons";
+import { BranchCompare, branchGroup } from "./BranchCompare";
+import { IconClose, IconFork, IconTrash } from "./Icons";
 
 const RESERVED_FIELDS = new Set(["image", "url", "clip_title"]);
 
@@ -19,6 +20,8 @@ export function CardEditor({ card, ws, onClose }: { card: Card; ws: Workspace; o
   const [url, setUrl] = useState(typeof card.fields.url === "string" ? card.fields.url : "");
   const [preview, setPreview] = useState(false);
   const [imageUrl, setImageUrl] = useState<string | null>(null);
+  const [comparing, setComparing] = useState(false);
+  const group = branchGroup(card);
 
   const imageRel = typeof card.fields.image === "string" ? card.fields.image : null;
   useEffect(() => {
@@ -76,6 +79,11 @@ export function CardEditor({ card, ws, onClose }: { card: Card; ws: Workspace; o
                 {STAGE_LABEL[s]}
               </button>
             ))}
+            {group && (
+              <button type="button" className="chip fork-chip" onClick={() => setComparing(true)}>
+                <IconFork /> Compare forks
+              </button>
+            )}
           </div>
         </div>
 
@@ -158,6 +166,7 @@ export function CardEditor({ card, ws, onClose }: { card: Card; ws: Workspace; o
           <button type="button" className="btn primary" onClick={() => void save()}>Save</button>
         </div>
       </div>
+      {comparing && <BranchCompare card={card} ws={ws} onClose={() => { setComparing(false); onClose(); }} />}
     </div>
   );
 }

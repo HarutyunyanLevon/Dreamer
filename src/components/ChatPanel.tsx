@@ -52,9 +52,14 @@ export function ChatPanel({ ws }: { ws: Workspace }) {
   }
 
   const send = (value: string) => {
-    const v = value.trim();
-    if (!v || !ws.active || chat.busy) return;
-    chat.sendText(ws.active, v, formatContext(ws, contextCard));
+    const display = value.trim();
+    if (!display || !ws.active || chat.busy) return;
+    let v = display;
+    if (display === "Give me 3 takes" && contextCard) {
+      const group = crypto.randomUUID();
+      v = `Give me 3 distinctly different takes branching from this card. Call create_card exactly 3 times (not more, not fewer); on every one of the 3 calls set branch_group to exactly "${group}" and variant_of to "${contextCard.id}", so they can be grouped and compared.`;
+    }
+    chat.sendText(ws.active, v, formatContext(ws, contextCard), display);
     setText("");
   };
 

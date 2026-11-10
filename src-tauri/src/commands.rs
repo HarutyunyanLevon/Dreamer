@@ -89,6 +89,12 @@ pub fn delete_card(state: State<AppState>, slug: String, id: String) -> Result<T
     with_ws(&state, |ws| ws.delete_card(&slug, &id))
 }
 
+/// Trash a card with a custom reason (e.g. "lost to <winner title>" when picking a fork's winner).
+#[tauri::command(async)]
+pub fn lose_card(state: State<AppState>, slug: String, id: String, reason: String) -> Result<TrashItem> {
+    with_ws(&state, |ws| ws.trash_card(&slug, &id, &reason))
+}
+
 #[tauri::command(async)]
 pub fn list_trash(state: State<AppState>, slug: String) -> Result<Vec<TrashItem>> {
     with_ws(&state, |ws| ws.list_trash(&slug))

@@ -95,6 +95,7 @@ pub struct NewCard {
     pub links: Option<Vec<Link>>,
     pub source: Option<Source>,
     pub ghost: Option<bool>,
+    pub branch: Option<Value>,
     pub x: Option<f64>,
     pub y: Option<f64>,
 }

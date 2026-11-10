@@ -17,3 +17,4 @@ export const IconClose = I(<path d="M6 6l12 12M18 6 6 18" />);
 export const IconTrash = I(<><path d="M5 7h14M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2m2 0-1 13a1 1 0 0 1-1 1H8a1 1 0 0 1-1-1L6 7" /><path d="M10 11v6M14 11v6" /></>);
 export const IconUndo = I(<path d="M7 7v6h6M7 13a7 7 0 1 1 2 5" />);
 export const IconRedo = I(<path d="M17 7v6h-6M17 13a7 7 0 1 1-2 5" />);
+export const IconFork = I(<><circle cx="6" cy="6" r="2.5" /><circle cx="6" cy="18" r="2.5" /><circle cx="18" cy="12" r="2.5" /><path d="M6 8.5V18M8.3 7A8 8 0 0 1 15.7 11" /></>);

@@ -57,7 +57,14 @@ Not verified live this session: clicking through the actual chat panel inside th
 
 Known gap, not yet fixed: a packaged build's chat panel will not be able to start the sidecar (see docs/decisions.md's step 5 "packaging gap") — `cargo tauri build` is step 9's job, and bundling the sidecar's own `node_modules` or a Node runtime needs to happen before then.
 
+## Step 6 checks
+Automated: `cargo test` (18, unchanged), `cargo check`, `npm run build`, `npm run check:themes` — all clean.
+
+Verified against the real sidecar + real Claude Code (not mocked): sent the exact instruction text `ChatPanel`'s "Give me 3 takes" chip generates (with a fresh random `branch_group` and a fake `variant_of`), and confirmed all three resulting `create_card` tool calls carried the same `branch_group` value. Re-ran with different random ids to rule out a fluke; both runs grouped correctly.
+
+Not verified live: the Compare view's diff rendering, the fork badge on a canvas card, and the Trash view's Restore/Empty buttons clicked in the actual window — no GUI automation tool for the native WebView2 window this session (see the same gap noted in steps 4 and 5). Each of these is built directly on calls (`ws.loseCard`, `api.restoreCard`, `api.emptyTrash`, `ws.updateCard`) that were themselves exercised live in earlier steps, and `diffLines`/`branchGroup` are pure functions with no I/O, but a human click-through is recommended before relying on the UI.
+
 ## Not verified by the author
 - Window minimize/restore, real GPU rendering nuances, and `tauri build`'s installers (not run this session; see step 9).
 - The reduced-motion OS toggle (Windows Settings > Accessibility).
-- The chat panel's live UI (see Step 5 checks above).
+- The chat panel's and Compare/Trash views' live UI (see Step 5/6 checks above).

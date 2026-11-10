@@ -275,6 +275,22 @@ export function useWorkspace() {
     [run, pushUndo],
   );
 
+  const loseCard = useCallback(
+    async (id: string, reason: string) => {
+      const slug = activeRef.current!;
+      const item = await run(() => api.loseCard(slug, id, reason));
+      if (item) {
+        pushUndo({
+          label: "lose fork",
+          undo: async () => api.restoreCard(slug, id).then(() => {}),
+          redo: async () => api.loseCard(slug, id, reason).then(() => {}),
+        });
+      }
+      return item;
+    },
+    [run, pushUndo],
+  );
+
   const addLink = useCallback(
     (fromId: string, toId: string, label?: string) => {
       const from = dataRef.current?.cards.find((c) => c.id === fromId);
@@ -329,6 +345,8 @@ export function useWorkspace() {
     createCard,
     updateCard,
     deleteCard,
+    loseCard,
+    refresh,
     addLink,
     removeLink,
     setLinkLabel,

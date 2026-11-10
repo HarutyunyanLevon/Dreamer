@@ -54,11 +54,11 @@ export function useClaudeChat() {
     };
   }, []);
 
-  const sendText = useCallback((slug: string, text: string, context?: string) => {
+  const sendText = useCallback((slug: string, text: string, context?: string, displayText?: string) => {
     const id = nextId();
     busyId.current = id;
     setBusy(true);
-    setMessages((prev) => [...prev, { id: `${id}-u`, role: "user", text }, { id, role: "claude", text: "", streaming: true }]);
+    setMessages((prev) => [...prev, { id: `${id}-u`, role: "user", text: displayText ?? text }, { id, role: "claude", text: "", streaming: true }]);
     claudeApi.send(slug, id, text, context).catch((e) => {
       setMessages((prev) => prev.map((m) => (m.id === id ? { ...m, text: String(e), streaming: false, isError: true } : m)));
       setBusy(false);

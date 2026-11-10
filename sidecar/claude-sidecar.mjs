@@ -44,6 +44,8 @@ const createCardTool = tool(
     tags: z.array(z.string()).optional(),
     stage: z.enum(["cloud", "sketch", "draft", "pitch"]).optional(),
     links: z.array(z.object({ to: z.string(), label: z.string().optional() })).optional(),
+    branch_group: z.string().optional().describe("When proposing several alternative takes together (e.g. '3 takes'), use the exact same branch_group value on every one of them so Dreamer can group and compare them."),
+    variant_of: z.string().optional().describe("The id of the card these takes branch from, if any."),
   },
   async (args) => {
     try {

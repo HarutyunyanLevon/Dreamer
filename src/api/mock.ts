@@ -125,6 +125,18 @@ export function createMockApi(): Api {
       emit(slug);
       return item;
     },
+    loseCard: async (slug, id, reason) => {
+      const p = need(slug);
+      const c = p.cards.get(id);
+      if (!c) throw new Error(`not found: card ${id}`);
+      const item: TrashItem = { id, title: c.title, stage: c.stage, reason, deleted_at: stamp(), pos: p.canvas.cards[id] ?? null };
+      p.trash.push(item);
+      p.cards.delete(id);
+      delete p.canvas.cards[id];
+      p.trashed.set(id, c);
+      emit(slug);
+      return item;
+    },
     listTrash: async (slug) => [...need(slug).trash],
     restoreCard: async (slug, id) => {
       const p = need(slug);

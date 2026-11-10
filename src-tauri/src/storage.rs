@@ -433,7 +433,7 @@ impl Workspace {
                 // Claude's cards are always ghosts until accepted; the user's never are unless asked.
                 ghost: new.ghost.unwrap_or(false),
                 links: new.links.unwrap_or_default(),
-                branch: None,
+                branch: new.branch,
                 extra: Default::default(),
             },
             body: norm_body(&new.body.unwrap_or_default()),

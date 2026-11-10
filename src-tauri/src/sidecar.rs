@@ -134,6 +134,8 @@ fn run_tool(state: &AppState, tool: &str, input: Value) -> Result<Value> {
     match tool {
         "create_card" => {
             let slug = state.claude.active_slug.lock().map_err(|_| AppError::Invalid("sidecar lock poisoned".into()))?.clone();
+            let branch_group = input.get("branch_group").and_then(Value::as_str);
+            let branch = branch_group.map(|g| json!({ "group": g, "of": input.get("variant_of").and_then(Value::as_str) }));
             let new_card = NewCard {
                 title: input.get("title").and_then(Value::as_str).map(str::to_string),
                 body: input.get("body").and_then(Value::as_str).map(str::to_string),
@@ -142,6 +144,7 @@ fn run_tool(state: &AppState, tool: &str, input: Value) -> Result<Value> {
                 links: input.get("links").cloned().and_then(|v| serde_json::from_value(v).ok()),
                 source: Some(Source::Claude),
                 ghost: Some(true),
+                branch,
                 ..Default::default()
             };
             let guard = state.ws.lock().map_err(|_| AppError::Invalid("workspace lock poisoned".into()))?;

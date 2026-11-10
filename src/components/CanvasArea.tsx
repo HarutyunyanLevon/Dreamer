@@ -2,8 +2,10 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState, type CSSProper
 import { api, type Card, type ProjectData } from "../api";
 import type { Workspace } from "../state/useWorkspace";
 import { STAGES, STAGE_LABEL, type StageId } from "../theme/types";
+import { branchGroup } from "./BranchCompare";
 import { CardEditor } from "./CardEditor";
-import { IconCard, IconClip, IconFit, IconImage, IconLink, IconMinus, IconPlus, IconRedo, IconUndo } from "./Icons";
+import { IconCard, IconClip, IconFit, IconImage, IconLink, IconMinus, IconPlus, IconRedo, IconTrash as IconTrashCan, IconUndo } from "./Icons";
+import { TrashView } from "./TrashView";
 
 const CARD_W = 236;
 const CARD_H = 150;
@@ -17,6 +19,7 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
   const [linkMode, setLinkMode] = useState(false);
   const [linkFrom, setLinkFrom] = useState<string | null>(null);
   const [clipPrompt, setClipPrompt] = useState(false);
+  const [trashOpen, setTrashOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const sizeRef = useRef({ w: 1200, h: 800 });
@@ -300,10 +303,15 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
           <IconClip />
           <span>Web clip</span>
         </button>
+        <button type="button" className="tool" disabled={!data} onClick={() => setTrashOpen(true)}>
+          <IconTrashCan />
+          <span>Trash</span>
+        </button>
       </div>
 
       {clipPrompt && <WebClipPrompt onClose={() => setClipPrompt(false)} onCreate={(url, name) => createAt({ title: name || url, fields: { url, clip_title: name } })} />}
       {editingCard && <CardEditor card={editingCard} ws={ws} onClose={() => setEditing(null)} />}
+      {trashOpen && <TrashView ws={ws} onClose={() => setTrashOpen(false)} />}
     </main>
   );
 }
@@ -425,6 +433,7 @@ const CardView = memo(function CardView({
       <div className="card-head">
         <span className={`dot dot-${card.stage}`} aria-hidden="true" />
         <span className="stage-name">{STAGE_LABEL[card.stage]}</span>
+        {branchGroup(card) && <span className="fork-badge" title="Part of a fork — open the card to compare">⑂</span>}
       </div>
       <h3>{card.title}</h3>
       {imgUrl && <img className="card-image" src={imgUrl} alt="" />}

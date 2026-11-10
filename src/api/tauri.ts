@@ -31,6 +31,7 @@ export const tauriApi: Api = {
   readCard: (slug, id) => invoke("read_card", { slug, id }),
   updateCard: (slug, id, patch) => invoke("update_card", { slug, id, patch }),
   deleteCard: (slug, id) => invoke("delete_card", { slug, id }),
+  loseCard: (slug, id, reason) => invoke("lose_card", { slug, id, reason }),
   listTrash: (slug) => invoke("list_trash", { slug }),
   restoreCard: (slug, id) => invoke("restore_card", { slug, id }),
   emptyTrash: (slug) => invoke("empty_trash", { slug }),

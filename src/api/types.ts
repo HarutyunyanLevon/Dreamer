@@ -121,6 +121,8 @@ export interface Api {
   readCard(slug: string, id: string): Promise<Card>;
   updateCard(slug: string, id: string, patch: CardPatch): Promise<Card>;
   deleteCard(slug: string, id: string): Promise<TrashItem>;
+  /** Trash with a custom reason, e.g. "lost to <winner title>" when picking a fork's winner. */
+  loseCard(slug: string, id: string, reason: string): Promise<TrashItem>;
   listTrash(slug: string): Promise<TrashItem[]>;
   restoreCard(slug: string, id: string): Promise<Card>;
   emptyTrash(slug: string): Promise<number>;

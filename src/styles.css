@@ -336,3 +336,23 @@ button:disabled { cursor: default; }
   display: block; background: rgba(255, 255, 255, 0.6); border-radius: 10px; padding: 8px 12px;
   font-family: ui-monospace, Consolas, monospace; font-size: 13px; color: var(--ink); user-select: text;
 }
+
+/* ---------- Step 6: branch/compare/trash ---------- */
+.fork-badge { font-size: 13px; color: var(--accent); margin-left: auto; }
+.fork-chip { display: inline-flex; align-items: center; gap: 6px; }
+.fork-chip svg { width: 14px; height: 14px; }
+.modal-head h3 { display: flex; align-items: center; gap: 8px; font-family: var(--font-title); font-size: 20px; color: var(--ink); margin: 0; flex: 1; }
+.modal-head h3 svg { width: 18px; height: 18px; }
+.compare-modal { max-width: 920px; }
+.compare-columns { display: flex; gap: 14px; overflow-x: auto; padding-bottom: 4px; }
+.compare-col { flex: 1; min-width: 220px; background: rgba(255, 255, 255, 0.5); border-radius: 16px; padding: 14px; display: flex; flex-direction: column; gap: 10px; }
+.compare-col h4 { font-family: var(--font-title); font-size: 16px; color: var(--ink); margin: 0; }
+.compare-body { flex: 1; font-size: 13px; color: var(--body); }
+.compare-body p { margin: 2px 0; }
+.diff-add { background: color-mix(in srgb, #4caf6a 22%, transparent); border-radius: 4px; padding: 0 4px; }
+.diff-del { background: color-mix(in srgb, #e05a5a 18%, transparent); text-decoration: line-through; border-radius: 4px; padding: 0 4px; opacity: 0.8; }
+.trash-modal { max-width: 480px; }
+.trash-list { display: flex; flex-direction: column; gap: 6px; max-height: 50vh; overflow-y: auto; }
+.trash-row { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 14px; background: rgba(255, 255, 255, 0.45); }
+.trash-row-info { flex: 1; min-width: 0; }
+.trash-title { font-weight: 700; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

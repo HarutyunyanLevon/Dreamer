@@ -100,6 +100,7 @@ pub fn run() {
             commands::read_card,
             commands::update_card,
             commands::delete_card,
+            commands::lose_card,
             commands::list_trash,
             commands::restore_card,
             commands::empty_trash,
