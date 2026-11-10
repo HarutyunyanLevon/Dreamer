@@ -485,6 +485,38 @@ impl Workspace {
         Ok(card)
     }
 
+    // ----- media -----
+
+    /// Save bytes under the project's `media/` folder with a fresh ULID name, keeping the hinted extension.
+    /// Returns the path relative to the project dir (e.g. `media/<ulid>.png`) for storing in a card's `fields`.
+    pub fn save_media(&self, slug: &str, name_hint: &str, bytes: &[u8]) -> Result<String> {
+        let dir = self.existing_project_dir(slug)?;
+        let ext: String = Path::new(name_hint)
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.chars().filter(|c| c.is_ascii_alphanumeric()).collect::<String>().to_lowercase())
+            .filter(|e| !e.is_empty())
+            .unwrap_or_else(|| "png".into());
+        let fname = format!("{}.{}", ulid::Ulid::generate(), ext);
+        let media_dir = dir.join("media");
+        atomic_write(&media_dir.join(&fname), bytes)?;
+        Ok(format!("media/{fname}"))
+    }
+
+    /// Read a file back from inside a project (media, briefs...) as bytes, for the UI to show as a data URL.
+    /// `rel` must stay inside the project dir.
+    pub fn read_project_file(&self, slug: &str, rel: &str) -> Result<Vec<u8>> {
+        let dir = self.existing_project_dir(slug)?;
+        let rel_path = Path::new(rel);
+        if rel_path.is_absolute() || rel_path.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+            return Err(AppError::Invalid(format!("invalid relative path: {rel:?}")));
+        }
+        let path = dir.join(rel_path);
+        fs::read(&path).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound { AppError::NotFound(format!("file {rel}")) } else { AppError::io(format!("read {}", path.display()), e) }
+        })
+    }
+
     // ----- trash -----
 
     fn trash_dir(dir: &Path) -> PathBuf {
@@ -849,6 +881,16 @@ mod tests {
         data.canvas.viewport = Viewport { x: -50.0, y: 20.0, zoom: 0.5 };
         ws.save_canvas(&p.slug, &data.canvas).unwrap();
         assert_eq!(ws.load_project(&p.slug).unwrap().canvas.viewport, Viewport { x: -50.0, y: 20.0, zoom: 0.5 });
+    }
+
+    #[test]
+    fn media_is_saved_under_the_project_and_rejects_escaping_paths() {
+        let (_d, ws) = ws();
+        let rel = ws.save_media(INBOX_SLUG, "photo.PNG", b"\x89PNG-ish").unwrap();
+        assert!(rel.starts_with("media/") && rel.ends_with(".png"));
+        assert_eq!(ws.read_project_file(INBOX_SLUG, &rel).unwrap(), b"\x89PNG-ish");
+        assert!(ws.read_project_file(INBOX_SLUG, "../../etc/passwd").is_err());
+        assert!(ws.read_project_file(INBOX_SLUG, "media/nope.png").is_err());
     }
 
     #[test]

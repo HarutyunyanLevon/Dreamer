@@ -28,6 +28,21 @@ Manual (Windows, `npm run tauri dev`; workspace appears at `%USERPROFILE%\Dreame
 6. Theme: switch theme, quit, relaunch: same theme. Edit `workspace.json` `"theme": "gold-sky"` while running: the theme switches.
 7. Ghost card: create `cards\01GHOST.md` with `ghost: true` and `source: claude`: it shows "Claude suggests". **Keep** removes the dashed look (file now `ghost: false`); **Dismiss** moves it to `trash\` (file appears there, `trash.json` has reason "deleted").
 
+## Step 4 checks (Windows, real shell this session)
+Automated: `cd src-tauri && cargo test` (18 tests, including the new `save_media`/`read_project_file` path-traversal test), `npm run check:themes`, `npm run build` (tsc + vite, warning-free), `cargo check` (warning-free).
+
+Verified live with `npm run tauri dev` against a throwaway `DREAMER_WORKSPACE`:
+1. The real Tauri command round trip: launching the app created `workspace.json`, `inbox/`, `themes/` on disk exactly as the Rust tests predict.
+2. The file watcher: a card file written from PowerShell outside the app (`inbox/cards/01TESTEXTERNAL....md`) was reconciled into `inbox/canvas.json` with a new position within ~1-2s, with the app running — no restart needed.
+3. The global hotkey registers without error at startup (no `[dreamer] could not register hotkey` line in the log).
+
+Manual (not re-driven through the GUI this session, since there is no visual tool for the native WebView2 window — only Chrome-based browser automation is available):
+1. Pan (drag empty canvas / wheel), zoom (Ctrl+wheel / zoom pill +−), Fit, and the stage filter should all feel the same as the step-2/3 pass since the pill and filter markup is unchanged.
+2. Dragging a card, editing a card (title/body/tags/fields/stage), creating a link, pasting an image into the editor, dropping an image file onto the canvas, and the "Web clip" prompt all follow the same `ws.*` → `api.*` → Rust command path already exercised by `cargo test` for the card/media operations, and by the live round-trip check above for persistence — but the interactions themselves (drag, paste, drop) need a human pass in the actual window.
+3. Ctrl+Z / Ctrl+Shift+Z: logic only, not re-driven live.
+4. The global hotkey's popup, the tray icon, and minimize-to-tray behavior (closing the main window should hide it, not quit) need a human pass — I can confirm the shortcut *registers* and the window-close handler is wired, but not that pressing the hotkey from another app actually raises the popup, since that requires OS-level focus changes a terminal can't drive.
+5. `fs::rename` over a file another program has an exclusive lock on (antivirus, Notepad) remains unverified — the atomic-write path (temp file + rename onto the target) avoids the common case of *writing* a locked file, but trash/restore rename the target path itself, which could still fail if something else has it open. This would surface as an error toast; no code change made without being able to reproduce the exact lock scenario.
+
 ## Not verified by the author
-- The real Tauri command round trip and file watcher on Windows (only Rust unit tests on Linux and the mock-backed UI in a browser were run), e.g. `fs::rename` over a file another program has open (antivirus, editor) could fail on Windows and would surface as an error toast.
-- Anything that runs on Windows beyond step 1 (the reduced-motion OS toggle, window minimize/restore, real GPU rendering, the global hotkey, tray, `tauri build`). On my side the UI type-checks and bundles, and screenshots were taken in headless Chrome with software WebGL (all 4 themes), not in the Tauri WebView2 window.
+- Window minimize/restore, real GPU rendering nuances, and `tauri build`'s installers (not run this session; see step 9).
+- The reduced-motion OS toggle (Windows Settings > Accessibility).

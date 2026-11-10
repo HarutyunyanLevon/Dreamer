@@ -42,10 +42,14 @@ export interface Viewport {
   y: number;
   zoom: number;
 }
+export interface Pos {
+  x: number;
+  y: number;
+}
 export interface Canvas {
   version: number;
   viewport: Viewport;
-  cards: Record<string, { x: number; y: number }>;
+  cards: Record<string, Pos>;
 }
 
 export interface ProjectMeta {
@@ -120,6 +124,10 @@ export interface Api {
   listTrash(slug: string): Promise<TrashItem[]>;
   restoreCard(slug: string, id: string): Promise<Card>;
   emptyTrash(slug: string): Promise<number>;
+  /** Saves bytes under the project's media/ folder; returns the path to store in a card's fields (e.g. "media/xyz.png"). */
+  saveMedia(slug: string, nameHint: string, bytes: Uint8Array): Promise<string>;
+  /** Reads a file back from inside the project (e.g. a media/ path) as a data: URL. */
+  readMedia(slug: string, rel: string): Promise<string>;
   /** Files changed on disk (by this app, Claude Code, git...). Returns an unsubscribe function. */
   onChange(cb: (events: ChangeEvent[]) => void): Promise<() => void>;
 }

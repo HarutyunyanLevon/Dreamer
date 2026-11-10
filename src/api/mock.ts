@@ -145,6 +145,13 @@ export function createMockApi(): Api {
       p.trashed.clear();
       return n;
     },
+    saveMedia: async (_slug, nameHint, bytes) => {
+      const ext = nameHint.split(".").pop()?.toLowerCase() || "png";
+      const blob = new Blob([bytes] as BlobPart[]);
+      const url = URL.createObjectURL(blob);
+      return `mock:${url}#.${ext}`;
+    },
+    readMedia: async (_slug, rel) => (rel.startsWith("mock:") ? rel.slice(5).split("#")[0] : rel),
     onChange: async (cb) => {
       listeners.add(cb);
       return () => listeners.delete(cb);

@@ -35,8 +35,13 @@ pub fn get_settings(state: State<AppState>) -> Result<Settings> {
 }
 
 #[tauri::command(async)]
-pub fn update_settings(state: State<AppState>, patch: SettingsPatch) -> Result<Settings> {
-    with_ws(&state, |ws| ws.update_settings(patch))
+pub fn update_settings(app: AppHandle, state: State<AppState>, patch: SettingsPatch) -> Result<Settings> {
+    let rehook = patch.hotkey.clone();
+    let settings = with_ws(&state, |ws| ws.update_settings(patch))?;
+    if rehook.is_some() {
+        AppState::register_hotkey(&app, &settings.hotkey);
+    }
+    Ok(settings)
 }
 
 #[tauri::command(async)]
@@ -97,4 +102,16 @@ pub fn restore_card(state: State<AppState>, slug: String, id: String) -> Result<
 #[tauri::command(async)]
 pub fn empty_trash(state: State<AppState>, slug: String) -> Result<usize> {
     with_ws(&state, |ws| ws.empty_trash(&slug))
+}
+
+#[tauri::command(async)]
+pub fn save_media(state: State<AppState>, slug: String, name_hint: String, bytes: Vec<u8>) -> Result<String> {
+    with_ws(&state, |ws| ws.save_media(&slug, &name_hint, &bytes))
+}
+
+/// Returns the file as a base64-encoded string so the UI can use it as a data: URL without an asset-protocol scope.
+#[tauri::command(async)]
+pub fn read_media(state: State<AppState>, slug: String, rel: String) -> Result<String> {
+    use base64::Engine;
+    with_ws(&state, |ws| ws.read_project_file(&slug, &rel)).map(|bytes| base64::engine::general_purpose::STANDARD.encode(bytes))
 }
