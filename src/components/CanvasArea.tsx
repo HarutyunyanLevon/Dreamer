@@ -1,6 +1,7 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
 import { api, type Card, type ProjectData } from "../api";
 import type { Workspace } from "../state/useWorkspace";
+import { useTheme } from "../theme/ThemeContext";
 import { STAGES, STAGE_LABEL, type StageId } from "../theme/types";
 import { branchGroup } from "./BranchCompare";
 import { CardEditor } from "./CardEditor";
@@ -20,6 +21,8 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
   const [linkFrom, setLinkFrom] = useState<string | null>(null);
   const [clipPrompt, setClipPrompt] = useState(false);
   const [trashOpen, setTrashOpen] = useState(false);
+  const [themePickerOpen, setThemePickerOpen] = useState(false);
+  const { themes } = useTheme();
   const rootRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const sizeRef = useRef({ w: 1200, h: 800 });
@@ -262,6 +265,25 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
         <span className="pill-sep" />
         <button type="button" className="icon-btn" aria-label="Undo" disabled={!ws.canUndo} onClick={() => void ws.undo()}><IconUndo /></button>
         <button type="button" className="icon-btn" aria-label="Redo" disabled={!ws.canRedo} onClick={() => void ws.redo()}><IconRedo /></button>
+        {data && !data.is_inbox && (
+          <div className="theme-picker">
+            <button type="button" className="chip" onClick={() => setThemePickerOpen((v) => !v)}>
+              Theme: {themes.find((t) => t.id === data.meta.theme)?.name ?? "Workspace default"}
+            </button>
+            {themePickerOpen && (
+              <div className="theme-picker-pop glass">
+                <button type="button" className="theme-picker-row" onClick={() => { void ws.setProjectTheme(null); setThemePickerOpen(false); }}>
+                  Workspace default
+                </button>
+                {themes.map((t) => (
+                  <button key={t.id} type="button" className="theme-picker-row" onClick={() => { void ws.setProjectTheme(t.id); setThemePickerOpen(false); }}>
+                    {t.name}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       {data && data.warnings.length > 0 && <Warnings data={data} />}

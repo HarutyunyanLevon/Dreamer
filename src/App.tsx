@@ -23,7 +23,7 @@ export default function App() {
 function MainApp() {
   const ws = useWorkspace();
   return (
-    <ThemeProvider>
+    <ThemeProvider projectTheme={ws.data?.meta.theme ?? null}>
       <ShaderBackground />
       <CanvasArea ws={ws} />
       <Sidebar projects={ws.projects} active={ws.active} onSelect={(s) => void ws.select(s)} onCreate={(n) => void ws.createProject(n)} />

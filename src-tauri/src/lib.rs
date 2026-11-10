@@ -109,6 +109,10 @@ pub fn run() {
             commands::claude_status,
             commands::claude_send,
             commands::claude_interrupt,
+            commands::export_brief,
+            commands::list_custom_themes,
+            commands::save_custom_theme,
+            commands::delete_custom_theme,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Dreamer");

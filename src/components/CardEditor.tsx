@@ -21,7 +21,20 @@ export function CardEditor({ card, ws, onClose }: { card: Card; ws: Workspace; o
   const [preview, setPreview] = useState(false);
   const [imageUrl, setImageUrl] = useState<string | null>(null);
   const [comparing, setComparing] = useState(false);
+  const [briefMsg, setBriefMsg] = useState<string | null>(null);
   const group = branchGroup(card);
+
+  const exportBrief = async () => {
+    if (!ws.active) return;
+    try {
+      await persist();
+      const path = await api.exportBrief(ws.active, card.id);
+      setBriefMsg(`Exported to ${path}`);
+    } catch (e) {
+      setBriefMsg(e instanceof Error ? e.message : String(e));
+    }
+    setTimeout(() => setBriefMsg(null), 4000);
+  };
 
   const imageRel = typeof card.fields.image === "string" ? card.fields.image : null;
   useEffect(() => {
@@ -44,13 +57,17 @@ export function CardEditor({ card, ws, onClose }: { card: Card; ws: Workspace; o
     setTagInput("");
   };
 
-  const save = async () => {
+  const persist = async () => {
     const fieldsObj: Record<string, unknown> = {};
     for (const [k, v] of fields) if (k.trim()) fieldsObj[k.trim()] = v;
     if (imageRel) fieldsObj.image = imageRel;
     if (url.trim()) fieldsObj.url = url.trim();
     if (typeof card.fields.clip_title === "string") fieldsObj.clip_title = card.fields.clip_title;
     await ws.updateCard(card.id, { title, stage, body, tags, fields: fieldsObj });
+  };
+
+  const save = async () => {
+    await persist();
     onClose();
   };
 
@@ -159,8 +176,18 @@ export function CardEditor({ card, ws, onClose }: { card: Card; ws: Workspace; o
           </div>
         )}
 
+        {briefMsg && <p className="chat-sub">{briefMsg}</p>}
         <div className="editor-actions">
           <button type="button" className="btn" onClick={() => void ws.deleteCard(card.id).then(onClose)}><IconTrash /><span>Delete</span></button>
+          <button
+            type="button"
+            className="btn"
+            disabled={stage !== "pitch"}
+            title={stage !== "pitch" ? "Unlocks when the card reaches Pitch" : "Export a Markdown design brief"}
+            onClick={() => void exportBrief()}
+          >
+            Export brief
+          </button>
           <div className="side-spacer" />
           <button type="button" className="btn" onClick={onClose}>Cancel</button>
           <button type="button" className="btn primary" onClick={() => void save()}>Save</button>

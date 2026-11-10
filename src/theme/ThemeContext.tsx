@@ -7,7 +7,13 @@ import type { Theme } from "./types";
 interface ThemeCtx {
   themes: Theme[];
   theme: Theme;
+  /** The user's global default (ignoring any per-project override currently in effect). */
+  globalThemeId: string;
   setThemeId: (id: string) => void;
+  saveCustomTheme: (theme: Theme) => Promise<void>;
+  deleteCustomTheme: (id: string) => Promise<void>;
+  /** While set, overrides `theme` everywhere (including the shader) for live editing — never persisted. */
+  setPreviewTheme: (theme: Theme | null) => void;
 }
 
 const Ctx = createContext<ThemeCtx | null>(null);
@@ -27,26 +33,35 @@ export function bootTheme() {
   applyTheme(t);
 }
 
+function isTheme(v: unknown): v is Theme {
+  const t = v as Partial<Theme> | null;
+  return !!t && typeof t.id === "string" && typeof t.name === "string" && !!t.shader && !!t.ui && !!t.stages;
+}
+
 /**
- * The chosen theme id lives in workspace.json (source of truth). localStorage is only a cache so the
- * right colors are applied synchronously before first paint. User themes + per-project override: step 8.
+ * The chosen theme id lives in workspace.json (source of truth); localStorage is only a cache so
+ * the right colors are applied synchronously before first paint. `projectTheme`, when set, is the
+ * active project's override (project.json's `theme`) and wins over the global default.
  */
-export function ThemeProvider({ children }: { children: ReactNode }) {
-  const themes = BUILTIN_THEMES;
+export function ThemeProvider({ children, projectTheme }: { children: ReactNode; projectTheme?: string | null }) {
+  const [customThemes, setCustomThemes] = useState<Theme[]>([]);
+  const themes = useMemo(() => [...BUILTIN_THEMES, ...customThemes], [customThemes]);
   const [id, setId] = useState(loadId);
-  const theme = useMemo(() => themes.find((t) => t.id === id) ?? themes[0], [themes, id]);
+  const [preview, setPreview] = useState<Theme | null>(null);
+  const effectiveId = projectTheme || id;
+  const resolved = useMemo(() => themes.find((t) => t.id === effectiveId) ?? themes.find((t) => t.id === id) ?? themes[0], [themes, effectiveId, id]);
+  const theme = preview ?? resolved;
 
   useEffect(() => applyTheme(theme), [theme]);
 
   // Sync with workspace.json: on start, and when the file changes on disk (git pull, hand edit).
   useEffect(() => {
     let disposed = false;
-    let unsub: (() => void) | undefined;
     const pull = () =>
       api
         .getSettings()
         .then((s) => {
-          if (disposed || !themes.some((t) => t.id === s.theme)) return;
+          if (disposed) return;
           setId(s.theme);
           try {
             localStorage.setItem(KEY, s.theme);
@@ -56,6 +71,7 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
         })
         .catch(() => {});
     void pull();
+    let unsub: (() => void) | undefined;
     api
       .onChange((events) => {
         if (events.some((e) => e.scope === "settings")) void pull();
@@ -66,7 +82,29 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
       disposed = true;
       unsub?.();
     };
-  }, [themes]);
+  }, []);
+
+  // Custom themes live in themes/*.json; reload when that scope changes.
+  useEffect(() => {
+    let disposed = false;
+    const pull = () =>
+      api
+        .listCustomThemes()
+        .then((list) => !disposed && setCustomThemes(list.filter(isTheme)))
+        .catch(() => {});
+    void pull();
+    let unsub: (() => void) | undefined;
+    api
+      .onChange((events) => {
+        if (events.some((e) => e.scope === "themes")) void pull();
+      })
+      .then((u) => (disposed ? u() : (unsub = u)))
+      .catch(() => {});
+    return () => {
+      disposed = true;
+      unsub?.();
+    };
+  }, []);
 
   const setThemeId = useCallback((next: string) => {
     setId(next);
@@ -78,7 +116,21 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
-  return <Ctx.Provider value={{ themes, theme, setThemeId }}>{children}</Ctx.Provider>;
+  const saveCustomTheme = useCallback(async (t: Theme) => {
+    await api.saveCustomTheme(t.id, t);
+    setCustomThemes((prev) => [...prev.filter((x) => x.id !== t.id), t]);
+  }, []);
+
+  const deleteCustomTheme = useCallback(async (themeId: string) => {
+    await api.deleteCustomTheme(themeId);
+    setCustomThemes((prev) => prev.filter((x) => x.id !== themeId));
+  }, []);
+
+  return (
+    <Ctx.Provider value={{ themes, theme, globalThemeId: id, setThemeId, saveCustomTheme, deleteCustomTheme, setPreviewTheme: setPreview }}>
+      {children}
+    </Ctx.Provider>
+  );
 }
 
 export function useTheme(): ThemeCtx {

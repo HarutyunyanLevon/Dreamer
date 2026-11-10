@@ -5,6 +5,7 @@ use crate::error::{AppError, Result};
 use crate::model::*;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
+use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -485,6 +486,77 @@ impl Workspace {
         Ok(card)
     }
 
+    // ----- brief export -----
+
+    /// Writes a Markdown design brief to `briefs/<id>.md`. Only cards that have reached Pitch can
+    /// be exported — enforced here, not just in the UI, since this is reachable from any client.
+    pub fn export_brief(&self, slug: &str, id: &str) -> Result<String> {
+        let dir = self.existing_project_dir(slug)?;
+        let card = Self::read_card_file(&Self::card_path(&dir, id)?, id)?;
+        if card.meta.stage != Stage::Pitch {
+            return Err(AppError::Invalid("brief export unlocks when the card reaches Pitch".into()));
+        }
+        let mut out = format!("# {}\n\n", card.meta.title);
+        if !card.meta.tags.is_empty() {
+            out.push_str(&format!("**Tags:** {}\n\n", card.meta.tags.join(", ")));
+        }
+        out.push_str(card.body.trim_end_matches('\n'));
+        out.push('\n');
+        if !card.meta.links.is_empty() {
+            out.push_str("\n## Linked ideas\n\n");
+            for l in &card.meta.links {
+                out.push_str(&format!("- {}{}\n", l.to, l.label.as_deref().map(|s| format!(" — {s}")).unwrap_or_default()));
+            }
+        }
+        if !card.meta.fields.is_empty() {
+            out.push_str("\n## Fields\n\n");
+            for (k, v) in &card.meta.fields {
+                let plain = match v {
+                    Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                };
+                out.push_str(&format!("- **{k}:** {plain}\n"));
+            }
+        }
+        let path = dir.join("briefs").join(format!("{id}.md"));
+        atomic_write(&path, out.as_bytes())?;
+        Ok(format!("briefs/{id}.md"))
+    }
+
+    // ----- custom themes -----
+
+    /// Every custom theme saved under the workspace's `themes/` folder. Invalid files are skipped
+    /// (lenient, like everything else hand-editable) rather than failing the whole list.
+    pub fn list_custom_themes(&self) -> Result<Vec<Value>> {
+        let dir = self.root.join("themes");
+        let mut out = Vec::new();
+        if let Ok(rd) = fs::read_dir(&dir) {
+            for entry in rd.filter_map(|e| e.ok()) {
+                let path = entry.path();
+                if path.extension().is_some_and(|x| x == "json") {
+                    if let Some(v) = fs::read_to_string(&path).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()) {
+                        out.push(v);
+                    }
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    pub fn save_custom_theme(&self, id: &str, theme: Value) -> Result<()> {
+        check_slug(id)?;
+        write_json(&self.root.join("themes").join(format!("{id}.json")), &theme)
+    }
+
+    pub fn delete_custom_theme(&self, id: &str) -> Result<()> {
+        check_slug(id)?;
+        let path = self.root.join("themes").join(format!("{id}.json"));
+        if path.exists() {
+            fs::remove_file(&path).map_err(|e| AppError::io(format!("remove {}", path.display()), e))?;
+        }
+        Ok(())
+    }
+
     // ----- media -----
 
     /// Save bytes under the project's `media/` folder with a fresh ULID name, keeping the hinted extension.
@@ -633,6 +705,7 @@ fn read_json_or_default_meta(path: &Path, slug: &str) -> Result<ProjectMeta> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     use tempfile::TempDir;
 
     fn ws() -> (TempDir, Workspace) {
@@ -891,6 +964,33 @@ mod tests {
         assert_eq!(ws.read_project_file(INBOX_SLUG, &rel).unwrap(), b"\x89PNG-ish");
         assert!(ws.read_project_file(INBOX_SLUG, "../../etc/passwd").is_err());
         assert!(ws.read_project_file(INBOX_SLUG, "media/nope.png").is_err());
+    }
+
+    #[test]
+    fn brief_export_is_locked_until_pitch() {
+        let (_d, ws) = ws();
+        let c = ws.create_card(INBOX_SLUG, NewCard { title: Some("Fish-punk".into()), body: Some("Doom energy at a calm pace.".into()), tags: Some(vec!["core".into()]), ..Default::default() }).unwrap();
+        assert!(ws.export_brief(INBOX_SLUG, &c.meta.id).is_err(), "cloud card cannot export yet");
+        ws.update_card(INBOX_SLUG, &c.meta.id, CardPatch { stage: Some(Stage::Pitch), ..Default::default() }).unwrap();
+        let rel = ws.export_brief(INBOX_SLUG, &c.meta.id).unwrap();
+        assert_eq!(rel, format!("briefs/{}.md", c.meta.id));
+        let text = fs::read_to_string(ws.root.join("inbox").join(&rel)).unwrap();
+        assert!(text.starts_with("# Fish-punk"));
+        assert!(text.contains("Doom energy"));
+        assert!(text.contains("core"));
+    }
+
+    #[test]
+    fn custom_themes_roundtrip_and_skip_bad_files() {
+        let (_d, ws) = ws();
+        ws.save_custom_theme("my-theme", json!({"id": "my-theme", "name": "Mine"})).unwrap();
+        fs::write(ws.root.join("themes/bad.json"), "not json").unwrap();
+        let list = ws.list_custom_themes().unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0]["name"], "Mine");
+        ws.delete_custom_theme("my-theme").unwrap();
+        assert!(ws.list_custom_themes().unwrap().is_empty());
+        assert!(ws.save_custom_theme("Bad Id!", json!({})).is_err());
     }
 
     #[test]

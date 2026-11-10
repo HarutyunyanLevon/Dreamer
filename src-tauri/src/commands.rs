@@ -5,6 +5,7 @@ use crate::error::{AppError, Result};
 use crate::model::*;
 use crate::state::AppState;
 use serde::Serialize;
+use serde_json::Value;
 use tauri::{AppHandle, State};
 
 #[derive(Serialize)]
@@ -120,6 +121,26 @@ pub fn save_media(state: State<AppState>, slug: String, name_hint: String, bytes
 pub fn read_media(state: State<AppState>, slug: String, rel: String) -> Result<String> {
     use base64::Engine;
     with_ws(&state, |ws| ws.read_project_file(&slug, &rel)).map(|bytes| base64::engine::general_purpose::STANDARD.encode(bytes))
+}
+
+#[tauri::command(async)]
+pub fn export_brief(state: State<AppState>, slug: String, id: String) -> Result<String> {
+    with_ws(&state, |ws| ws.export_brief(&slug, &id))
+}
+
+#[tauri::command(async)]
+pub fn list_custom_themes(state: State<AppState>) -> Result<Vec<Value>> {
+    with_ws(&state, |ws| ws.list_custom_themes())
+}
+
+#[tauri::command(async)]
+pub fn save_custom_theme(state: State<AppState>, id: String, theme: Value) -> Result<()> {
+    with_ws(&state, |ws| ws.save_custom_theme(&id, theme))
+}
+
+#[tauri::command(async)]
+pub fn delete_custom_theme(state: State<AppState>, id: String) -> Result<()> {
+    with_ws(&state, |ws| ws.delete_custom_theme(&id))
 }
 
 #[tauri::command(async)]

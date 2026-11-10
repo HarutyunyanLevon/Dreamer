@@ -101,13 +101,14 @@ button:disabled { cursor: default; }
   background: var(--accent); color: #fff; font-size: 12px; font-weight: 700;
   display: inline-grid; place-items: center;
 }
-.theme-row { display: flex; gap: 6px; padding: 2px 4px 0; }
+.theme-row { display: flex; gap: 6px; padding: 2px 4px 0; flex-wrap: wrap; }
 .swatch {
   width: 44px; height: 44px; border-radius: 14px; border: 2px solid #fff; padding: 0;
   box-shadow: 0 3px 10px var(--ink-shadow);
 }
 .swatch.on { outline: 2px solid var(--accent); outline-offset: 2px; }
-.theme-name { font-size: 13px; color: var(--muted); font-weight: 600; padding: 6px 8px 14px; }
+.theme-name { font-size: 13px; color: var(--muted); font-weight: 600; }
+.theme-name-row { display: flex; align-items: center; gap: 6px; padding: 6px 8px 14px; flex-wrap: wrap; }
 .new-project {
   display: flex; align-items: center; justify-content: center; gap: 8px;
   min-height: 48px; border-radius: 18px; background: transparent;
@@ -356,3 +357,22 @@ button:disabled { cursor: default; }
 .trash-row { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 14px; background: rgba(255, 255, 255, 0.45); }
 .trash-row-info { flex: 1; min-width: 0; }
 .trash-title { font-weight: 700; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ---------- Step 7: theme editor + project theme override ---------- */
+.theme-picker { position: relative; }
+.theme-picker-pop {
+  position: absolute; top: calc(100% + 6px); left: 0; z-index: 20; min-width: 180px; max-height: 260px; overflow-y: auto;
+  padding: 6px; display: flex; flex-direction: column; gap: 2px;
+}
+.theme-picker-row { min-height: 40px; padding: 0 12px; border-radius: 10px; border: 0; background: transparent; text-align: left; color: var(--ink); font-weight: 600; }
+.theme-picker-row:hover { background: rgba(255, 255, 255, 0.6); }
+.theme-editor { max-width: 560px; }
+.swatch-row { display: flex; flex-wrap: wrap; gap: 10px; }
+.swatch-row input[type="color"] { width: 40px; height: 40px; border-radius: 10px; border: 1px solid rgba(255, 255, 255, 0.9); padding: 0; background: none; }
+.color-field { display: flex; flex-direction: column; align-items: center; gap: 4px; font-size: 11px; color: var(--muted); }
+.slider-grid { display: flex; flex-direction: column; gap: 8px; }
+.slider-field { display: grid; grid-template-columns: 110px 1fr 48px; align-items: center; gap: 8px; font-size: 13px; color: var(--body); }
+.slider-field input[type="range"] { width: 100%; }
+.slider-val { text-align: right; font-variant-numeric: tabular-nums; color: var(--ink); font-weight: 600; }
+.contrast-warnings { display: flex; flex-direction: column; gap: 4px; padding: 10px; border-radius: 12px; background: color-mix(in srgb, #e0a85a 18%, transparent); }
+.warn-row { font-size: 13px; color: var(--ink); }

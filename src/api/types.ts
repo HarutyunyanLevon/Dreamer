@@ -132,4 +132,9 @@ export interface Api {
   readMedia(slug: string, rel: string): Promise<string>;
   /** Files changed on disk (by this app, Claude Code, git...). Returns an unsubscribe function. */
   onChange(cb: (events: ChangeEvent[]) => void): Promise<() => void>;
+  /** Only succeeds once the card has reached Pitch; returns the relative path written under briefs/. */
+  exportBrief(slug: string, id: string): Promise<string>;
+  listCustomThemes(): Promise<unknown[]>;
+  saveCustomTheme(id: string, theme: unknown): Promise<void>;
+  deleteCustomTheme(id: string): Promise<void>;
 }

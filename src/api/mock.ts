@@ -33,6 +33,7 @@ function seedProject(slug: string, name: string): MockProject {
 export function createMockApi(): Api {
   const settings: Settings = { version: 1, theme: "pearl-glow", hotkey: "Ctrl+Shift+Space", last_project: null };
   const projects = new Map<string, MockProject>();
+  const customThemes = new Map<string, unknown>();
   const listeners = new Set<(e: ChangeEvent[]) => void>();
   const emit = (slug: string) => listeners.forEach((l) => l([{ scope: "project", project: slug }]));
 
@@ -164,6 +165,19 @@ export function createMockApi(): Api {
       return `mock:${url}#.${ext}`;
     },
     readMedia: async (_slug, rel) => (rel.startsWith("mock:") ? rel.slice(5).split("#")[0] : rel),
+    exportBrief: async (slug, id) => {
+      const c = need(slug).cards.get(id);
+      if (!c) throw new Error(`not found: card ${id}`);
+      if (c.stage !== "pitch") throw new Error("brief export unlocks when the card reaches Pitch");
+      return `briefs/${id}.md`;
+    },
+    listCustomThemes: async () => [...customThemes.values()],
+    saveCustomTheme: async (id, theme) => {
+      customThemes.set(id, theme);
+    },
+    deleteCustomTheme: async (id) => {
+      customThemes.delete(id);
+    },
     onChange: async (cb) => {
       listeners.add(cb);
       return () => listeners.delete(cb);

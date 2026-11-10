@@ -342,6 +342,7 @@ export function useWorkspace() {
       const p = await run(() => api.createProject(name));
       if (p) await select(p.slug);
     },
+    setProjectTheme: (themeId: string | null) => run(() => api.updateProject(activeRef.current!, { theme: themeId ?? "" })),
     createCard,
     updateCard,
     deleteCard,

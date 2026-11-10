@@ -40,6 +40,10 @@ export const tauriApi: Api = {
     const b64 = await invoke<string>("read_media", { slug, rel });
     return `data:${mimeFor(rel)};base64,${b64}`;
   },
+  exportBrief: (slug, id) => invoke("export_brief", { slug, id }),
+  listCustomThemes: () => invoke("list_custom_themes"),
+  saveCustomTheme: (id, theme) => invoke("save_custom_theme", { id, theme }),
+  deleteCustomTheme: (id) => invoke("delete_custom_theme", { id }),
   onChange: async (cb) => {
     const un = await listen<ChangeEvent[]>("workspace-changed", (e) => cb(e.payload));
     return un;

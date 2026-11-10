@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { ProjectSummary } from "../api";
 import { useTheme } from "../theme/ThemeContext";
 import { IconFolder, IconInbox, IconPlus } from "./Icons";
+import { ThemeEditor } from "./ThemeEditor";
 
 interface Props {
   projects: ProjectSummary[];
@@ -14,6 +15,7 @@ export function Sidebar({ projects, active, onSelect, onCreate }: Props) {
   const { themes, theme, setThemeId } = useTheme();
   const [naming, setNaming] = useState(false);
   const [name, setName] = useState("");
+  const [editingTheme, setEditingTheme] = useState<{ initial: typeof theme; isNew: boolean } | null>(null);
   const input = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -73,8 +75,16 @@ export function Sidebar({ projects, active, onSelect, onCreate }: Props) {
             />
           ))}
         </div>
-        <div className="theme-name">{theme.name}</div>
+        <div className="theme-name-row">
+          <div className="theme-name">{theme.name}</div>
+          {!theme.builtin && (
+            <button type="button" className="chip" onClick={() => setEditingTheme({ initial: theme, isNew: false })}>Edit</button>
+          )}
+          <button type="button" className="chip" onClick={() => setEditingTheme({ initial: theme, isNew: true })}>New theme</button>
+        </div>
       </div>
+
+      {editingTheme && <ThemeEditor initial={editingTheme.initial} isNew={editingTheme.isNew} onClose={() => setEditingTheme(null)} />}
 
       {naming ? (
         <input

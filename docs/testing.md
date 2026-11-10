@@ -64,7 +64,14 @@ Verified against the real sidecar + real Claude Code (not mocked): sent the exac
 
 Not verified live: the Compare view's diff rendering, the fork badge on a canvas card, and the Trash view's Restore/Empty buttons clicked in the actual window — no GUI automation tool for the native WebView2 window this session (see the same gap noted in steps 4 and 5). Each of these is built directly on calls (`ws.loseCard`, `api.restoreCard`, `api.emptyTrash`, `ws.updateCard`) that were themselves exercised live in earlier steps, and `diffLines`/`branchGroup` are pure functions with no I/O, but a human click-through is recommended before relying on the UI.
 
+## Step 7 checks
+Automated: `cargo test` — 20 tests (`custom_themes_roundtrip_and_skip_bad_files`, `brief_export_is_locked_until_pitch` added), `cargo check`, `npm run build`, `npm run check:themes` — all clean.
+
+Verified with `npm run tauri dev` against a throwaway workspace: hand-wrote `themes/test-theme.json` into the running workspace from PowerShell; the app kept running with no error in the dev log (the file-watcher's classification of `themes/*` as scope `"themes"` was already covered by a Rust unit test, so this confirms the live path end to end at the filesystem level, not just the UI reaction to it).
+
+Not verified live: opening the Theme editor and dragging its sliders/color pickers, opening the per-project theme picker popover in the title pill, and clicking "Export brief" on a Pitch card inside the actual window. Same native-window GUI-automation gap as steps 4-6 — each of these is built on `saveCustomTheme`/`deleteCustomTheme`/`setProjectTheme`/`exportBrief`, which call straight through to the Rust functions covered by the new unit tests above.
+
 ## Not verified by the author
 - Window minimize/restore, real GPU rendering nuances, and `tauri build`'s installers (not run this session; see step 9).
 - The reduced-motion OS toggle (Windows Settings > Accessibility).
-- The chat panel's and Compare/Trash views' live UI (see Step 5/6 checks above).
+- The chat panel's, Compare/Trash views', and Theme editor's live UI (see Step 5/6/7 checks above).
