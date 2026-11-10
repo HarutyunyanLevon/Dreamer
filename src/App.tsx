@@ -1,7 +1,16 @@
+import { CanvasArea } from "./components/CanvasArea";
+import { ChatPanel } from "./components/ChatPanel";
+import { ShaderBackground } from "./components/ShaderBackground";
+import { Sidebar } from "./components/Sidebar";
+import { ThemeProvider } from "./theme/ThemeContext";
+
 export default function App() {
   return (
-    <main style={{ display: "grid", placeItems: "center", height: "100vh", fontFamily: "Georgia, serif", color: "#472a4b", background: "#fbe3ea" }}>
-      <h1 style={{ fontStyle: "italic", fontWeight: 400, fontSize: 56 }}>Dreamer</h1>
-    </main>
+    <ThemeProvider>
+      <ShaderBackground />
+      <CanvasArea />
+      <Sidebar />
+      <ChatPanel />
+    </ThemeProvider>
   );
 }
