@@ -71,7 +71,17 @@ Verified with `npm run tauri dev` against a throwaway workspace: hand-wrote `the
 
 Not verified live: opening the Theme editor and dragging its sliders/color pickers, opening the per-project theme picker popover in the title pill, and clicking "Export brief" on a Pitch card inside the actual window. Same native-window GUI-automation gap as steps 4-6 — each of these is built on `saveCustomTheme`/`deleteCustomTheme`/`setProjectTheme`/`exportBrief`, which call straight through to the Rust functions covered by the new unit tests above.
 
+## Step 8 checks
+Automated: `cargo test` (20, unchanged), `cargo check`, `npm run build`, `npm run check:themes` — all clean after the undo/drag fix, Esc-to-close, and empty-state additions.
+
+Found and fixed during this pass (not just "checked"): dragging a card never pushed an undo entry (see docs/decisions.md's step 8 entry for why). This was caught by reading the undo code path end to end, not by a test — there wasn't one covering drag-then-undo specifically, because it's UI interaction state, not something `cargo test` reaches. No regression test was added for it (it lives entirely in `useWorkspace`'s React state, not Rust), so a future change to the drag handler should be re-checked by hand: drag a card, Ctrl+Z, confirm it snaps back.
+
+500-card performance: not measured with a live profiler (no GUI-automation tool for the native window, and no Chrome-extension connection available this session either — `tabs_context_mcp` returned "Browser extension is not connected"). The case for 60fps is argued from the code in docs/decisions.md's step 8 entry (reference-stable props under React.memo during pan/drag). A `?stress=1` flag on `npm run dev` seeds a 500-card project for whoever can run a live profiler next.
+
+Not verified live: Esc closing each modal, Esc canceling Link-mode, the "no cards in this filter" empty state, and the capture popup's new inline error message — same native-window GUI-automation gap as every other step. These are all small, low-risk UI additions; a human pass is still worth doing before considering the app done.
+
 ## Not verified by the author
 - Window minimize/restore, real GPU rendering nuances, and `tauri build`'s installers (not run this session; see step 9).
 - The reduced-motion OS toggle (Windows Settings > Accessibility).
-- The chat panel's, Compare/Trash views', and Theme editor's live UI (see Step 5/6/7 checks above).
+- The chat panel's, Compare/Trash views', Theme editor's, and step 8's live UI (see Step 5/6/7/8 checks above).
+- Live 500-card frame-rate measurement (see Step 8 checks above) — argued from code, not measured.

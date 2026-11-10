@@ -197,15 +197,18 @@ export function useWorkspace() {
   );
 
   const moveCard = useCallback(
-    (id: string, pos: Pos, opts?: { undoable?: boolean }) => {
-      const prev = dataRef.current?.canvas.cards[id];
+    (id: string, pos: Pos, opts?: { undoable?: boolean; from?: Pos }) => {
       patchCanvas((c) => ({ ...c, cards: { ...c.cards, [id]: pos } }));
       scheduleCanvasSave();
-      if (opts?.undoable && prev) {
+      // `from` must be the position at drag-start, passed by the caller: by the time a drag ends,
+      // `dataRef` already holds the dragged-to position (every intermediate move went through here
+      // too), so reading "the previous position" from state at this point would just be `pos` again.
+      if (opts?.undoable && opts.from) {
+        const from = opts.from;
         pushUndo({
           label: "move card",
           undo: async () => {
-            patchCanvas((c) => ({ ...c, cards: { ...c.cards, [id]: prev } }));
+            patchCanvas((c) => ({ ...c, cards: { ...c.cards, [id]: from } }));
             flushCanvas();
           },
           redo: async () => {

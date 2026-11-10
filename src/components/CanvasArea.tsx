@@ -3,6 +3,7 @@ import { api, type Card, type ProjectData } from "../api";
 import type { Workspace } from "../state/useWorkspace";
 import { useTheme } from "../theme/ThemeContext";
 import { STAGES, STAGE_LABEL, type StageId } from "../theme/types";
+import { useEscClose } from "../util/useEscClose";
 import { branchGroup } from "./BranchCompare";
 import { CardEditor } from "./CardEditor";
 import { IconCard, IconClip, IconFit, IconImage, IconLink, IconMinus, IconPlus, IconRedo, IconTrash as IconTrashCan, IconUndo } from "./Icons";
@@ -140,11 +141,14 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
       } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "y") {
         e.preventDefault();
         void ws.redo();
+      } else if (e.key === "Escape" && linkMode) {
+        setLinkMode(false);
+        setLinkFrom(null);
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [ws]);
+  }, [ws, linkMode]);
 
   const fit = useCallback(() => {
     if (!data || onScreen.length === 0) {
@@ -248,6 +252,12 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
               ? "Raw ideas land here. Capture one with the Card button, or press the global hotkey from anywhere."
               : "Add your first card with the Card button below."}
           </p>
+        </div>
+      )}
+      {data && data.cards.length > 0 && visible.length === 0 && (
+        <div className="empty">
+          <div className="empty-title">No cards in this filter</div>
+          <p>Turn a stage back on above to see the rest of this canvas.</p>
         </div>
       )}
 
@@ -412,12 +422,12 @@ const CardView = memo(function CardView({
     };
   }, [image, ws.active]);
 
-  const dragState = useRef<{ x: number; y: number; ox: number; oy: number; moved: boolean } | null>(null);
+  const dragState = useRef<{ x: number; y: number; ox: number; oy: number; moved: boolean; last: { x: number; y: number } } | null>(null);
   const onPointerDown = useCallback(
     (e: ReactPointerEvent) => {
       if (e.button !== 0 || linking) return;
       e.stopPropagation();
-      dragState.current = { x: e.clientX, y: e.clientY, ox: pos?.x ?? 0, oy: pos?.y ?? 0, moved: false };
+      dragState.current = { x: e.clientX, y: e.clientY, ox: pos?.x ?? 0, oy: pos?.y ?? 0, moved: false, last: { x: pos?.x ?? 0, y: pos?.y ?? 0 } };
       (e.target as Element).setPointerCapture(e.pointerId);
     },
     [pos, linking],
@@ -430,16 +440,21 @@ const CardView = memo(function CardView({
       const dx = (e.clientX - d.x) / zoom;
       const dy = (e.clientY - d.y) / zoom;
       if (Math.abs(dx) > 2 || Math.abs(dy) > 2) d.moved = true;
-      if (d.moved) ws.moveCard(card.id, { x: d.ox + dx, y: d.oy + dy });
+      if (d.moved) {
+        d.last = { x: d.ox + dx, y: d.oy + dy };
+        ws.moveCard(card.id, d.last);
+      }
     },
     [card.id, ws],
   );
   const onPointerUp = useCallback(() => {
     const d = dragState.current;
     dragState.current = null;
-    if (d?.moved) ws.flushCanvas();
-    else onOpen();
-  }, [ws, onOpen]);
+    if (d?.moved) {
+      ws.moveCard(card.id, d.last, { undoable: true, from: { x: d.ox, y: d.oy } });
+      ws.flushCanvas();
+    } else onOpen();
+  }, [ws, onOpen, card.id]);
 
   if (!pos) return null;
   const url = typeof card.fields.url === "string" ? card.fields.url : null;
@@ -475,6 +490,7 @@ const CardView = memo(function CardView({
 function WebClipPrompt({ onClose, onCreate }: { onClose: () => void; onCreate: (url: string, title: string) => void }) {
   const [url, setUrl] = useState("");
   const [name, setName] = useState("");
+  useEscClose(onClose);
   return (
     <div className="modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
       <div className="modal glass clip-prompt">

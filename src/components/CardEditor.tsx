@@ -3,6 +3,7 @@ import { api, type Card, type Link } from "../api";
 import type { Workspace } from "../state/useWorkspace";
 import { STAGES, STAGE_LABEL, type StageId } from "../theme/types";
 import { renderMarkdown } from "../util/markdown";
+import { useEscClose } from "../util/useEscClose";
 import { BranchCompare, branchGroup } from "./BranchCompare";
 import { IconClose, IconFork, IconTrash } from "./Icons";
 
@@ -23,6 +24,7 @@ export function CardEditor({ card, ws, onClose }: { card: Card; ws: Workspace; o
   const [comparing, setComparing] = useState(false);
   const [briefMsg, setBriefMsg] = useState<string | null>(null);
   const group = branchGroup(card);
+  useEscClose(onClose);
 
   const exportBrief = async () => {
     if (!ws.active) return;

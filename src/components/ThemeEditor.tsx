@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { checkTheme } from "../theme/contrast";
 import { useTheme } from "../theme/ThemeContext";
 import { STAGES, STAGE_LABEL, type StageId, type Theme } from "../theme/types";
+import { useEscClose } from "../util/useEscClose";
 import { IconClose, IconTrash } from "./Icons";
 
 function slugifyId(name: string): string {
@@ -16,6 +17,8 @@ export function ThemeEditor({ initial, isNew, onClose }: { initial: Theme; isNew
   const [draft, setDraft] = useState<Theme>(() =>
     isNew ? { ...initial, id: slugifyId(`${initial.name} copy`), name: `${initial.name} copy`, builtin: false } : initial,
   );
+
+  useEscClose(onClose);
 
   useEffect(() => {
     setPreviewTheme(draft);

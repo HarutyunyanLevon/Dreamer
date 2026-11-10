@@ -324,6 +324,7 @@ button:disabled { cursor: default; }
   border: 1.5px solid var(--accent); background: rgba(255, 255, 255, 0.85); -webkit-app-region: no-drag;
 }
 .capture-input::placeholder { color: var(--muted); }
+.capture-error { font-size: 12px; color: #a33; -webkit-app-region: no-drag; }
 
 /* ---------- Step 5: Claude chat ---------- */
 .chat-head { position: relative; }

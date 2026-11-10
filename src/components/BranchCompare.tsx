@@ -2,6 +2,7 @@ import { useMemo } from "react";
 import type { Card } from "../api";
 import type { Workspace } from "../state/useWorkspace";
 import { diffLines } from "../util/diff";
+import { useEscClose } from "../util/useEscClose";
 import { IconClose, IconFork } from "./Icons";
 
 export function branchGroup(card: Card): string | null {
@@ -13,6 +14,7 @@ export function BranchCompare({ card, ws, onClose }: { card: Card; ws: Workspace
   const group = branchGroup(card);
   const siblings = useMemo(() => (ws.data?.cards ?? []).filter((c) => branchGroup(c) === group).sort((a, b) => a.created.localeCompare(b.created)), [ws.data, group]);
   const baseline = siblings[0];
+  useEscClose(onClose);
 
   const pickWinner = async (winner: Card) => {
     for (const s of siblings) {

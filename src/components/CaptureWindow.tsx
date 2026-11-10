@@ -9,6 +9,7 @@ import { useRef, useState } from "react";
 export function CaptureWindow() {
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
 
   const hide = () => void getCurrentWindow().hide();
@@ -17,10 +18,13 @@ export function CaptureWindow() {
     const title = text.trim();
     if (!title || busy) return;
     setBusy(true);
+    setError(null);
     try {
       await invoke("create_card", { slug: "inbox", card: { title, stage: "cloud" } });
       setText("");
       hide();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(false);
     }
@@ -47,6 +51,7 @@ export function CaptureWindow() {
           }}
           placeholder="What's the idea?"
         />
+        {error && <span className="capture-error">{error}</span>}
       </div>
     </div>
   );

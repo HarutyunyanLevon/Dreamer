@@ -56,6 +56,16 @@ export function createMockApi(): Api {
   add(fish, { title: "Rust-lake biome", body: "Neon bait glowing in oily water.", stage: "sketch", source: "claude", ghost: true }, 350, 260);
   projects.set(fish.slug, fish);
 
+  // `npm run dev` + `?stress=1`: a 500-card project to eyeball pan/zoom/drag performance without Tauri.
+  if (typeof window !== "undefined" && new URLSearchParams(window.location.search).has("stress")) {
+    const stress = seedProject("stress-test", "Stress test (500 cards)");
+    const stages = ["cloud", "sketch", "draft", "pitch"] as const;
+    for (let i = 0; i < 500; i++) {
+      add(stress, { title: `Idea ${i}`, body: "Lorem ipsum dolor sit amet, consectetur adipiscing elit.", stage: stages[i % 4], tags: i % 3 === 0 ? ["tag"] : [] }, (i % 25) * 264, Math.floor(i / 25) * 196);
+    }
+    projects.set(stress.slug, stress);
+  }
+
   const need = (slug: string) => {
     const p = projects.get(slug);
     if (!p) throw new Error(`not found: project ${slug}`);

@@ -2,11 +2,13 @@ import { useEffect, useState } from "react";
 import { api, type TrashItem } from "../api";
 import type { Workspace } from "../state/useWorkspace";
 import { STAGE_LABEL } from "../theme/types";
+import { useEscClose } from "../util/useEscClose";
 import { IconClose, IconTrash } from "./Icons";
 
 export function TrashView({ ws, onClose }: { ws: Workspace; onClose: () => void }) {
   const [items, setItems] = useState<TrashItem[]>([]);
   const [confirmEmpty, setConfirmEmpty] = useState(false);
+  useEscClose(onClose);
 
   const load = () => {
     if (ws.active) void api.listTrash(ws.active).then(setItems);
