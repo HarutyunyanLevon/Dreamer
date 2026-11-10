@@ -115,3 +115,18 @@ pub fn read_media(state: State<AppState>, slug: String, rel: String) -> Result<S
     use base64::Engine;
     with_ws(&state, |ws| ws.read_project_file(&slug, &rel)).map(|bytes| base64::engine::general_purpose::STANDARD.encode(bytes))
 }
+
+#[tauri::command(async)]
+pub fn claude_status() -> crate::sidecar::ClaudeStatus {
+    crate::sidecar::claude_status()
+}
+
+#[tauri::command(async)]
+pub fn claude_send(app: AppHandle, state: State<AppState>, slug: String, id: String, text: String, context: Option<String>) -> Result<()> {
+    crate::sidecar::send_message(&app, &state, slug, id, text, context)
+}
+
+#[tauri::command(async)]
+pub fn claude_interrupt(state: State<AppState>) -> Result<()> {
+    crate::sidecar::interrupt(&state)
+}

@@ -43,6 +43,21 @@ Manual (not re-driven through the GUI this session, since there is no visual too
 4. The global hotkey's popup, the tray icon, and minimize-to-tray behavior (closing the main window should hide it, not quit) need a human pass — I can confirm the shortcut *registers* and the window-close handler is wired, but not that pressing the hotkey from another app actually raises the popup, since that requires OS-level focus changes a terminal can't drive.
 5. `fs::rename` over a file another program has an exclusive lock on (antivirus, Notepad) remains unverified — the atomic-write path (temp file + rename onto the target) avoids the common case of *writing* a locked file, but trash/restore rename the target path itself, which could still fail if something else has it open. This would surface as an error toast; no code change made without being able to reproduce the exact lock scenario.
 
+## Step 5 checks (Windows, real Claude Code install, this session)
+Automated/direct: `cd src-tauri && cargo test` (18 tests, unchanged), `cargo check`, `npm run build` — all clean with the sidecar wiring in place.
+
+Verified against the real sidecar process (not mocked), run standalone with `node sidecar/claude-sidecar.mjs` piped from a small Node test harness, against the actual installed, already-logged-in Claude Code (no API key, no stub):
+1. A plain chat turn: sent `{"type":"user_message", ...}`, received streamed `delta` events followed by `message_done` with a real session id.
+2. The `create_card` tool: asked Claude to call it; got a `tool_request` line, replied with a fake `tool_response` (standing in for Rust), and Claude's final message correctly referenced the card as created and pending Keep/Dismiss.
+3. The `ask_question` tool (`/grill-me`'s building block): asked Claude to create a card and then ask one multiple-choice question about it; got both the `create_card` round trip and a well-formed `question` event with 2 real, on-topic choices, in the same conversation.
+
+Verified with `npm run tauri dev` (same real shell): the app starts and runs with the new `sidecar.rs` module, the tray, and the global shortcut all compiled in — no panic, no error in the dev log.
+
+Not verified live this session: clicking through the actual chat panel inside the WebView2 window (sending a message, watching it stream, clicking a `/grill-me` choice chip, seeing the card update). There is no GUI automation tool for the native Tauri window in this environment — only Chrome-based browser automation, which can't exercise this because the real IPC bridge (`__TAURI_INTERNALS__`) only exists inside the actual window; opening the Vite dev URL in a regular browser tab runs the mock Claude API instead. The two halves that make up that path were each verified independently (above), and the plumbing between them (`claude_send` → `sidecar::send_message` → spawn/write → background-thread read → `emit("claude-event", ...)` ) is structurally the same pattern already proven live for cards (create/watch/reconcile in step 4), but a human click-through pass is recommended before relying on it.
+
+Known gap, not yet fixed: a packaged build's chat panel will not be able to start the sidecar (see docs/decisions.md's step 5 "packaging gap") — `cargo tauri build` is step 9's job, and bundling the sidecar's own `node_modules` or a Node runtime needs to happen before then.
+
 ## Not verified by the author
 - Window minimize/restore, real GPU rendering nuances, and `tauri build`'s installers (not run this session; see step 9).
 - The reduced-motion OS toggle (Windows Settings > Accessibility).
+- The chat panel's live UI (see Step 5 checks above).

@@ -1,6 +1,7 @@
 mod commands;
 mod error;
 mod model;
+mod sidecar;
 mod state;
 mod storage;
 mod watcher;
@@ -62,7 +63,10 @@ pub fn run() {
             let mut tray = TrayIconBuilder::new().menu(&menu).show_menu_on_left_click(true).on_menu_event(|app, event| match event.id.0.as_str() {
                 "show" => show_main_window(app),
                 "capture" => show_capture_window(app),
-                "quit" => app.exit(0),
+                "quit" => {
+                    sidecar::shutdown(&app.state::<state::AppState>());
+                    app.exit(0);
+                }
                 _ => {}
             });
             if let Some(icon) = app.default_window_icon() {
@@ -101,6 +105,9 @@ pub fn run() {
             commands::empty_trash,
             commands::save_media,
             commands::read_media,
+            commands::claude_status,
+            commands::claude_send,
+            commands::claude_interrupt,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Dreamer");

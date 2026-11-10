@@ -27,7 +27,7 @@ function MainApp() {
       <ShaderBackground />
       <CanvasArea ws={ws} />
       <Sidebar projects={ws.projects} active={ws.active} onSelect={(s) => void ws.select(s)} onCreate={(n) => void ws.createProject(n)} />
-      <ChatPanel />
+      <ChatPanel ws={ws} />
       {ws.error && (
         <div className="toast" role="alert">
           <span>{ws.error}</span>

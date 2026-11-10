@@ -323,3 +323,16 @@ button:disabled { cursor: default; }
   border: 1.5px solid var(--accent); background: rgba(255, 255, 255, 0.85); -webkit-app-region: no-drag;
 }
 .capture-input::placeholder { color: var(--muted); }
+
+/* ---------- Step 5: Claude chat ---------- */
+.chat-head { position: relative; }
+.context-clear { position: absolute; right: 16px; top: 16px; min-height: 30px; padding: 0 12px; font-size: 12px; }
+.msg.user { align-self: flex-end; background: var(--accent-soft); }
+.msg.error { background: color-mix(in srgb, #e05a5a 16%, rgba(255, 255, 255, 0.75)); color: #7a2323; }
+.question-chips { padding: 10px 0 0; margin: 0; }
+.chip.on { background: var(--accent); color: #fff; border-color: transparent; }
+.setup-screen { gap: 10px; padding: 4px 20px 16px; }
+.setup-screen code {
+  display: block; background: rgba(255, 255, 255, 0.6); border-radius: 10px; padding: 8px 12px;
+  font-family: ui-monospace, Consolas, monospace; font-size: 13px; color: var(--ink); user-select: text;
+}

@@ -15,6 +15,7 @@ struct AppConfig {
 
 pub struct AppState {
     pub ws: Mutex<Workspace>,
+    pub claude: crate::sidecar::ClaudeState,
     watcher: Mutex<Option<WatchHandle>>,
     config_path: PathBuf,
 }
@@ -38,7 +39,7 @@ impl AppState {
         let root = cfg.workspace_root.map(PathBuf::from).unwrap_or_else(default_root);
         let ws = Workspace::open(&root)?;
         let hotkey = ws.get_settings()?.hotkey;
-        let state = AppState { ws: Mutex::new(ws), watcher: Mutex::new(None), config_path };
+        let state = AppState { ws: Mutex::new(ws), claude: crate::sidecar::ClaudeState::default(), watcher: Mutex::new(None), config_path };
         state.start_watching(app, root);
         Self::register_hotkey(app, &hotkey);
         Ok(state)

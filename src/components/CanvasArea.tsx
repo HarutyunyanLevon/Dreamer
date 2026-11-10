@@ -182,6 +182,7 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
         return;
       }
       setEditing(card.id);
+      ws.setContextCard(card.id);
     },
     [linkMode, linkFrom, ws],
   );

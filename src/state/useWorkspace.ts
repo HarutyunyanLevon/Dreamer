@@ -23,6 +23,7 @@ export function useWorkspace() {
   const [ready, setReady] = useState(false);
   const [canUndo, setCanUndo] = useState(false);
   const [canRedo, setCanRedo] = useState(false);
+  const [contextCardId, setContextCardId] = useState<string | null>(null);
   const activeRef = useRef<string | null>(null);
   const dataRef = useRef<ProjectData | null>(null);
   const loadSeq = useRef(0);
@@ -339,6 +340,8 @@ export function useWorkspace() {
     canRedo,
     undo,
     redo,
+    contextCardId,
+    setContextCard: setContextCardId,
   };
 }
 
