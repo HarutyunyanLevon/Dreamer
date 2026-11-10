@@ -5,24 +5,25 @@
 //! goes through `storage::Workspace` (one writer, atomic writes, ids stay ULIDs).
 
 use crate::error::{AppError, Result};
+use crate::claude_setup::{self, ClaudeStatus, Tool};
 use crate::model::{NewCard, Source};
 use crate::state::AppState;
-use serde::Serialize;
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager};
 
 pub struct ClaudeState {
     sidecar: Mutex<Option<Sidecar>>,
     active_slug: Mutex<String>,
+    pub setup: crate::claude_setup::SetupState,
 }
 
 impl Default for ClaudeState {
     fn default() -> Self {
-        ClaudeState { sidecar: Mutex::new(None), active_slug: Mutex::new("inbox".into()) }
+        ClaudeState { sidecar: Mutex::new(None), active_slug: Mutex::new("inbox".into()), setup: Default::default() }
     }
 }
 
@@ -31,22 +32,22 @@ struct Sidecar {
     stdin: std::process::ChildStdin,
 }
 
-#[derive(Serialize)]
-pub struct ClaudeStatus {
-    pub installed: bool,
-    pub version: Option<String>,
-}
-
-/// A quick, best-effort check: is a `claude` executable on PATH. Login status is not checked
-/// here (there is no cheap, side-effect-free way to ask); a missing login surfaces instead as an
-/// `authentication_failed` error on the first real chat turn, which the chat panel shows inline.
-pub fn claude_status() -> ClaudeStatus {
-    match Command::new("claude").arg("--version").output() {
-        Ok(out) if out.status.success() => {
-            ClaudeStatus { installed: true, version: Some(String::from_utf8_lossy(&out.stdout).trim().to_string()) }
-        }
-        _ => ClaudeStatus { installed: false, version: None },
+/// Full status for the chat panel's setup screen. Also notices when Claude Code has just become
+/// usable (installed + signed in, e.g. after `claude auth login` in a terminal) and drops the
+/// running sidecar so the next message starts a fresh one with the new credential.
+pub fn claude_status(state: &AppState) -> ClaudeStatus {
+    let setup = &state.claude.setup;
+    let job = setup.running();
+    // Don't probe a half-installed CLI while npm is still writing it.
+    if job == Some(crate::claude_setup::JobKind::Install) {
+        return ClaudeStatus { job, ..Default::default() };
     }
+    let mut status = crate::claude_setup::check_status();
+    status.job = job;
+    if setup.note_ready(status.installed && status.logged_in != Some(false)) {
+        shutdown(state);
+    }
+    status
 }
 
 fn sidecar_script_path(app: &AppHandle) -> Result<PathBuf> {
@@ -75,7 +76,9 @@ fn ensure_started(app: &AppHandle, state: &AppState) -> Result<()> {
     // root in dev (two levels up from `sidecar/claude-sidecar.mjs`) lets it see the project's
     // top-level `@anthropic-ai/claude-agent-sdk` install without any extra configuration.
     let cwd = script.parent().and_then(|p| p.parent()).map(|p| p.to_path_buf());
-    let mut cmd = Command::new("node");
+    // Resolve Node the same way as `claude` (a GUI-launched app may not inherit the terminal's PATH).
+    let node = claude_setup::resolve(Tool::Node).unwrap_or_else(|| PathBuf::from("node"));
+    let mut cmd = claude_setup::command(&node);
     cmd.arg(&script).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
     if let Some(cwd) = cwd {
         cmd.current_dir(cwd);

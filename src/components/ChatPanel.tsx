@@ -3,6 +3,7 @@ import type { Card } from "../api";
 import { useClaudeChat, type ChatMessage } from "../state/useClaudeChat";
 import type { Workspace } from "../state/useWorkspace";
 import { STAGE_LABEL } from "../theme/types";
+import { ClaudeSetup, needsSetup } from "./ClaudeSetup";
 import { IconSend } from "./Icons";
 
 const CHIPS = ["/grill-me", "Suggest links", "Summarize", "Give me 3 takes"];
@@ -30,25 +31,8 @@ export function ChatPanel({ ws }: { ws: Workspace }) {
     bodyRef.current?.scrollTo({ top: bodyRef.current.scrollHeight });
   }, [chat.messages]);
 
-  if (chat.status && !chat.status.installed) {
-    return (
-      <aside className="glass chat" aria-label="Claude chat">
-        <header className="chat-head">
-          <div className="orb" aria-hidden="true" />
-          <div>
-            <div className="chat-title">Claude</div>
-            <div className="chat-sub">Not connected</div>
-          </div>
-        </header>
-        <div className="chat-body setup-screen">
-          <p>Dreamer talks to Claude through your local Claude Code install — no API key needed.</p>
-          <p>To connect: install Claude Code, then sign in once from a terminal.</p>
-          <code>npm install -g @anthropic-ai/claude-code</code>
-          <code>claude</code>
-          <p className="chat-sub">Restart Dreamer afterwards; this panel checks again automatically.</p>
-        </div>
-      </aside>
-    );
+  if (chat.status && needsSetup(chat.status)) {
+    return <ClaudeSetup status={chat.status} refresh={chat.refreshStatus} />;
   }
 
   const send = (value: string) => {

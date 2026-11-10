@@ -144,8 +144,28 @@ pub fn delete_custom_theme(state: State<AppState>, id: String) -> Result<()> {
 }
 
 #[tauri::command(async)]
-pub fn claude_status() -> crate::sidecar::ClaudeStatus {
-    crate::sidecar::claude_status()
+pub fn claude_status(state: State<AppState>) -> crate::claude_setup::ClaudeStatus {
+    crate::sidecar::claude_status(&state)
+}
+
+#[tauri::command(async)]
+pub fn claude_install(app: AppHandle, state: State<AppState>) -> Result<()> {
+    crate::claude_setup::start_install(&app, &state.claude.setup)
+}
+
+#[tauri::command(async)]
+pub fn claude_login(app: AppHandle, state: State<AppState>) -> Result<()> {
+    crate::claude_setup::start_login(&app, &state.claude.setup)
+}
+
+#[tauri::command(async)]
+pub fn claude_setup_cancel(state: State<AppState>) {
+    state.claude.setup.cancel();
+}
+
+#[tauri::command(async)]
+pub fn claude_open_login_url(url: String) -> Result<()> {
+    crate::claude_setup::open_login_url(&url)
 }
 
 #[tauri::command(async)]

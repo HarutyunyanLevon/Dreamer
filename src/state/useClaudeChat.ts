@@ -19,9 +19,21 @@ export function useClaudeChat() {
   const [busy, setBusy] = useState(false);
   const busyId = useRef<string | null>(null);
 
-  useEffect(() => {
-    claudeApi.status().then(setStatus).catch(() => setStatus({ installed: false }));
+  const refreshStatus = useCallback(async () => {
+    try {
+      const s = await claudeApi.status();
+      setStatus(s);
+      return s;
+    } catch (e) {
+      const s = { installed: false, error: String(e) };
+      setStatus(s);
+      return s;
+    }
   }, []);
+
+  useEffect(() => {
+    void refreshStatus();
+  }, [refreshStatus]);
 
   useEffect(() => {
     let unsub: (() => void) | undefined;
@@ -79,7 +91,7 @@ export function useClaudeChat() {
     }
   }, []);
 
-  return { status, messages, busy, sendText, answerQuestion, interrupt };
+  return { status, refreshStatus, messages, busy, sendText, answerQuestion, interrupt };
 }
 
 export type ClaudeChat = ReturnType<typeof useClaudeChat>;

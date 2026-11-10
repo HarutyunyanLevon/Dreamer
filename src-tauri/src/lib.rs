@@ -1,3 +1,4 @@
+mod claude_setup;
 mod commands;
 mod error;
 mod model;
@@ -107,6 +108,10 @@ pub fn run() {
             commands::save_media,
             commands::read_media,
             commands::claude_status,
+            commands::claude_install,
+            commands::claude_login,
+            commands::claude_setup_cancel,
+            commands::claude_open_login_url,
             commands::claude_send,
             commands::claude_interrupt,
             commands::export_brief,
