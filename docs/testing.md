@@ -85,3 +85,16 @@ Not verified live: Esc closing each modal, Esc canceling Link-mode, the "no card
 - The reduced-motion OS toggle (Windows Settings > Accessibility).
 - The chat panel's, Compare/Trash views', Theme editor's, and step 8's live UI (see Step 5/6/7/8 checks above).
 - Live 500-card frame-rate measurement (see Step 8 checks above) — argued from code, not measured.
+
+## Step 9 checks (Windows, real shell this session) - final build verification
+1. `cargo tauri build`: produced both `src-tauri/target/release/bundle/nsis/Dreamer_0.1.0_x64-setup.exe` (~2.0 MiB) and `.../msi/Dreamer_0.1.0_x64_en-US.msi` (~2.8 MiB). Clean release build, no warnings.
+2. Installed the NSIS build silently into a throwaway directory (`Dreamer_0.1.0_x64-setup.exe /S /D=C:\DreamerInstallTest`): produced `dreamer.exe`, `uninstall.exe`, and the bundled `sidecar/claude-sidecar.mjs` resource.
+3. Launched the installed `dreamer.exe` directly (pointed at a throwaway `DREAMER_WORKSPACE` via env var) - it created `workspace.json`, `inbox/`, `themes/`, `projects/` on first run, identical to every dev-mode run this session.
+4. Wrote a card file from PowerShell into the installed app's running workspace - the live watcher picked it up and reconciled it into `canvas.json` with a position, same as the dev-mode watcher test in step 4. The app stayed up throughout (checked `Get-Process` before and after).
+5. Closed the app and ran `uninstall.exe /S` - the install directory was removed cleanly.
+6. The MSI installer was built successfully but not separately installed this session (NSIS install/uninstall was taken as representative; both bundles are produced from the same `dreamer.exe` + resources).
+
+Known, documented gap (not fixed, scope decision - see docs/decisions.md step 9): the installed app's chat panel needs Node.js (with the Agent SDK reachable) on the end-user's machine, same as every other step's "Claude sidecar" caveat. Bundling the sidecar's own `node_modules` was attempted and reverted after it made the NSIS build impractically slow (~384MB / ~8,000 files) for a problem it would only have half-solved (a system Node runtime is still required either way).
+
+## Final summary of what was not independently verified by a human/GUI pass
+Everything under "Not driven live" / "Not verified live" in the Step 4 through Step 8 sections above shares one root cause: there is no GUI-automation tool for the native Tauri/WebView2 window in this environment, and the Chrome browser extension needed for `claude-in-chrome` was not connected this session. In every case, the underlying logic was verified by one or more of: a Rust unit test, a direct run of the real sidecar process against the real Claude Code install, or launching the actual compiled/installed binary and driving it through the filesystem (writes, the watcher, the real command round trip) from a real shell. The specific gap in each case is "a human has not clicked the button," not "the code has not been exercised." A full manual click-through pass - every toolbar button, every modal, drag, paste, drop, the global hotkey from another app, tray minimize/restore, and the reduced-motion OS toggle - is recommended before calling this done.

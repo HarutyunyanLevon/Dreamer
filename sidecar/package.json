@@ -1,0 +1,11 @@
+{
+  "name": "dreamer-sidecar",
+  "private": true,
+  "type": "module",
+  "version": "1.0.0",
+  "description": "Bridges Dreamer's chat panel to the Claude Agent SDK. Bundled as a Tauri resource; see src-tauri/src/sidecar.rs.",
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.3.322",
+    "zod": "^4.0.0"
+  }
+}
