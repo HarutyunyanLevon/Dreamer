@@ -105,6 +105,19 @@ export interface ChangeEvent {
   project: string | null;
 }
 
+/** One result of `search_cards` (keyword search over card files; see src-tauri/src/search.rs). */
+export interface SearchHit {
+  id: string;
+  project: string;
+  project_name: string;
+  title: string;
+  stage: StageId;
+  tags: string[];
+  ghost: boolean;
+  snippet: string;
+  score: number;
+}
+
 export interface Api {
   /** "tauri" talks to the Rust core; "mock" is an in-memory stand-in for browser dev. */
   kind: "tauri" | "mock";
@@ -134,6 +147,8 @@ export interface Api {
   onChange(cb: (events: ChangeEvent[]) => void): Promise<() => void>;
   /** Only succeeds once the card has reached Pitch; returns the relative path written under briefs/. */
   exportBrief(slug: string, id: string): Promise<string>;
+  /** Keyword search; `project` omitted = every project. Read-only, no Claude involved. */
+  searchCards(query: string, project?: string, limit?: number): Promise<SearchHit[]>;
   listCustomThemes(): Promise<unknown[]>;
   saveCustomTheme(id: string, theme: unknown): Promise<void>;
   deleteCustomTheme(id: string): Promise<void>;

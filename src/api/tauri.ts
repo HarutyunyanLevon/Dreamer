@@ -41,6 +41,7 @@ export const tauriApi: Api = {
     return `data:${mimeFor(rel)};base64,${b64}`;
   },
   exportBrief: (slug, id) => invoke("export_brief", { slug, id }),
+  searchCards: (query, project, limit) => invoke("search_cards", { query, project: project ?? null, limit: limit ?? null }),
   listCustomThemes: () => invoke("list_custom_themes"),
   saveCustomTheme: (id, theme) => invoke("save_custom_theme", { id, theme }),
   deleteCustomTheme: (id) => invoke("delete_custom_theme", { id }),

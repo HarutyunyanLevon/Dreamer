@@ -9,7 +9,10 @@
 //        {type:"delta", id, text}                      -- streamed assistant text
 //        {type:"question", id, question, choices}       -- ask_question tool fired
 //        {type:"message_done", id, text, sessionId, isError}
-//        {type:"tool_request", reqId, tool, input}      -- create_card; Rust must reply
+//        {type:"tool_request", reqId, tool, input}      -- Rust must reply (create_card, search_cards,
+//                                                          read_card, list_related, propose_link)
+//        {type:"search", id, query, results}            -- search_cards ran (chat shows result chips)
+//        {type:"link_proposal", id, slug, from, to, label, reason}  -- a ghost link to Keep/Dismiss
 //        {type:"error", id, message}
 import { createInterface } from "node:readline";
 import { createSdkMcpServer, query, tool } from "@anthropic-ai/claude-agent-sdk";
@@ -71,22 +74,104 @@ const askQuestionTool = tool(
   },
 );
 
+const text = (v) => ({ content: [{ type: "text", text: typeof v === "string" ? v : JSON.stringify(v, null, 1) }] });
+const fail = (e) => ({ content: [{ type: "text", text: `Error: ${e.message}` }], isError: true });
+
+// ---- Read-only retrieval tools. Rust answers them from its in-memory index; none of them can
+// change a card file. ----
+
+const searchCardsTool = tool(
+  "search_cards",
+  "Keyword search over ALL of the user's idea cards (title, tags, custom fields, body; accent-insensitive, " +
+    "light stemming). Returns id, title, stage, tags, project, a snippet and a score, best first. Ghost cards " +
+    "(unkept suggestions) are included and marked ghost:true. Use short keyword queries, not sentences; try " +
+    "synonyms if nothing comes back.",
+  {
+    query: z.string().describe("A few keywords"),
+    limit: z.number().int().min(1).max(25).optional().describe("Max results (default 8)"),
+    scope: z.enum(["all", "project"]).optional().describe("'all' projects (default) or only the open 'project'"),
+  },
+  async (args) => {
+    try {
+      const results = await requestTool("search_cards", { query: args.query, limit: args.limit ?? 8, scope: args.scope ?? "all" });
+      if (currentId) {
+        send({ type: "search", id: currentId, query: args.query, results: results.map((r) => ({ id: r.id, title: r.title, project: r.project, projectName: r.project_name, stage: r.stage, ghost: r.ghost })) });
+      }
+      return text(results.length ? results : "No cards matched. Try other keywords before concluding the user has no such idea.");
+    } catch (e) {
+      return fail(e);
+    }
+  },
+);
+
+const readCardTool = tool(
+  "read_card",
+  "Read one card in full by id: title, stage, tags, fields, body, and its links (with the linked cards' titles).",
+  { id: z.string() },
+  async (args) => {
+    try {
+      return text(await requestTool("read_card", { id: args.id }));
+    } catch (e) {
+      return fail(e);
+    }
+  },
+);
+
+const listRelatedTool = tool(
+  "list_related",
+  "List cards related to a card: ones it links to, ones linking to it (same project), and cards sharing tags " +
+    "(any project), strongest first, with the reason for each.",
+  { id: z.string() },
+  async (args) => {
+    try {
+      return text(await requestTool("list_related", { id: args.id }));
+    } catch (e) {
+      return fail(e);
+    }
+  },
+);
+
+const proposeLinkTool = tool(
+  "propose_link",
+  "Propose a link between two cards in the open project. It appears as a dashed ghost link the user must Keep " +
+    "or Dismiss; it is NOT created. Only propose links you can justify from the cards' content.",
+  {
+    from: z.string().describe("Card id the link starts from"),
+    to: z.string().describe("Card id the link points to"),
+    label: z.string().max(40).optional().describe("2-4 word label for the line, e.g. 'same boss', 'inverts'"),
+    reason: z.string().optional().describe("One sentence on why they connect"),
+  },
+  async (args) => {
+    try {
+      const ok = await requestTool("propose_link", { from: args.from, to: args.to });
+      send({ type: "link_proposal", id: currentId, slug: ok.slug, from: args.from, to: args.to, label: args.label, reason: args.reason });
+      return text(`Proposed a ghost link "${ok.fromTitle}" → "${ok.toTitle}". It awaits the user's Keep/Dismiss.`);
+    } catch (e) {
+      return fail(e);
+    }
+  },
+);
+
 const dreamerServer = createSdkMcpServer({
   name: "dreamer",
   version: "1.0.0",
-  tools: [createCardTool, askQuestionTool],
+  tools: [createCardTool, askQuestionTool, searchCardsTool, readCardTool, listRelatedTool, proposeLinkTool],
 });
 
 const SYSTEM_PROMPT =
   "You are Claude, embedded as a creative partner inside Dreamer, a desktop app for collecting and deepening game " +
-  "ideas. Be a chatty, encouraging collaborator, not a project manager. You can propose new idea cards with " +
-  "create_card (always created as a ghost suggestion the user must Keep) and nothing else — you have no file, " +
-  "shell or delete access, by design, so the user's plain-file workspace stays theirs. " +
+  "ideas. Be a chatty, encouraging collaborator, not a project manager. " +
+  "You can READ the user's cards with search_cards, read_card and list_related. Before answering questions about " +
+  "the user's ideas, search the cards. Cite cards by title. Never invent cards: if a search finds nothing, say so. " +
+  "The only things you can create are suggestions the user must accept: create_card makes a ghost card, " +
+  "propose_link makes a ghost link. You have no file, shell, edit or delete access, by design, so the user's " +
+  "plain-file workspace stays theirs. " +
   "When the user asks for /grill-me, use ask_question to ask exactly ONE multiple-choice question at a time about " +
   "the card in context, then stop and wait for their answer before asking the next one; keep questions concrete " +
-  "and fun, in the voice of someone who loves the idea and wants it sharper. When given 'Suggest links', look at " +
-  "the other cards mentioned in context and suggest 1-3 concrete connections in plain text (you cannot create " +
-  "links directly). When given 'Give me 3 takes', propose three distinctly different create_card calls.";
+  "and fun, in the voice of someone who loves the idea and wants it sharper. When the user asks for /related, use " +
+  "list_related and search_cards (scope 'project') on the card in context, read promising candidates, then call " +
+  "propose_link for the 1-5 strongest connections, each with a short label and reason, and summarize them briefly. " +
+  "When given 'Give me 3 takes', propose three distinctly different create_card calls.";
 
 // A queue that the stdin reader pushes into and the query's async-iterable prompt pulls from,
 // so one long-lived streaming session can carry many chat turns (and survive interrupts).
@@ -118,7 +203,14 @@ const q = query({
     systemPrompt: { type: "custom", prompt: SYSTEM_PROMPT },
     mcpServers: { dreamer: dreamerServer },
     tools: [],
-    allowedTools: ["mcp__dreamer__create_card", "mcp__dreamer__ask_question"],
+    allowedTools: [
+      "mcp__dreamer__create_card",
+      "mcp__dreamer__ask_question",
+      "mcp__dreamer__search_cards",
+      "mcp__dreamer__read_card",
+      "mcp__dreamer__list_related",
+      "mcp__dreamer__propose_link",
+    ],
     permissionMode: "bypassPermissions",
     includePartialMessages: true,
   },

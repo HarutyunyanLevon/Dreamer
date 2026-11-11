@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { claudeApi, type ClaudeStatus } from "../api/claudeIndex";
+import { claudeApi, type ClaudeEvent, type ClaudeStatus, type SearchResultRef } from "../api/claudeIndex";
 
 let seq = 0;
 const nextId = () => `c${Date.now()}-${++seq}`;
@@ -11,9 +11,15 @@ export interface ChatMessage {
   streaming?: boolean;
   isError?: boolean;
   question?: { question: string; choices: string[]; answered?: string };
+  /** search_cards calls Claude made while writing this reply (shown as result chips). */
+  searches?: { query: string; results: SearchResultRef[] }[];
 }
 
-export function useClaudeChat() {
+type LinkProposal = Extract<ClaudeEvent, { type: "link_proposal" }>;
+
+export function useClaudeChat(opts: { onLinkProposal?: (p: LinkProposal) => void } = {}) {
+  const onLinkProposal = useRef(opts.onLinkProposal);
+  onLinkProposal.current = opts.onLinkProposal;
   const [status, setStatus] = useState<ClaudeStatus | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [busy, setBusy] = useState(false);
@@ -48,6 +54,11 @@ export function useClaudeChat() {
             busyId.current = null;
             setBusy(false);
           }
+        } else if (e.type === "search") {
+          const entry = { query: e.query, results: e.results };
+          setMessages((prev) => prev.map((m) => (m.id === e.id ? { ...m, searches: [...(m.searches ?? []), entry] } : m)));
+        } else if (e.type === "link_proposal") {
+          onLinkProposal.current?.(e);
         } else if (e.type === "question") {
           setMessages((prev) => [...prev, { id: e.id, role: "claude", text: "", question: { question: e.question, choices: e.choices } }]);
         } else if (e.type === "error") {

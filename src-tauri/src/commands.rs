@@ -177,3 +177,13 @@ pub fn claude_send(app: AppHandle, state: State<AppState>, slug: String, id: Str
 pub fn claude_interrupt(state: State<AppState>) -> Result<()> {
     crate::sidecar::interrupt(&state)
 }
+
+/// Keyword search over card files (title > tags > fields > body). `project: None` searches
+/// every project. Read-only; used by the Ctrl+K box and, via the sidecar, by Claude.
+#[tauri::command(async)]
+pub fn search_cards(state: State<AppState>, query: String, project: Option<String>, limit: Option<usize>) -> Result<Vec<crate::search::SearchHit>> {
+    if let Some(p) = &project {
+        crate::storage::check_slug(p)?;
+    }
+    state.with_search(|idx| idx.search(&query, project.as_deref(), limit.unwrap_or(20)))
+}

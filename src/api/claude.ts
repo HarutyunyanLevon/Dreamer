@@ -19,11 +19,23 @@ export type SetupEvent =
   | { type: "url"; kind: SetupJob; url: string }
   | { type: "done"; kind: SetupJob; ok: boolean; cancelled: boolean; message: string };
 
+/** A search_cards result as shown in chat (a chip that focuses the card). */
+export interface SearchResultRef {
+  id: string;
+  title: string;
+  project: string;
+  projectName: string;
+  stage: string;
+  ghost: boolean;
+}
+
 export type ClaudeEvent =
   | { type: "delta"; id: string; text: string }
   | { type: "question"; id: string; question: string; choices: string[] }
   | { type: "message_done"; id: string; text: string; sessionId?: string; isError?: boolean }
   | { type: "error"; id: string | null; message: string }
+  | { type: "search"; id: string; query: string; results: SearchResultRef[] }
+  | { type: "link_proposal"; id: string | null; slug: string; from: string; to: string; label?: string; reason?: string }
   | { type: "stderr"; message: string }
   | { type: "ready" };
 

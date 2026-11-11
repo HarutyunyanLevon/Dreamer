@@ -2,6 +2,7 @@ mod claude_setup;
 mod commands;
 mod error;
 mod model;
+mod search;
 mod sidecar;
 mod state;
 mod storage;
@@ -115,6 +116,7 @@ pub fn run() {
             commands::claude_send,
             commands::claude_interrupt,
             commands::export_brief,
+            commands::search_cards,
             commands::list_custom_themes,
             commands::save_custom_theme,
             commands::delete_custom_theme,

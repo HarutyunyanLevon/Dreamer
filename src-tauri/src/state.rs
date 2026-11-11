@@ -3,7 +3,7 @@ use crate::storage::Workspace;
 use crate::watcher::{self, WatchHandle};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_global_shortcut::GlobalShortcutExt;
 
@@ -16,6 +16,8 @@ struct AppConfig {
 pub struct AppState {
     pub ws: Mutex<Workspace>,
     pub claude: crate::sidecar::ClaudeState,
+    /// In-memory card search index; the file watcher marks projects dirty (see search.rs).
+    pub search: Arc<Mutex<crate::search::SearchIndex>>,
     watcher: Mutex<Option<WatchHandle>>,
     config_path: PathBuf,
 }
@@ -39,7 +41,13 @@ impl AppState {
         let root = cfg.workspace_root.map(PathBuf::from).unwrap_or_else(default_root);
         let ws = Workspace::open(&root)?;
         let hotkey = ws.get_settings()?.hotkey;
-        let state = AppState { ws: Mutex::new(ws), claude: crate::sidecar::ClaudeState::default(), watcher: Mutex::new(None), config_path };
+        let state = AppState {
+            ws: Mutex::new(ws),
+            claude: crate::sidecar::ClaudeState::default(),
+            search: Arc::new(Mutex::new(crate::search::SearchIndex::default())),
+            watcher: Mutex::new(None),
+            config_path,
+        };
         state.start_watching(app, root);
         Self::register_hotkey(app, &hotkey);
         Ok(state)
@@ -49,9 +57,25 @@ impl AppState {
         self.ws.lock().map(|w| w.root == default_root()).unwrap_or(false)
     }
 
+    /// Runs `f` on the search index, pointed at the current workspace root.
+    pub fn with_search<T>(&self, f: impl FnOnce(&mut crate::search::SearchIndex) -> T) -> Result<T> {
+        let root = self.ws.lock().map_err(|_| AppError::Invalid("workspace lock poisoned".into()))?.root.clone();
+        let mut idx = self.search.lock().map_err(|_| AppError::Invalid("search index lock poisoned".into()))?;
+        idx.set_root(&root);
+        Ok(f(&mut idx))
+    }
+
     fn start_watching(&self, app: &AppHandle, root: PathBuf) {
         let handle = app.clone();
+        let search = self.search.clone();
         match watcher::start(root, move |events| {
+            if let Ok(mut idx) = search.lock() {
+                for e in &events {
+                    if e.scope == "project" {
+                        idx.mark_dirty(e.project.as_deref());
+                    }
+                }
+            }
             let _ = handle.emit("workspace-changed", events);
         }) {
             Ok(w) => *self.watcher.lock().unwrap() = Some(w),
@@ -64,6 +88,9 @@ impl AppState {
         let ws = Workspace::open(&root)?;
         *self.watcher.lock().unwrap() = None; // drop the old watcher first
         *self.ws.lock().map_err(|_| AppError::Invalid("workspace lock poisoned".into()))? = ws;
+        if let Ok(mut idx) = self.search.lock() {
+            idx.set_root(&root);
+        }
         self.start_watching(app, root.clone());
         let cfg = AppConfig { workspace_root: Some(root.display().to_string()) };
         if let Some(dir) = self.config_path.parent() {

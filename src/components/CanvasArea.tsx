@@ -1,6 +1,6 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
 import { api, type Card, type ProjectData } from "../api";
-import type { Workspace } from "../state/useWorkspace";
+import type { GhostLink, Workspace } from "../state/useWorkspace";
 import { useTheme } from "../theme/ThemeContext";
 import { STAGES, STAGE_LABEL, type StageId } from "../theme/types";
 import { useEscClose } from "../util/useEscClose";
@@ -13,6 +13,10 @@ const CARD_W = 236;
 const CARD_H = 150;
 const MIN_ZOOM = 0.2;
 const MAX_ZOOM = 3;
+/** Floating panels over the canvas (sidebar left, chat right, incl. margins), to center focused cards in the free column. */
+const LEFT_PANEL = 240;
+const RIGHT_PANEL = 356;
+const FOCUS_ZOOM = 1.15;
 
 export function CanvasArea({ ws }: { ws: Workspace }) {
   const { data } = ws;
@@ -27,6 +31,8 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
   const rootRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const sizeRef = useRef({ w: 1200, h: 800 });
+  const [cameraAnim, setCameraAnim] = useState(false);
+  const cameraAnimTimer = useRef<number | undefined>(undefined);
 
   const toggle = (s: StageId) =>
     setFilter((prev) => {
@@ -150,6 +156,28 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
     return () => window.removeEventListener("keydown", onKey);
   }, [ws, linkMode]);
 
+  // Pan/zoom to a card asked for by a search result (chat chip or Ctrl+K), then select it.
+  const { focusRequest, clearFocus, setError } = ws;
+  useEffect(() => {
+    if (!focusRequest || !data || data.slug !== focusRequest.slug) return;
+    const card = data.cards.find((c) => c.id === focusRequest.id);
+    const pos = data.canvas.cards[focusRequest.id];
+    clearFocus();
+    if (!card || !pos) {
+      setError("That card isn't on this canvas any more (it may have been trashed).");
+      return;
+    }
+    if (!filter.has(card.stage)) setFilter((prev) => new Set(prev).add(card.stage));
+    const { w, h } = sizeRef.current;
+    const zoom = Math.min(MAX_ZOOM, Math.max(FOCUS_ZOOM, vp.zoom));
+    const cx = w > LEFT_PANEL + RIGHT_PANEL + 200 ? (LEFT_PANEL + w - RIGHT_PANEL) / 2 : w / 2;
+    setCameraAnim(true);
+    ws.setViewport({ x: cx - (pos.x + CARD_W / 2) * zoom, y: h / 2 - (pos.y + CARD_H / 2) * zoom, zoom });
+    // Not an effect cleanup: the viewport change re-renders right away and must not cancel this.
+    window.clearTimeout(cameraAnimTimer.current);
+    cameraAnimTimer.current = window.setTimeout(() => setCameraAnim(false), 500);
+  }, [focusRequest, data, filter, vp.zoom, ws, clearFocus, setError]);
+
   const fit = useCallback(() => {
     if (!data || onScreen.length === 0) {
       if (data) ws.setViewport({ x: sizeRef.current.w / 2, y: sizeRef.current.h / 2, zoom: 1 });
@@ -218,7 +246,7 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
   return (
     <main
       ref={rootRef}
-      className="canvas"
+      className={"canvas" + (cameraAnim ? " camera-anim" : "")}
       aria-label="Canvas"
       style={camera}
       onPointerDown={onBackgroundPointerDown}
@@ -229,7 +257,8 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
     >
       <div className="grid" />
       <div className="world">
-        {data && <LinkLayer cards={onScreen} canvas={data.canvas} />}
+        {data && <LinkLayer cards={onScreen} canvas={data.canvas} ghosts={ws.ghostLinks} />}
+        {data && <GhostLinkControls cards={onScreen} canvas={data.canvas} ghosts={ws.ghostLinks} ws={ws} />}
         {data &&
           onScreen.map((c) => (
             <CardView
@@ -239,6 +268,7 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
               ws={ws}
               linking={linkMode}
               isLinkSource={linkFrom === c.id}
+              selected={ws.contextCardId === c.id}
               onOpen={() => onCardClick(c)}
             />
           ))}
@@ -357,8 +387,45 @@ function Warnings({ data }: { data: ProjectData }) {
   );
 }
 
-function LinkLayer({ cards, canvas }: { cards: Card[]; canvas: ProjectData["canvas"] }) {
+const center = (p: { x: number; y: number }) => ({ x: p.x + CARD_W / 2, y: p.y + CARD_H / 2 });
+
+/** Ghost links whose two cards are both on screen, with their endpoints. */
+function placedGhosts(cards: Card[], canvas: ProjectData["canvas"], ghosts: GhostLink[]) {
+  const ids = new Set(cards.map((c) => c.id));
+  return ghosts.flatMap((g) => {
+    const a = canvas.cards[g.from];
+    const b = canvas.cards[g.to];
+    if (!a || !b || !ids.has(g.from) || !ids.has(g.to)) return [];
+    const p1 = center(a);
+    const p2 = center(b);
+    return [{ g, x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y }];
+  });
+}
+
+/** Keep/Dismiss pill at the midpoint of each proposed (ghost) link. */
+function GhostLinkControls({ cards, canvas, ghosts, ws }: { cards: Card[]; canvas: ProjectData["canvas"]; ghosts: GhostLink[]; ws: Workspace }) {
+  return (
+    <>
+      {placedGhosts(cards, canvas, ghosts).map(({ g, x1, y1, x2, y2 }) => (
+        <div
+          key={g.key}
+          className="ghost-link-ctl"
+          style={{ left: (x1 + x2) / 2, top: (y1 + y2) / 2 }}
+          title={g.reason}
+          onPointerDown={(e) => e.stopPropagation()}
+        >
+          <span className="ghost-link-label">{g.label || "Claude suggests a link"}</span>
+          <button type="button" className="btn primary" onClick={() => void ws.keepGhostLink(g)}>Keep</button>
+          <button type="button" className="btn" onClick={() => ws.dismissGhostLink(g)}>Dismiss</button>
+        </div>
+      ))}
+    </>
+  );
+}
+
+function LinkLayer({ cards, canvas, ghosts }: { cards: Card[]; canvas: ProjectData["canvas"]; ghosts: GhostLink[] }) {
   const byId = useMemo(() => new Map(cards.map((c) => [c.id, c])), [cards]);
+  const ghostLines = placedGhosts(cards, canvas, ghosts);
   const lines: { x1: number; y1: number; x2: number; y2: number; label?: string; key: string }[] = [];
   for (const c of cards) {
     const from = canvas.cards[c.id];
@@ -376,7 +443,7 @@ function LinkLayer({ cards, canvas }: { cards: Card[]; canvas: ProjectData["canv
       });
     }
   }
-  if (lines.length === 0) return null;
+  if (lines.length === 0 && ghostLines.length === 0) return null;
   const pad = 2000;
   return (
     <svg className="link-layer" width={pad * 2} height={pad * 2} style={{ left: -pad, top: -pad }}>
@@ -391,6 +458,9 @@ function LinkLayer({ cards, canvas }: { cards: Card[]; canvas: ProjectData["canv
             )}
           </g>
         ))}
+        {ghostLines.map(({ g, x1, y1, x2, y2 }) => (
+          <line key={`ghost-${g.key}`} x1={x1} y1={y1} x2={x2} y2={y2} className="link-line ghost-link" />
+        ))}
       </g>
     </svg>
   );
@@ -402,6 +472,7 @@ const CardView = memo(function CardView({
   ws,
   linking,
   isLinkSource,
+  selected,
   onOpen,
 }: {
   card: Card;
@@ -409,6 +480,7 @@ const CardView = memo(function CardView({
   ws: Workspace;
   linking: boolean;
   isLinkSource: boolean;
+  selected: boolean;
   onOpen: () => void;
 }) {
   const [imgUrl, setImgUrl] = useState<string | null>(null);
@@ -460,7 +532,7 @@ const CardView = memo(function CardView({
   const url = typeof card.fields.url === "string" ? card.fields.url : null;
   return (
     <article
-      className={`card stage-${card.stage}` + (card.ghost ? " ghost" : "") + (isLinkSource ? " link-source" : "") + (linking ? " linkable" : "")}
+      className={`card stage-${card.stage}` + (card.ghost ? " ghost" : "") + (isLinkSource ? " link-source" : "") + (linking ? " linkable" : "") + (selected ? " selected" : "")}
       style={{ left: pos.x, top: pos.y }}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}

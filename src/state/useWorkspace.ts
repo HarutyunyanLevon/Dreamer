@@ -8,6 +8,26 @@ function message(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
+/**
+ * A link Claude proposed (via /related). Lives only in memory until the user clicks Keep, which
+ * writes a real link to the card file; Dismiss drops it. Never written to disk as a proposal.
+ */
+export interface GhostLink {
+  key: string;
+  slug: string;
+  from: string;
+  to: string;
+  label?: string;
+  reason?: string;
+}
+
+/** A request for the canvas to pan/zoom to a card (from a search chip or Ctrl+K). */
+export interface FocusRequest {
+  id: string;
+  slug: string;
+  n: number;
+}
+
 interface UndoEntry {
   label: string;
   undo: () => Promise<void>;
@@ -24,6 +44,9 @@ export function useWorkspace() {
   const [canUndo, setCanUndo] = useState(false);
   const [canRedo, setCanRedo] = useState(false);
   const [contextCardId, setContextCardId] = useState<string | null>(null);
+  const [ghostLinks, setGhostLinks] = useState<GhostLink[]>([]);
+  const [focusRequest, setFocusRequest] = useState<FocusRequest | null>(null);
+  const focusSeq = useRef(0);
   const activeRef = useRef<string | null>(null);
   const dataRef = useRef<ProjectData | null>(null);
   const loadSeq = useRef(0);
@@ -333,6 +356,68 @@ export function useWorkspace() {
     [updateCard],
   );
 
+  // ----- ghost links (Claude's /related proposals) -----
+
+  const addGhostLink = useCallback((g: Omit<GhostLink, "key">) => {
+    const key = `${g.slug}:${g.from}->${g.to}`;
+    setGhostLinks((prev) => (prev.some((x) => x.key === key) ? prev : [...prev, { ...g, key }]));
+  }, []);
+
+  const dropGhostLink = useCallback((key: string) => setGhostLinks((prev) => prev.filter((x) => x.key !== key)), []);
+
+  const keepGhostLink = useCallback(
+    async (g: GhostLink) => {
+      const from = dataRef.current?.cards.find((c) => c.id === g.from);
+      if (!from) return;
+      dropGhostLink(g.key);
+      if (from.links.some((l) => l.to === g.to)) return;
+      const before = from.links;
+      const after: Link[] = [...before, { to: g.to, label: g.label }];
+      const ok = await run(() => api.updateCard(g.slug, g.from, { links: after }));
+      if (!ok) {
+        addGhostLink(g);
+        return;
+      }
+      pushUndo({
+        label: "keep link",
+        undo: async () => {
+          await api.updateCard(g.slug, g.from, { links: before });
+          addGhostLink(g);
+        },
+        redo: async () => {
+          await api.updateCard(g.slug, g.from, { links: after });
+          dropGhostLink(g.key);
+        },
+      });
+    },
+    [run, pushUndo, addGhostLink, dropGhostLink],
+  );
+
+  const dismissGhostLink = useCallback(
+    (g: GhostLink) => {
+      dropGhostLink(g.key);
+      pushUndo({
+        label: "dismiss link",
+        undo: async () => addGhostLink(g),
+        redo: async () => dropGhostLink(g.key),
+      });
+    },
+    [pushUndo, addGhostLink, dropGhostLink],
+  );
+
+  // ----- focus a card (search results) -----
+
+  const focusCard = useCallback(
+    async (id: string, slug?: string) => {
+      const target = slug ?? activeRef.current;
+      if (!target) return;
+      if (target !== activeRef.current) await select(target);
+      setContextCardId(id);
+      setFocusRequest({ id, slug: target, n: ++focusSeq.current });
+    },
+    [select],
+  );
+
   return {
     ready,
     projects,
@@ -364,6 +449,14 @@ export function useWorkspace() {
     redo,
     contextCardId,
     setContextCard: setContextCardId,
+    ghostLinks: ghostLinks.filter((g) => g.slug === active),
+    addGhostLink,
+    keepGhostLink,
+    dismissGhostLink,
+    focusRequest,
+    focusCard,
+    clearFocus: () => setFocusRequest(null),
+    setError,
   };
 }
 

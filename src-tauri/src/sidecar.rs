@@ -8,6 +8,7 @@ use crate::error::{AppError, Result};
 use crate::claude_setup::{self, ClaudeStatus, Tool};
 use crate::model::{NewCard, Source};
 use crate::state::AppState;
+use serde::Serialize;
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
@@ -133,6 +134,14 @@ fn handle_sidecar_message(app: &AppHandle, msg: Value) {
     let _ = app.emit("claude-event", msg);
 }
 
+fn to_json<T: Serialize>(v: &T, what: &str) -> Result<Value> {
+    serde_json::to_value(v).map_err(|e| AppError::Parse { context: what.into(), message: e.to_string() })
+}
+
+fn active_slug(state: &AppState) -> Result<String> {
+    Ok(state.claude.active_slug.lock().map_err(|_| AppError::Invalid("sidecar lock poisoned".into()))?.clone())
+}
+
 fn run_tool(state: &AppState, tool: &str, input: Value) -> Result<Value> {
     match tool {
         "create_card" => {
@@ -150,9 +159,62 @@ fn run_tool(state: &AppState, tool: &str, input: Value) -> Result<Value> {
                 branch,
                 ..Default::default()
             };
-            let guard = state.ws.lock().map_err(|_| AppError::Invalid("workspace lock poisoned".into()))?;
-            let card = guard.create_card(&slug, new_card)?;
-            serde_json::to_value(&card).map_err(|e| AppError::Parse { context: "create_card result".into(), message: e.to_string() })
+            let card = {
+                let guard = state.ws.lock().map_err(|_| AppError::Invalid("workspace lock poisoned".into()))?;
+                guard.create_card(&slug, new_card)?
+            };
+            // Don't wait for the watcher's debounce: a search right after this should see it.
+            if let Ok(mut idx) = state.search.lock() {
+                idx.mark_dirty(Some(&slug));
+            }
+            to_json(&card, "create_card result")
+        }
+        // ---- read-only retrieval tools: nothing below writes to disk ----
+        "search_cards" => {
+            let query = input.get("query").and_then(Value::as_str).unwrap_or_default();
+            let limit = input.get("limit").and_then(Value::as_u64).unwrap_or(8) as usize;
+            let project = match input.get("scope").and_then(Value::as_str) {
+                Some("project") => Some(active_slug(state)?),
+                _ => None,
+            };
+            let hits = state.with_search(|idx| idx.search(query, project.as_deref(), limit.min(25)))?;
+            to_json(&hits, "search results")
+        }
+        "read_card" => {
+            let id = input.get("id").and_then(Value::as_str).unwrap_or_default();
+            crate::storage::check_id(id)?;
+            let slug = active_slug(state)?;
+            state.with_search(|idx| {
+                let (project, card) = idx.find(id, Some(&slug)).ok_or_else(|| AppError::NotFound(format!("card {id} (it may have been trashed)")))?;
+                let mut v = to_json(&card, "card")?;
+                v["project"] = json!(project);
+                v["links"] = json!(idx.describe_links(&project, &card.meta.links));
+                Ok(v)
+            })?
+        }
+        "list_related" => {
+            let id = input.get("id").and_then(Value::as_str).unwrap_or_default();
+            crate::storage::check_id(id)?;
+            let related = state.with_search(|idx| idx.related(id, 20))?.ok_or_else(|| AppError::NotFound(format!("card {id}")))?;
+            to_json(&related, "related cards")
+        }
+        // Only *proposes* a link: validated here, then shown in the UI as a dashed ghost link the
+        // user must Keep. Nothing is written to any card file.
+        "propose_link" => {
+            let from = input.get("from").and_then(Value::as_str).unwrap_or_default();
+            let to = input.get("to").and_then(Value::as_str).unwrap_or_default();
+            crate::storage::check_id(from)?;
+            crate::storage::check_id(to)?;
+            if from == to {
+                return Err(AppError::Invalid("a card can't link to itself".into()));
+            }
+            let slug = active_slug(state)?;
+            let from_card = state.ws.lock().map_err(|_| AppError::Invalid("workspace lock poisoned".into()))?.read_card(&slug, from)?;
+            let to_card = state.ws.lock().map_err(|_| AppError::Invalid("workspace lock poisoned".into()))?.read_card(&slug, to)?;
+            if from_card.meta.links.iter().any(|l| l.to == to) {
+                return Err(AppError::Invalid(format!("\"{}\" already links to \"{}\"", from_card.meta.title, to_card.meta.title)));
+            }
+            Ok(json!({ "slug": slug, "from": from, "to": to, "fromTitle": from_card.meta.title, "toTitle": to_card.meta.title }))
         }
         other => Err(AppError::Invalid(format!("unknown tool {other:?}"))),
     }

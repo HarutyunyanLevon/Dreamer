@@ -1,4 +1,21 @@
-import type { Api, Canvas, Card, ChangeEvent, NewCard, ProjectData, ProjectSummary, Settings, TrashItem } from "./types";
+import type { Api, Canvas, Card, ChangeEvent, NewCard, ProjectData, ProjectSummary, SearchHit, Settings, TrashItem } from "./types";
+
+/** A rough browser-only stand-in for the Rust scorer (title > tags > fields > body). */
+const foldText = (s: string) => s.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase();
+function mockScore(c: Card, words: string[]): number {
+  const title = foldText(c.title);
+  const tags = foldText(c.tags.join(" "));
+  const fields = foldText(Object.values(c.fields).filter((v) => typeof v === "string").join(" "));
+  const body = foldText(c.body);
+  let total = 0;
+  let matched = 0;
+  for (const w of words) {
+    const s = (title.includes(w) ? 10 : 0) + (tags.includes(w) ? 6 : 0) + (fields.includes(w) ? 4 : 0) + (body.includes(w) ? 1 : 0);
+    if (s) matched++;
+    total += s;
+  }
+  return matched ? total * (0.4 + 0.6 * (matched / words.length) ** 2) : 0;
+}
 
 /**
  * In-memory stand-in so `npm run dev` (plain browser) and screenshots work without the Rust core.
@@ -180,6 +197,21 @@ export function createMockApi(): Api {
       if (!c) throw new Error(`not found: card ${id}`);
       if (c.stage !== "pitch") throw new Error("brief export unlocks when the card reaches Pitch");
       return `briefs/${id}.md`;
+    },
+    searchCards: async (query, project, limit = 20) => {
+      const words = foldText(query).split(/[^\p{L}\p{N}]+/u).filter(Boolean).map((w) => w.replace(/(ing|ed|es|s)$/, ""));
+      if (!words.length) return [];
+      const hits: SearchHit[] = [];
+      for (const p of projects.values()) {
+        if (project && p.slug !== project) continue;
+        for (const c of p.cards.values()) {
+          const score = mockScore(c, words);
+          if (score > 0) {
+            hits.push({ id: c.id, project: p.slug, project_name: p.name, title: c.title, stage: c.stage, tags: c.tags, ghost: c.ghost, snippet: c.body.slice(0, 200), score });
+          }
+        }
+      }
+      return hits.sort((a, b) => b.score - a.score).slice(0, limit);
     },
     listCustomThemes: async () => [...customThemes.values()],
     saveCustomTheme: async (id, theme) => {

@@ -6,7 +6,9 @@ import { STAGE_LABEL } from "../theme/types";
 import { ClaudeSetup, needsSetup } from "./ClaudeSetup";
 import { IconSend } from "./Icons";
 
-const CHIPS = ["/grill-me", "Suggest links", "Summarize", "Give me 3 takes"];
+const CHIPS = ["/grill-me", "/related", "Summarize", "Give me 3 takes"];
+/** Chips that only make sense about a specific card. */
+const NEEDS_CARD = new Set(["/related"]);
 
 function formatContext(ws: Workspace, card: Card | null): string | undefined {
   const projectName = ws.data?.meta.name;
@@ -21,7 +23,9 @@ function formatContext(ws: Workspace, card: Card | null): string | undefined {
 }
 
 export function ChatPanel({ ws }: { ws: Workspace }) {
-  const chat = useClaudeChat();
+  const chat = useClaudeChat({
+    onLinkProposal: (p) => ws.addGhostLink({ slug: p.slug, from: p.from, to: p.to, label: p.label, reason: p.reason }),
+  });
   const [text, setText] = useState("");
   const bodyRef = useRef<HTMLDivElement | null>(null);
 
@@ -42,6 +46,9 @@ export function ChatPanel({ ws }: { ws: Workspace }) {
     if (display === "Give me 3 takes" && contextCard) {
       const group = crypto.randomUUID();
       v = `Give me 3 distinctly different takes branching from this card. Call create_card exactly 3 times (not more, not fewer); on every one of the 3 calls set branch_group to exactly "${group}" and variant_of to "${contextCard.id}", so they can be grouped and compared.`;
+    }
+    if (display === "/related" && contextCard) {
+      v = `/related: find cards related to "${contextCard.title}" (id ${contextCard.id}) in this project and propose the strongest links from it with propose_link (from "${contextCard.id}"). Don't create cards.`;
     }
     chat.sendText(ws.active, v, formatContext(ws, contextCard), display);
     setText("");
@@ -75,13 +82,20 @@ export function ChatPanel({ ws }: { ws: Workspace }) {
           <div className="msg claude">Hi! Pick a card and I can suggest links, grill you about it, or give you a few different takes.</div>
         )}
         {chat.messages.map((m) => (
-          <ChatBubble key={m.id} message={m} onAnswer={(choice) => answer(m, choice)} />
+          <ChatBubble key={m.id} message={m} onAnswer={(choice) => answer(m, choice)} onOpenCard={(id, project) => void ws.focusCard(id, project)} activeProject={ws.active} />
         ))}
       </div>
 
       <div className="chips">
         {CHIPS.map((c) => (
-          <button key={c} type="button" className="chip" disabled={chat.busy || !ws.active} onClick={() => send(c)}>
+          <button
+            key={c}
+            type="button"
+            className="chip"
+            disabled={chat.busy || !ws.active || (NEEDS_CARD.has(c) && !contextCard)}
+            title={NEEDS_CARD.has(c) && !contextCard ? "Open a card first" : undefined}
+            onClick={() => send(c)}
+          >
             {c}
           </button>
         ))}
@@ -109,7 +123,17 @@ export function ChatPanel({ ws }: { ws: Workspace }) {
   );
 }
 
-function ChatBubble({ message, onAnswer }: { message: ChatMessage; onAnswer: (choice: string) => void }) {
+function ChatBubble({
+  message,
+  onAnswer,
+  onOpenCard,
+  activeProject,
+}: {
+  message: ChatMessage;
+  onAnswer: (choice: string) => void;
+  onOpenCard: (id: string, project: string) => void;
+  activeProject: string | null;
+}) {
   if (message.question) {
     return (
       <div className="msg claude">
@@ -125,8 +149,35 @@ function ChatBubble({ message, onAnswer }: { message: ChatMessage; onAnswer: (ch
     );
   }
   return (
-    <div className={"msg" + (message.role === "claude" ? " claude" : " user") + (message.isError ? " error" : "")}>
-      {message.text || (message.streaming ? "…" : "")}
-    </div>
+    <>
+      {message.searches?.map((s, i) => (
+        <div key={i} className="search-trace" aria-label={`Searched cards: ${s.query}`}>
+          <div className="search-trace-head">
+            Searched cards: <strong>{s.query}</strong>
+            {s.results.length === 0 && <span className="chat-sub"> · no matches</span>}
+          </div>
+          {s.results.length > 0 && (
+            <div className="chips search-chips">
+              {s.results.map((r) => (
+                <button
+                  key={`${r.project}:${r.id}`}
+                  type="button"
+                  className={"chip result-chip" + (r.ghost ? " ghost" : "")}
+                  title={r.project === activeProject ? "Show on canvas" : `Open in ${r.projectName}`}
+                  onClick={() => onOpenCard(r.id, r.project)}
+                >
+                  <span className={`dot dot-${r.stage}`} aria-hidden="true" />
+                  {r.title}
+                  {r.project !== activeProject && <span className="result-proj">{r.projectName}</span>}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      ))}
+      <div className={"msg" + (message.role === "claude" ? " claude" : " user") + (message.isError ? " error" : "")}>
+        {message.text || (message.streaming ? "…" : "")}
+      </div>
+    </>
   );
 }

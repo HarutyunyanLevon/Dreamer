@@ -113,3 +113,32 @@ Not verified live, and why:
 - **The `claude auth login` flow end to end** (browser opening, the "Waiting for browser sign-in..." state, Cancel, and the automatic re-check plus sidecar restart afterwards). Testing it means signing the developer's real account out, which this session deliberately avoided. Check by hand: run `claude auth logout`, open Dreamer, click **Sign in with Claude**, finish in the browser, and confirm the panel switches to chat within a few seconds and the first message works with no restart. Repeat, clicking **Cancel** mid-way, and expect "Sign-in was cancelled.".
 - **The in-app `npm install -g`**: running it would reinstall or upgrade the developer's global Claude Code. Check on a machine (or VM) without Claude Code: click **Install Claude Code**, watch npm output stream into the panel, and expect the panel to move to the sign-in state when it finishes. Also check with the network off for the "Couldn't reach the internet" message, and with Node.js uninstalled for the "npm wasn't found" message.
 - **The setup screen's visuals**: the Chrome extension wasn't connected this session. The browser mock can show both states without Tauri: `npm run dev`, then open `/?claude=missing` or `/?claude=signedout`. Its Install and Sign-in buttons simulate a job and then succeed.
+
+## Retrieval: card search checks
+Automated: `cargo test` gives 39 passing (8 new in `search::tests`), plus 1 ignored live test from the setup step.
+- `folding_and_stemming`: accent and ligature folding; s/es/ing/ed/ies pairs meet at the same stem (game/games/gaming/gamed, running/runs, boxes, planned, falling, missed, stories, dragons); glass, bus, axis, ring, red and level42 are not over-stemmed.
+- `scoring_prefers_title_then_tags_then_fields_then_body`: one word placed in each of the four places ranks in exactly that order with strictly decreasing scores, and a non-matching card is excluded.
+- `accents_coverage_prefix_and_ghosts`: `CAFÉS` finds "Café crawl"; matching both query words beats repeating one word; a prefix finds "monster"; ghost cards are returned and flagged; an empty query or no match returns nothing.
+- `snippet_centers_on_the_match`, `trashed_cards_are_skipped_and_scope_is_respected` (uses the real `Workspace::delete_card`).
+- `index_updates_incrementally_from_dirty_marks`: a file changed without a dirty mark stays stale (proving searches don't rescan); after `mark_dirty`, exactly 1 file is re-parsed; added and removed files are picked up; switching roots clears the index.
+- `related_finds_links_both_ways_and_shared_tags`, plus `find` and resolution of linked-card titles.
+- `stress_500_card_seed`: mirrors the mock `?stress=1` seed (500 cards, 4 stages, every third tagged). Measured on this machine:
+
+  | Build | Cold index build | Warm search | Search after one edit |
+  |---|---|---|---|
+  | Debug | 68 ms | 1.3 ms | 2.4 ms |
+  | Release | 32 ms | 0.2 ms | 1.4 ms |
+
+  It asserts one re-parse after one edit, that the limit is honored, and generous time bounds (warm < 100 ms, incremental < 200 ms). Run it with `cargo test stress_500 -- --nocapture` to see the timings.
+
+`cargo check` (no warnings), `npm run build` (no warnings) and `npm run check:themes` are all clean.
+
+Verified against the real sidecar and real Claude Code, with a small Node harness standing in for Rust and answering tool requests from 5 fixed cards:
+- "Which of my ideas involve water?": Claude called `search_cards` before answering, retried with synonyms ("ocean sea river", then "underwater boat fish"), cited the cards by title, and said which searches came up empty. The sidecar emitted a `search` event for each call.
+- `/related` on "Clockwork leviathan": Claude called `list_related`, then `search_cards` (scope project), then 3 `propose_link` calls, each with a 2–3 word label and a one-sentence reason. Each produced a `link_proposal` event, and it never called `create_card`.
+
+Not verified live: clicking result chips, the camera pan, ghost-link Keep/Dismiss plus undo, and the Ctrl+K palette inside the real window. There's no GUI automation for the native WebView2 window, and the Chrome extension wasn't connected this session. To check by hand:
+- Ask Claude about an idea, click a result chip, and expect the canvas to glide to the card and ring it.
+- Open a card, click `/related`, and expect dashed accent links with Keep/Dismiss. Keep one, press Ctrl+Z (the link goes back to a ghost), then press Ctrl+Shift+Z.
+- Press Ctrl+K, type, use ↑↓ and Enter, and try the This project / All toggle.
+- Browser preview: `npm run dev` with `?stress=1` gives the mock Ctrl+K search a 500-card project to search.

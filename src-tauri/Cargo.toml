@@ -29,6 +29,7 @@ thiserror = "2.0.21"
 notify = "8"
 notify-debouncer-mini = "0.7.0"
 base64 = "0.22"
+unicode-normalization = "0.1"
 
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
