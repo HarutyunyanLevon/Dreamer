@@ -677,3 +677,12 @@ button:disabled { cursor: default; }
   .tool { width: 44px; padding: 0; justify-content: center; }
   .tool > span { display: none; }
 }
+
+/* ---------- Fix pass #3 (2nd round), item 8: new-project field error ---------- */
+.name-field { display: flex; flex-direction: column; gap: 6px; }
+.name-field .name-input[aria-invalid="true"] { border-color: #a3283b; }
+.side-error { margin: 0 4px; font-size: 13px; font-weight: 600; color: #a3283b; overflow-wrap: anywhere; user-select: text; }
+/* Long messages (real OS errors with paths) wrap inside the toast; Close stays inside it. */
+.toast { border-radius: 22px; }
+.toast > span { flex: 1; min-width: 0; overflow-wrap: anywhere; max-height: 40vh; overflow-y: auto; }
+.toast > .btn { flex: none; }

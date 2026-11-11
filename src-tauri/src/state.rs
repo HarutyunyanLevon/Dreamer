@@ -53,8 +53,18 @@ impl AppState {
         Ok(state)
     }
 
-    pub fn is_default_root(&self) -> bool {
-        self.ws.lock().map(|w| w.root == default_root()).unwrap_or(false)
+    /// Stops the file watcher (dropping it releases its handle on the workspace folder), runs `f`,
+    /// then starts a fresh watcher on the current root. Used around deleting a project folder.
+    /// `f` may lock `self.ws`; this function only locks it again after `f` has returned.
+    pub fn with_watcher_paused<T>(&self, app: &AppHandle, f: impl FnOnce() -> T) -> T {
+        let had = self.watcher.lock().map(|mut w| w.take().is_some()).unwrap_or(false);
+        let out = f();
+        if had {
+            if let Ok(root) = self.ws.lock().map(|w| w.root.clone()) {
+                self.start_watching(app, root);
+            }
+        }
+        out
     }
 
     /// Runs `f` on the search index, pointed at the current workspace root.

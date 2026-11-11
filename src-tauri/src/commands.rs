@@ -6,7 +6,7 @@ use crate::model::*;
 use crate::state::AppState;
 use serde::Serialize;
 use serde_json::Value;
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Emitter, State};
 
 #[derive(Serialize)]
 pub struct WorkspaceInfo {
@@ -19,9 +19,16 @@ fn with_ws<T>(state: &State<AppState>, f: impl FnOnce(&crate::storage::Workspace
     f(&guard)
 }
 
+/// Built from the already-locked workspace. It must not call anything that locks `state.ws` again:
+/// std's `Mutex` is not re-entrant, and the old version (which called `state.is_default_root()`
+/// here) deadlocked the whole core the first time the delete-project dialog asked for the path.
+pub fn info_for(ws: &crate::storage::Workspace) -> WorkspaceInfo {
+    WorkspaceInfo { root: ws.root.display().to_string(), is_default: ws.root == crate::state::default_root() }
+}
+
 #[tauri::command(async)]
 pub fn workspace_info(state: State<AppState>) -> Result<WorkspaceInfo> {
-    with_ws(&state, |ws| Ok(WorkspaceInfo { root: ws.root.display().to_string(), is_default: state.is_default_root() }))
+    with_ws(&state, |ws| Ok(info_for(ws)))
 }
 
 #[tauri::command(async)]
@@ -200,13 +207,19 @@ pub fn search_cards(state: State<AppState>, query: String, project: Option<Strin
 
 /// User action from the sidebar (with an "Are you sure?" dialog). Moves the project folder to the
 /// Recycle Bin when possible. Not exposed to Claude in any form.
+/// The file watcher is stopped for the duration (dropping it releases its directory handle on
+/// Windows) and started again afterwards; storage retries briefly on "in use" errors and never
+/// half-deletes a folder that something still holds open (see `Workspace::delete_project`).
 #[tauri::command(async)]
-pub fn delete_project(state: State<AppState>, slug: String) -> Result<DeletedProject> {
-    let out = with_ws(&state, |ws| ws.delete_project(&slug, true))?;
+pub fn delete_project(app: AppHandle, state: State<AppState>, slug: String) -> Result<DeletedProject> {
+    let out = state.with_watcher_paused(&app, || with_ws(&state, |ws| ws.delete_project(&slug, true)));
     if let Ok(mut idx) = state.search.lock() {
         idx.mark_dirty(None);
     }
-    Ok(out)
+    // The paused watcher didn't see the folder go: tell the UI directly (also on failure, so it
+    // reloads whatever state the folder is in).
+    let _ = app.emit("workspace-changed", vec![crate::watcher::ChangeEvent { scope: "project".into(), project: Some(slug.clone()) }]);
+    out
 }
 
 #[tauri::command(async)]
@@ -226,4 +239,34 @@ pub fn reset_chat(state: State<AppState>, slug: String, thread: String) -> Resul
     with_ws(&state, |ws| ws.reset_chat(&slug, &thread))?;
     crate::sidecar::reset_thread(&state, &slug, &thread);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn workspace_info_reads_only_the_locked_workspace() {
+        // Regression (fix pass #3, item 8): building the info while the workspace lock is held
+        // must not need the lock again.
+        let dir = tempfile::TempDir::new().unwrap();
+        let lock = std::sync::Mutex::new(crate::storage::Workspace::open(dir.path().join("w")).unwrap());
+        let guard = lock.lock().unwrap();
+        let info = info_for(&guard);
+        assert!(info.root.ends_with('w') && !info.is_default);
+        assert!(lock.try_lock().is_err(), "the lock is still held by us, and info_for didn't need it");
+    }
+
+    #[test]
+    fn no_command_touches_state_again_inside_with_ws() {
+        // std::sync::Mutex isn't re-entrant: anything inside a `with_ws` closure that goes back to
+        // `state` (and so possibly to `state.ws`) can deadlock every later command.
+        let needle = ["with_ws(&state, ", "|"].concat();
+        for (i, line) in include_str!("commands.rs").lines().enumerate() {
+            if let Some(pos) = line.find(&needle) {
+                let rest = &line[pos + needle.len()..];
+                assert!(!rest.contains("state."), "commands.rs:{}: a with_ws closure uses `state` again: {line}", i + 1);
+            }
+        }
+    }
 }

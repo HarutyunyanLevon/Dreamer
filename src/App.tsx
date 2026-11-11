@@ -49,7 +49,7 @@ function MainApp() {
         projects={ws.projects}
         active={ws.active}
         onSelect={(s) => void ws.select(s)}
-        onCreate={(n) => void ws.createProject(n)}
+        onCreate={ws.createProject}
         onDelete={(s) => void ws.deleteProject(s)}
       />
       <ChatPanel ws={ws} />

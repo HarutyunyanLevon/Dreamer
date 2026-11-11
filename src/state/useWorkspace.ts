@@ -504,9 +504,17 @@ export function useWorkspace() {
     error,
     clearError: () => setError(null),
     select,
-    createProject: async (name: string) => {
-      const p = await run(() => api.createProject(name));
-      if (p) await select(p.slug);
+    /** Creates and selects a project. Returns the error text instead of toasting it, so the name
+     *  field can show it inline and keep what the user typed. */
+    createProject: async (name: string): Promise<string | null> => {
+      try {
+        const p = await api.createProject(name);
+        await select(p.slug);
+        return null;
+      } catch (e) {
+        await refresh();
+        return message(e);
+      }
     },
     notice,
     clearNotice: () => setNotice(null),

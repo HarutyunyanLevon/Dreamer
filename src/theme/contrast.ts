@@ -36,6 +36,8 @@ export function checkTheme(t: Theme): ContrastCheck[] {
     ["white on accent (buttons)", "#ffffff", hexToRgb(t.ui.accent), 4.5],
     // Fixed (theme-independent) destructive button, e.g. "Delete project".
     ["white on danger button", "#ffffff", hexToRgb("#a3283b"), 4.5],
+    // Fixed error text (e.g. "A project named … already exists." under the name field).
+    ["danger text on glass", "#a3283b", glass, 4.5],
     // Non-text UI component (WCAG 1.4.11): the scrollbar thumb against its track on glass.
     ["scrollbar thumb on track (UI)", thumb, track, 3],
     // Card borders (UI component boundaries, WCAG 1.4.11): each stage's border against its own card.

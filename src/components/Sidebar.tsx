@@ -10,7 +10,8 @@ interface Props {
   projects: ProjectSummary[];
   active: string | null;
   onSelect: (slug: string) => void;
-  onCreate: (name: string) => void;
+  /** Resolves to null on success, or the error text to show under the name field. */
+  onCreate: (name: string) => Promise<string | null>;
   onDelete: (slug: string) => void;
 }
 
@@ -19,17 +20,56 @@ export function Sidebar({ projects, active, onSelect, onCreate, onDelete }: Prop
   const { themes, theme, setThemeId } = useTheme();
   const [naming, setNaming] = useState(false);
   const [name, setName] = useState("");
+  const [createError, setCreateError] = useState<string | null>(null);
+  const [creating, setCreating] = useState(false);
   const [editingTheme, setEditingTheme] = useState<{ initial: typeof theme; isNew: boolean } | null>(null);
   const input = useRef<HTMLInputElement>(null);
+  /**
+   * Set once this naming session is finished (submitted or cancelled). Enter, then the blur that
+   * follows when the field unmounts or loses focus, must not create the project twice. A ref,
+   * because a blur handler can run with the closure of an older render.
+   */
+  const done = useRef(false);
+  const nameRef = useRef("");
+  nameRef.current = name;
 
   useEffect(() => {
     if (naming) input.current?.focus();
   }, [naming]);
 
-  const submit = () => {
-    const n = name.trim();
-    if (n) onCreate(n);
+  const startNaming = () => {
+    done.current = false;
     setName("");
+    setCreateError(null);
+    setNaming(true);
+  };
+  const cancel = () => {
+    done.current = true;
+    setName("");
+    setCreateError(null);
+    setNaming(false);
+  };
+  /** Enter creates. Leaving the field with a name typed also creates; leaving it empty cancels. */
+  const submit = async (via: "enter" | "blur") => {
+    if (done.current) return;
+    const n = nameRef.current.trim();
+    if (!n) {
+      if (via === "blur") cancel();
+      return;
+    }
+    done.current = true;
+    setCreating(true);
+    const err = await onCreate(n);
+    setCreating(false);
+    if (err) {
+      // Keep the field open with the name, show why, and allow another try.
+      done.current = false;
+      setCreateError(err);
+      requestAnimationFrame(() => input.current?.focus());
+      return;
+    }
+    setName("");
+    setCreateError(null);
     setNaming(false);
   };
 
@@ -106,25 +146,41 @@ export function Sidebar({ projects, active, onSelect, onCreate, onDelete }: Prop
       {editingTheme && <ThemeEditor initial={editingTheme.initial} isNew={editingTheme.isNew} onClose={() => setEditingTheme(null)} />}
 
       {naming ? (
-        <input
-          ref={input}
-          className="name-input"
-          aria-label="New project name"
-          placeholder="Project name, then Enter"
-          value={name}
-          maxLength={120}
-          onChange={(e) => setName(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") submit();
-            if (e.key === "Escape") {
-              setName("");
-              setNaming(false);
-            }
-          }}
-          onBlur={submit}
-        />
+        <div className="name-field">
+          <input
+            ref={input}
+            className="name-input"
+            aria-label="New project name"
+            aria-invalid={createError ? true : undefined}
+            aria-describedby={createError ? "new-project-error" : undefined}
+            placeholder="Project name, then Enter"
+            value={name}
+            maxLength={120}
+            readOnly={creating}
+            onChange={(e) => {
+              setName(e.target.value);
+              if (createError) setCreateError(null);
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                void submit("enter");
+              }
+              if (e.key === "Escape") {
+                e.stopPropagation();
+                cancel();
+              }
+            }}
+            onBlur={() => void submit("blur")}
+          />
+          {createError && (
+            <p id="new-project-error" className="side-error" role="alert">
+              {createError}
+            </p>
+          )}
+        </div>
       ) : (
-        <button className="new-project" type="button" onClick={() => setNaming(true)}>
+        <button className="new-project" type="button" onClick={startNaming}>
           <IconPlus />
           New project
         </button>

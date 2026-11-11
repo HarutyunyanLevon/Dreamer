@@ -274,3 +274,23 @@ Driven (9/9 pass): for the card editor, the web clip dialog and the card menu: t
 
 Manual:
 - [ ] Open a card, the trash, Ctrl+K and the card menu in each theme: no darkening, and the popup is still clearly separated from the canvas.
+
+### 8. Project create/delete reliability
+Automated (`cargo test`: 54 passed, 2 ignored live tests). New tests:
+- `create_project_refuses_a_second_project_with_the_same_name`: case, spaces and "Inbox"; a different name with the same slug still gets `-2`.
+- `concurrent_creates_with_one_name_make_one_project`: 8 threads on one `Mutex<Workspace>`, like the command layer.
+- `delete_project_works_while_the_watcher_is_active`: a real `notify` watcher on the root, 3 rounds with writes just before each delete.
+- `delete_project_clears_read_only_files`.
+- `delete_project_retries_until_a_brief_lock_is_released` (Windows): exclusive lock released after 300ms; the delete waits and succeeds.
+- `delete_project_leaves_a_locked_project_whole_and_says_why` (Windows): a lock held throughout gives an "in use … Nothing was deleted" error and every file is still there.
+- `retry_io_gives_up_on_permanent_errors_at_once`.
+- `workspace_info_reads_only_the_locked_workspace` and `no_command_touches_state_again_inside_with_ws` (the deadlock).
+- `projects_get_unique_slugs_and_inbox_is_reserved` was updated deliberately: it used to assert that the same name twice is allowed.
+
+Reproduced on the old code (real app): opening the delete dialog → `list_projects` timed out (deadlock). Create/delete with the watcher active ×6 and rapid create/delete ×5 all worked. The same name twice gave `twice` + `twice-2`.
+
+Driven after the fix (all pass): the delete dialog shows the full folder path and Rust keeps answering. Enter creates exactly one project and selects it. The same name in another case shows "A project named “Item eight” already exists." inline, keeps the text and creates nothing. Esc cancels. Blur with a name creates once; blur when empty cancels. Enter + Enter + blur in one go create exactly one. Three projects were deleted through the real dialog (folders gone, Recycle Bin notice, Inbox selected), and a create right after works. With a separate PowerShell process holding `canvas.json` open exclusively: deleting via the dialog left the project whole (7/7 entries), still listed, with the real error in the toast. Once the lock was released, deleting worked and no `.deleting-` leftovers remained. A long, unbreakable toast message wraps inside the toast with Close inside it.
+
+Manual:
+- [ ] Delete a project whose folder is open in Explorer (just viewing it). It should either work (Explorer doesn't lock), or refuse with the "in use" message and leave the project whole.
+- [ ] Restore a deleted project from the Recycle Bin: it reappears live.

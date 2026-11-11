@@ -110,6 +110,9 @@ export function createMockApi(): Api {
     },
     listProjects: async () => [...projects.values()].map(summary),
     createProject: async (name) => {
+      // Same rule as Rust: one project per name (case-insensitive).
+      const taken = [...projects.values()].find((p) => p.name.trim().toLowerCase() === name.trim().toLowerCase());
+      if (taken) throw new Error(`A project named “${taken.name}” already exists.`);
       let slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "project";
       while (projects.has(slug) || slug === "inbox") slug += "-2";
       const p = seedProject(slug, name.trim());

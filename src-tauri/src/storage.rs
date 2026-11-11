@@ -8,6 +8,50 @@ use serde::Serialize;
 use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+/// Waits between retries of a file operation that hit "in use" (about 1.5s in total).
+const RETRY_DELAYS_MS: [u64; 6] = [50, 100, 200, 300, 400, 500];
+
+/// Errors that usually clear within moments on Windows when something briefly holds a file or
+/// folder open (a file watcher, the search indexer, antivirus): access denied (5), sharing
+/// violation (32), lock violation (33), and "directory not empty" (145) mid-delete.
+fn is_transient(e: &std::io::Error) -> bool {
+    e.kind() == std::io::ErrorKind::PermissionDenied || matches!(e.raw_os_error(), Some(5 | 32 | 33 | 145))
+}
+
+/// Runs `f`, retrying after short waits while it fails with a transient "in use" error.
+fn retry_io<T>(mut f: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T> {
+    let mut delays = RETRY_DELAYS_MS.iter();
+    loop {
+        match f() {
+            Err(e) if is_transient(&e) => match delays.next() {
+                Some(ms) => std::thread::sleep(Duration::from_millis(*ms)),
+                None => return Err(e),
+            },
+            r => return r,
+        }
+    }
+}
+
+/// Clears the read-only flag on everything under `dir` (best effort), so a permanent delete
+/// doesn't stop at read-only files such as git objects.
+fn clear_readonly(dir: &Path) {
+    let Ok(rd) = fs::read_dir(dir) else { return };
+    for entry in rd.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if let Ok(meta) = entry.metadata() {
+            if meta.is_dir() {
+                clear_readonly(&path);
+            } else if meta.permissions().readonly() {
+                let mut p = meta.permissions();
+                #[allow(clippy::permissions_set_readonly_false)]
+                p.set_readonly(false);
+                let _ = fs::set_permissions(&path, p);
+            }
+        }
+    }
+}
 
 pub const INBOX_SLUG: &str = "inbox";
 const GRID_DX: f64 = 264.0;
@@ -291,6 +335,13 @@ impl Workspace {
         if name.chars().count() > 120 {
             return Err(AppError::Invalid("project name is too long".into()));
         }
+        // One project per name (case-insensitive). A repeated create (a double-submitted form, a
+        // retry) must not quietly make "Foo" and "Foo" with slugs foo and foo-2. The command layer
+        // holds the workspace lock, so check-then-create can't race between two calls.
+        let wanted = name.to_lowercase();
+        if let Some(p) = self.list_projects()?.into_iter().find(|p| p.name.trim().to_lowercase() == wanted) {
+            return Err(AppError::Invalid(format!("A project named “{}” already exists.", p.name)));
+        }
         let base = slugify(name);
         for n in 1..1000 {
             let slug = match (n, base.as_str()) {
@@ -324,14 +375,39 @@ impl Workspace {
             return Err(AppError::Invalid(format!("refusing to delete {}", dir.display())));
         }
         let mut recycled = false;
+        let mut recycle_err: Option<String> = None;
         if recycle {
-            match trash::delete(&dir) {
-                Ok(()) => recycled = true,
-                Err(e) => eprintln!("[dreamer] Recycle Bin unavailable for {} ({e}); deleting instead", dir.display()),
+            // Retried: right after the watcher is stopped, or while an indexer or antivirus has a
+            // file open, the shell can refuse for a moment.
+            for wait in std::iter::once(0).chain(RETRY_DELAYS_MS) {
+                std::thread::sleep(Duration::from_millis(wait));
+                match trash::delete(&dir) {
+                    Ok(()) => {
+                        recycled = true;
+                        break;
+                    }
+                    Err(e) => recycle_err = Some(e.to_string()),
+                }
+            }
+            if let (false, Some(e)) = (recycled, &recycle_err) {
+                eprintln!("[dreamer] Recycle Bin failed for {} ({e}); deleting instead", dir.display());
             }
         }
         if !recycled && dir.exists() {
-            fs::remove_dir_all(&dir).map_err(|e| AppError::io(format!("delete {}", dir.display()), e))?;
+            // Claim the folder before deleting anything: Windows refuses to rename a folder while
+            // something inside it is open, so a project that is in use is left whole (and keeps
+            // working) instead of being half-deleted by remove_dir_all. The claimed name starts
+            // with a dot, so the project list never shows it.
+            let doomed = self.root.join("projects").join(format!(".{slug}.deleting-{}", ulid::Ulid::generate().to_string().to_lowercase()));
+            retry_io(|| fs::rename(&dir, &doomed)).map_err(|e| {
+                AppError::Invalid(format!(
+                    "Couldn't delete “{slug}”: its folder is in use by another program ({e}). Nothing was deleted. Close anything that has it open (an Explorer window, an editor, a terminal) and try again.{}",
+                    recycle_err.as_deref().map(|r| format!(" (Recycle Bin: {r})")).unwrap_or_default()
+                ))
+            })?;
+            // remove_dir_all stops at read-only files on Windows (e.g. git objects).
+            clear_readonly(&doomed);
+            retry_io(|| fs::remove_dir_all(&doomed)).map_err(|e| AppError::io(format!("delete {}", doomed.display()), e))?;
         }
         let settings = self.get_settings()?;
         if settings.last_project.as_deref() == Some(slug) {
@@ -857,8 +933,12 @@ mod tests {
     fn projects_get_unique_slugs_and_inbox_is_reserved() {
         let (_d, ws) = ws();
         let a = ws.create_project("Fish-punk fishing!").unwrap();
-        let b = ws.create_project("Fish-punk fishing!").unwrap();
-        let i = ws.create_project("Inbox").unwrap();
+        // The same name twice is refused (item 8); a different name with the same slug gets -2.
+        assert!(ws.create_project("Fish-punk fishing!").is_err());
+        let b = ws.create_project("Fish punk, fishing").unwrap();
+        // "Inbox" itself is taken by name; "Inbox!" slugifies to the reserved "inbox".
+        assert!(ws.create_project("Inbox").is_err());
+        let i = ws.create_project("Inbox!").unwrap();
         assert_eq!(a.slug, "fish-punk-fishing");
         assert_eq!(b.slug, "fish-punk-fishing-2");
         assert_eq!(i.slug, "inbox-2");
@@ -1016,6 +1096,147 @@ mod tests {
         assert!(ws.list_trash(INBOX_SLUG).unwrap().is_empty());
         assert!(ws.restore_card(INBOX_SLUG, &id).is_err());
         assert!(matches!(ws.delete_card(INBOX_SLUG, "01NOPE"), Err(AppError::NotFound(_))));
+    }
+
+    // ----- fix pass #3, item 8: create/delete reliability -----
+
+    #[test]
+    fn create_project_refuses_a_second_project_with_the_same_name() {
+        let (_d, ws) = ws();
+        let a = ws.create_project("Twice").unwrap();
+        assert_eq!(a.slug, "twice");
+        for again in ["Twice", "  twice ", "TWICE"] {
+            let e = ws.create_project(again).unwrap_err().to_string();
+            assert!(e.contains("already exists") && e.contains("Twice"), "{again:?}: {e}");
+        }
+        assert!(ws.create_project("Inbox").unwrap_err().to_string().contains("already exists"));
+        // Only one folder was made; a different name that slugifies the same still works.
+        assert_eq!(ws.list_projects().unwrap().iter().filter(|p| p.name == "Twice").count(), 1);
+        assert_eq!(ws.create_project("Twice!").unwrap().slug, "twice-2");
+    }
+
+    #[test]
+    fn concurrent_creates_with_one_name_make_one_project() {
+        // The command layer serialises calls on one Mutex<Workspace>; model that with 8 threads
+        // firing the same create at once (a double-submitted form, Enter + blur).
+        let (_d, ws) = ws();
+        let shared = std::sync::Arc::new(std::sync::Mutex::new(ws));
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let s = shared.clone();
+                std::thread::spawn(move || s.lock().unwrap().create_project("Race").is_ok())
+            })
+            .collect();
+        let oks = handles.into_iter().map(|h| h.join().unwrap()).filter(|ok| *ok).count();
+        assert_eq!(oks, 1);
+        let ws = shared.lock().unwrap();
+        assert_eq!(fs::read_dir(ws.root.join("projects")).unwrap().count(), 1);
+    }
+
+    fn project_with_files(ws: &Workspace, name: &str) -> (String, PathBuf) {
+        let p = ws.create_project(name).unwrap();
+        for i in 0..5 {
+            ws.create_card(&p.slug, new_card(&format!("card {i}"))).unwrap();
+        }
+        let dir = ws.project_dir(&p.slug).unwrap();
+        (p.slug, dir)
+    }
+
+    fn no_leftovers(ws: &Workspace) -> bool {
+        fs::read_dir(ws.root.join("projects")).unwrap().filter_map(|e| e.ok()).all(|e| !e.file_name().to_string_lossy().contains(".deleting-"))
+    }
+
+    #[test]
+    fn delete_project_works_while_the_watcher_is_active() {
+        let (_d, ws) = ws();
+        let root = ws.root.canonicalize().unwrap();
+        let ws = Workspace::open(&root).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let _w = crate::watcher::start(root.clone(), move |e| {
+            let _ = tx.send(e);
+        })
+        .unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        for round in 0..3 {
+            let (slug, dir) = project_with_files(&ws, &format!("Watched {round}"));
+            // Keep the watcher busy with a burst of writes right before the delete.
+            ws.create_card(&slug, new_card("last")).unwrap();
+            let out = ws.delete_project(&slug, false).unwrap();
+            assert!(!out.recycled && !dir.exists(), "round {round}");
+        }
+        assert!(no_leftovers(&ws));
+        // The watcher kept running and reported the changes.
+        assert!(rx.recv_timeout(Duration::from_secs(5)).is_ok());
+    }
+
+    #[test]
+    fn delete_project_clears_read_only_files() {
+        let (_d, ws) = ws();
+        let (slug, dir) = project_with_files(&ws, "Readonly");
+        let f = dir.join("media").join("locked.bin");
+        fs::write(&f, b"x").unwrap();
+        let mut p = fs::metadata(&f).unwrap().permissions();
+        p.set_readonly(true);
+        fs::set_permissions(&f, p).unwrap();
+        ws.delete_project(&slug, false).unwrap();
+        assert!(!dir.exists() && no_leftovers(&ws));
+    }
+
+    /// Opens a file inside a project with no sharing at all, like a program that locks it.
+    #[cfg(windows)]
+    fn lock_file(path: &Path) -> fs::File {
+        use std::os::windows::fs::OpenOptionsExt;
+        fs::OpenOptions::new().read(true).write(true).share_mode(0).open(path).unwrap()
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn delete_project_retries_until_a_brief_lock_is_released() {
+        let (_d, ws) = ws();
+        let (slug, dir) = project_with_files(&ws, "Briefly locked");
+        let lock = lock_file(&dir.join("canvas.json"));
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            drop(lock);
+        });
+        let started = std::time::Instant::now();
+        ws.delete_project(&slug, false).unwrap();
+        releaser.join().unwrap();
+        assert!(!dir.exists() && no_leftovers(&ws));
+        assert!(started.elapsed() >= Duration::from_millis(250), "it really had to wait for the lock");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn delete_project_leaves_a_locked_project_whole_and_says_why() {
+        let (_d, ws) = ws();
+        let (slug, dir) = project_with_files(&ws, "Held open");
+        let before: Vec<_> = fs::read_dir(dir.join("cards")).unwrap().map(|e| e.unwrap().file_name()).collect();
+        let _lock = lock_file(&dir.join("canvas.json"));
+        let e = ws.delete_project(&slug, false).unwrap_err().to_string();
+        assert!(e.contains("in use") && e.contains("Nothing was deleted"), "{e}");
+        // Not a single file is gone: no half-deleted project.
+        let after: Vec<_> = fs::read_dir(dir.join("cards")).unwrap().map(|e| e.unwrap().file_name()).collect();
+        assert_eq!(before, after);
+        assert!(dir.join("project.json").exists() && dir.join("canvas.json").exists());
+        assert!(no_leftovers(&ws));
+        assert!(ws.list_projects().unwrap().iter().any(|p| p.slug == slug));
+    }
+
+    #[test]
+    fn retry_io_gives_up_on_permanent_errors_at_once() {
+        let mut calls = 0;
+        let r: std::io::Result<()> = retry_io(|| {
+            calls += 1;
+            Err(std::io::Error::new(std::io::ErrorKind::NotFound, "gone"))
+        });
+        assert!(r.is_err() && calls == 1);
+        let mut calls = 0;
+        let r = retry_io(|| {
+            calls += 1;
+            if calls < 3 { Err(std::io::Error::from_raw_os_error(32)) } else { Ok(calls) }
+        });
+        assert_eq!(r.unwrap(), 3);
     }
 
     #[test]
