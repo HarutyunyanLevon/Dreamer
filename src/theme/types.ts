@@ -4,6 +4,8 @@ export const SCROLL_THUMB_HOVER_ALPHA = 0.75;
 export const SCROLL_TRACK_ALPHA = 0.07;
 
 export type StageId = "cloud" | "sketch" | "draft" | "pitch";
+/** White alpha of each stage's card background (mirrors .stage-* in styles.css). Fuzzy to crisp. */
+export const STAGE_CARD_ALPHA: Record<StageId, number> = { cloud: 0.3, sketch: 0.62, draft: 0.84, pitch: 0.96 };
 export const STAGES: StageId[] = ["cloud", "sketch", "draft", "pitch"];
 export const STAGE_LABEL: Record<StageId, string> = {
   cloud: "Cloud",

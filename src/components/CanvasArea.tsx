@@ -12,12 +12,16 @@ import { ScrollArea, wheelBelongsToContent } from "../ui/Scroll";
 import { dialogOpen } from "../util/useEscClose";
 import { branchGroup } from "./BranchCompare";
 import { CardEditor } from "./CardEditor";
+import { CloudEdge } from "./CardEdge";
 import { IconCard, IconClip, IconFit, IconImage, IconLink, IconMinus, IconPlus, IconRedo, IconTrash as IconTrashCan, IconUndo } from "./Icons";
 import { TrashView } from "./TrashView";
 
 const MIN_ZOOM = 0.2;
 const MAX_ZOOM = 3;
 const FOCUS_ZOOM = 1.15;
+/** Cloud border animation limits (see `cloudsMove`). */
+const CLOUD_MOTION_MIN_ZOOM = 0.5;
+const CLOUD_MOTION_MAX = 60;
 
 export function CanvasArea({ ws }: { ws: Workspace }) {
   const { data } = ws;
@@ -90,6 +94,16 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
       return r.x + r.w >= left && r.x <= right && r.y + r.h >= top && r.y <= bottom;
     });
   }, [visible, data, vp, rectOf]);
+
+  // Cloud borders wobble only while it's cheap and visible: not when zoomed far out (the wobble is
+  // sub-pixel there anyway) and not with more than ~60 Cloud cards on screen. Otherwise they stay
+  // as the static puffy edge. One class on the canvas, so toggling it never re-renders cards.
+  const cloudsMove = useMemo(() => {
+    if (vp.zoom < CLOUD_MOTION_MIN_ZOOM) return false;
+    let n = 0;
+    for (const c of onScreen) if (c.stage === "cloud" && !c.ghost && ++n > CLOUD_MOTION_MAX) return false;
+    return n > 0;
+  }, [onScreen, vp.zoom]);
 
   const stack = useMemo(
     () => displayStack(onScreen.map((c) => c.id), rectOf, (id) => data?.canvas.cards[id]),
@@ -304,7 +318,7 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
   return (
     <main
       ref={rootRef}
-      className={"canvas" + (cameraAnim ? " camera-anim" : "")}
+      className={"canvas" + (cameraAnim ? " camera-anim" : "") + (cloudsMove ? " clouds-move" : "")}
       aria-label="Canvas"
       style={camera}
       onPointerDown={onBackgroundPointerDown}
@@ -710,6 +724,7 @@ const CardView = memo(function CardView({
         onMenu(card.id, e.clientX, e.clientY);
       }}
     >
+      {card.stage === "cloud" && !card.ghost && <CloudEdge seed={card.id} />}
       {card.ghost && <div className="ghost-label">Claude suggests</div>}
       <div className="card-head">
         <span className={`dot dot-${card.stage}`} aria-hidden="true" />

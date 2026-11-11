@@ -241,21 +241,59 @@ button:disabled { cursor: default; }
 .card-head { display: flex; align-items: center; gap: 7px; }
 .stage-name { font-size: 11px; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); }
 
+/* Stage borders, fuzzy to crisp, always in the stage's border colour (--stage-*-border: the stage
+   colour deepened to 3:1 against that stage's card, checked by check:themes). Background alphas are
+   mirrored in STAGE_CARD_ALPHA (src/theme/types.ts). */
+/* Cloud: puffy scalloped edge drawn by <CloudEdge> (SVG), gently wobbling when allowed. */
 .stage-cloud {
-  background: rgba(255, 255, 255, 0.3);
-  border: 1.5px dashed color-mix(in srgb, var(--stage-cloud) 70%, var(--ink));
+  background: rgba(255, 255, 255, 0.3); border: 0;
   backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
 }
-.stage-sketch { background: rgba(255, 255, 255, 0.62); border: 1px solid var(--stage-sketch); }
-.stage-draft { background: rgba(255, 255, 255, 0.84); border: 1px solid #fff; box-shadow: 0 14px 30px var(--ink-shadow); }
-.stage-pitch {
-  background: rgba(255, 255, 255, 0.96); border: 1px solid var(--stage-pitch);
-  box-shadow: 0 0 0 4px color-mix(in srgb, var(--stage-pitch) 35%, transparent), 0 10px 34px var(--stage-pitch-glow);
+.edge-cloud {
+  position: absolute; left: -6px; top: -6px; width: calc(100% + 12px); height: calc(100% + 12px);
+  overflow: visible; pointer-events: none; z-index: -1; transform-origin: 50% 50%;
 }
+.edge-cloud rect {
+  x: 6px; y: 6px; width: calc(100% - 12px); height: calc(100% - 12px); rx: 20px;
+  fill: none; stroke-linecap: round; stroke-dasharray: 0 10;
+}
+.edge-cloud .puff-o { stroke: var(--stage-cloud-border); stroke-width: 12.5px; }
+.edge-cloud .puff-i { stroke: color-mix(in srgb, var(--stage-cloud) 45%, #fff); stroke-width: 9.5px; }
+.canvas.clouds-move .edge-cloud { animation: cloud-puff 5s ease-in-out infinite; will-change: transform; }
+@keyframes cloud-puff {
+  0%, 100% { transform: scale(1, 1); }
+  33% { transform: scale(1.008, 1.022) translateY(-0.5px); }
+  66% { transform: scale(1.016, 1.008) translateX(0.5px); }
+}
+/* Sketch: dashed, hand-drawn: uneven corners plus a faint second pencil stroke, slightly askew. */
+.stage-sketch {
+  background: rgba(255, 255, 255, 0.62); border: 1.5px dashed var(--stage-sketch-border);
+  border-radius: 21px 26px 19px 27px / 26px 19px 27px 21px;
+}
+.stage-sketch::before {
+  content: ""; position: absolute; inset: -3px; pointer-events: none; z-index: -1;
+  border: 1px dashed var(--stage-sketch-border); opacity: 0.4;
+  border-radius: 25px 20px 28px 19px / 19px 27px 21px 25px; transform: rotate(-0.5deg);
+}
+/* Draft: thin solid line, slightly uneven rounded corners. */
+.stage-draft {
+  background: rgba(255, 255, 255, 0.84); border: 1px solid var(--stage-draft-border);
+  border-radius: 20px 23px 21px 24px / 22px 20px 24px 21px; box-shadow: 0 14px 30px var(--ink-shadow);
+}
+/* Pitch: crisp, thicker, solid, even corners, no animation. */
+.stage-pitch {
+  background: rgba(255, 255, 255, 0.96); border: 3px solid var(--stage-pitch-border); border-radius: 22px;
+  box-shadow: 0 10px 34px var(--stage-pitch-glow);
+}
+/* Ghost cards keep the dashed "Claude suggests" look whatever their stage. */
 .card.ghost {
   background: rgba(255, 255, 255, 0.55);
-  border: 1.5px dashed var(--ghost);
+  border: 1.5px dashed var(--ghost); border-radius: 22px;
   box-shadow: 0 0 26px 2px var(--ghost-glow);
+}
+.card.ghost::before { content: none; }
+@media (prefers-reduced-motion: reduce) {
+  .canvas.clouds-move .edge-cloud { animation: none; will-change: auto; }
 }
 .ghost-label { font-size: 11px; font-weight: 700; letter-spacing: 0.08em; color: var(--ghost-text); margin-bottom: 4px; }
 .ghost-actions { display: flex; gap: 8px; margin-top: 12px; }

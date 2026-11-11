@@ -244,3 +244,12 @@ Manual:
 - [ ] The slide looks smooth, and with Windows animation effects off it switches instantly.
 - [ ] Ctrl+J in the native window toggles the chat and does not open WebView2's downloads panel.
 - [ ] Quit and relaunch: the panels come back as you left them, with no slide on startup.
+
+### 4. Stage-based card borders
+Automated: `check:themes` has a 3:1 border row per stage, and all themes pass.
+
+Driven, first run (before the width change): Cloud has the SVG edge and no CSS border, Sketch is dashed, Draft is thin solid, Ghost is dashed with no cloud edge, and `.clouds-move` plus the `cloud-puff` animation are on at zoom 1 with few clouds. Pitch rendered 2px (the fractional width was snapped), which is fixed now (3px). **Not verified:** the rerun after that change failed every check because the page was in an unexpected state (left mid-debug). The 500-card frame timings collected were invalid (the camera had drifted off the cards, so only 2–10 cards were rendered), so **60fps at 500 cards is unverified for this item**.
+
+Manual:
+- [ ] Inbox with one card per stage: puffy Cloud, dashed hand-drawn Sketch, thin Draft, thick crisp Pitch, dashed Ghost.
+- [ ] A 500-card project: pan and zoom stay smooth; at zoom < 50% or with many clouds visible, the clouds stop wobbling.

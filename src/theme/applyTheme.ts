@@ -1,5 +1,5 @@
-import { rgba } from "./color";
-import { SCROLL_THUMB_ALPHA, SCROLL_THUMB_HOVER_ALPHA, SCROLL_TRACK_ALPHA, STAGES, type Theme } from "./types";
+import { hexToRgb, over, rgba, stageBorder } from "./color";
+import { SCROLL_THUMB_ALPHA, SCROLL_THUMB_HOVER_ALPHA, SCROLL_TRACK_ALPHA, STAGES, STAGE_CARD_ALPHA, type Theme } from "./types";
 
 /** A theme's tokens as CSS custom properties (used for :root and for scoped previews). */
 export function themeVars(t: Theme): Record<string, string> {
@@ -23,8 +23,19 @@ export function themeVars(t: Theme): Record<string, string> {
   for (const id of STAGES) {
     v[`--stage-${id}`] = t.stages[id];
     v[`--stage-${id}-glow`] = rgba(t.stages[id], 0.6);
+    v[`--stage-${id}-border`] = stageBorderFor(t, id);
   }
   return v;
+}
+
+/** The stage's card border colour, readable (3:1) against that stage's own card surface. */
+export function stageBorderFor(t: Theme, id: (typeof STAGES)[number]): string {
+  return stageBorder(t.stages[id], t.ui.ink, cardSurface(t, id));
+}
+
+/** A stage's card background as it looks over the theme's fallback colour (worst case). */
+export function cardSurface(t: Theme, id: (typeof STAGES)[number]) {
+  return over([255, 255, 255], hexToRgb(t.ui.fallbackBg), STAGE_CARD_ALPHA[id]);
 }
 
 /** Write a theme's tokens to CSS variables on :root. */

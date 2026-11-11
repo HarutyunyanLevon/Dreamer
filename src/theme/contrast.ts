@@ -1,5 +1,6 @@
 import { contrast, hexToRgb, over } from "./color";
-import { SCROLL_THUMB_ALPHA, SCROLL_TRACK_ALPHA, type Theme } from "./types";
+import { cardSurface, stageBorderFor } from "./applyTheme";
+import { SCROLL_THUMB_ALPHA, SCROLL_TRACK_ALPHA, STAGES, type Theme } from "./types";
 
 export interface ContrastCheck {
   label: string;
@@ -37,6 +38,8 @@ export function checkTheme(t: Theme): ContrastCheck[] {
     ["white on danger button", "#ffffff", hexToRgb("#a3283b"), 4.5],
     // Non-text UI component (WCAG 1.4.11): the scrollbar thumb against its track on glass.
     ["scrollbar thumb on track (UI)", thumb, track, 3],
+    // Card borders (UI component boundaries, WCAG 1.4.11): each stage's border against its own card.
+    ...STAGES.map((id): [string, string, number[], number] => [`${id} border on ${id} card (UI)`, stageBorderFor(t, id), cardSurface(t, id), 3]),
   ];
   return rows.map(([label, fg, surface, min]) => {
     const ratio = contrast(typeof fg === "string" ? hexToRgb(fg) : (fg as [number, number, number]), surface as [number, number, number]);

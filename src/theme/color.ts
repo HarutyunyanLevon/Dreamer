@@ -32,3 +32,23 @@ export function contrast(a: RGB, b: RGB): number {
 export function over(fg: RGB, bg: RGB, alpha: number): RGB {
   return [0, 1, 2].map((i) => Math.round(fg[i] * alpha + bg[i] * (1 - alpha))) as RGB;
 }
+
+export function rgbToHex([r, g, b]: RGB): string {
+  return "#" + [r, g, b].map((v) => Math.round(v).toString(16).padStart(2, "0")).join("");
+}
+
+/**
+ * A stage's card border colour: the theme's stage colour, deepened toward `ink` in 5% steps only
+ * as far as needed to reach `min` contrast against the card surface it borders (WCAG 1.4.11 asks
+ * 3:1 for UI component boundaries). Pale stage colours (Cloud) get the most ink; strong ones stay
+ * as they are.
+ */
+export function stageBorder(stageHex: string, inkHex: string, surface: RGB, min = 3): string {
+  const stage = hexToRgb(stageHex);
+  const ink = hexToRgb(inkHex);
+  for (let t = 0; t <= 1.0001; t += 0.05) {
+    const c = over(ink, stage, t);
+    if (contrast(c, surface) >= min) return rgbToHex(c);
+  }
+  return inkHex;
+}
