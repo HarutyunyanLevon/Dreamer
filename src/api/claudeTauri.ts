@@ -4,7 +4,7 @@ import type { ClaudeApi, ClaudeEvent, ClaudeStatus, SetupEvent } from "./claude"
 
 export const claudeTauriApi: ClaudeApi = {
   status: () => invoke<ClaudeStatus>("claude_status"),
-  send: (slug, id, text, context) => invoke("claude_send", { slug, id, text, context }),
+  send: (slug, id, text, context, thread, resume) => invoke("claude_send", { slug, id, text, context, thread: thread ?? null, resume: resume ?? null }),
   interrupt: () => invoke("claude_interrupt"),
   onEvent: async (cb) => listen<ClaudeEvent>("claude-event", (e) => cb(e.payload)),
   install: () => invoke("claude_install"),

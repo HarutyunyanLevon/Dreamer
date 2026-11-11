@@ -169,8 +169,18 @@ pub fn claude_open_login_url(url: String) -> Result<()> {
 }
 
 #[tauri::command(async)]
-pub fn claude_send(app: AppHandle, state: State<AppState>, slug: String, id: String, text: String, context: Option<String>) -> Result<()> {
-    crate::sidecar::send_message(&app, &state, slug, id, text, context)
+#[allow(clippy::too_many_arguments)]
+pub fn claude_send(
+    app: AppHandle,
+    state: State<AppState>,
+    slug: String,
+    id: String,
+    text: String,
+    context: Option<String>,
+    thread: Option<String>,
+    resume: Option<String>,
+) -> Result<()> {
+    crate::sidecar::send_message(&app, &state, crate::sidecar::Turn { slug, id, text, context, thread: thread.unwrap_or_else(|| "project".into()), resume })
 }
 
 #[tauri::command(async)]
@@ -186,4 +196,34 @@ pub fn search_cards(state: State<AppState>, query: String, project: Option<Strin
         crate::storage::check_slug(p)?;
     }
     state.with_search(|idx| idx.search(&query, project.as_deref(), limit.unwrap_or(20)))
+}
+
+/// User action from the sidebar (with an "Are you sure?" dialog). Moves the project folder to the
+/// Recycle Bin when possible. Not exposed to Claude in any form.
+#[tauri::command(async)]
+pub fn delete_project(state: State<AppState>, slug: String) -> Result<DeletedProject> {
+    let out = with_ws(&state, |ws| ws.delete_project(&slug, true))?;
+    if let Ok(mut idx) = state.search.lock() {
+        idx.mark_dirty(None);
+    }
+    Ok(out)
+}
+
+#[tauri::command(async)]
+pub fn load_chat(state: State<AppState>, slug: String, thread: String) -> Result<Value> {
+    with_ws(&state, |ws| ws.load_chat(&slug, &thread))
+}
+
+#[tauri::command(async)]
+pub fn save_chat(state: State<AppState>, slug: String, thread: String, data: Value) -> Result<()> {
+    with_ws(&state, |ws| ws.save_chat(&slug, &thread, &data))
+}
+
+/// Clears one chat thread's file and tells the sidecar to drop that thread's Claude session, so
+/// the next message starts a fresh one.
+#[tauri::command(async)]
+pub fn reset_chat(state: State<AppState>, slug: String, thread: String) -> Result<()> {
+    with_ws(&state, |ws| ws.reset_chat(&slug, &thread))?;
+    crate::sidecar::reset_thread(&state, &slug, &thread);
+    Ok(())
 }

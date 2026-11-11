@@ -42,7 +42,8 @@ export type ClaudeEvent =
 export interface ClaudeApi {
   status(): Promise<ClaudeStatus>;
   /** `context` is pre-formatted text (e.g. the selected card's title/body) prepended server-side. */
-  send(slug: string, id: string, text: string, context?: string): Promise<void>;
+  /** `thread` = card id or "project"; `resume` = that thread's saved Claude session id. */
+  send(slug: string, id: string, text: string, context?: string, thread?: string, resume?: string): Promise<void>;
   interrupt(): Promise<void>;
   onEvent(cb: (event: ClaudeEvent) => void): Promise<() => void>;
   /** Runs `npm install -g @anthropic-ai/claude-code`; progress arrives via onSetupEvent. */

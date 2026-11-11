@@ -125,6 +125,21 @@ export interface SearchHit {
   score: number;
 }
 
+export interface DeletedProject {
+  slug: string;
+  path: string;
+  /** true = moved to the Recycle Bin; false = deleted outright. */
+  recycled: boolean;
+}
+
+/** One chat thread's file (`<project>/chats/<card id | project>.json`). */
+export interface ChatThreadFile {
+  version: number;
+  /** Claude session to resume for this thread. */
+  sessionId?: string;
+  messages: unknown[];
+}
+
 export interface Api {
   /** "tauri" talks to the Rust core; "mock" is an in-memory stand-in for browser dev. */
   kind: "tauri" | "mock";
@@ -156,6 +171,13 @@ export interface Api {
   exportBrief(slug: string, id: string): Promise<string>;
   /** Keyword search; `project` omitted = every project. Read-only, no Claude involved. */
   searchCards(query: string, project?: string, limit?: number): Promise<SearchHit[]>;
+  /** Removes the project folder (Recycle Bin when possible). The Inbox can't be deleted. */
+  deleteProject(slug: string): Promise<DeletedProject>;
+  /** thread = a card id, or "project". */
+  loadChat(slug: string, thread: string): Promise<ChatThreadFile>;
+  saveChat(slug: string, thread: string, data: ChatThreadFile): Promise<void>;
+  /** Clears one thread's file and its Claude session. */
+  resetChat(slug: string, thread: string): Promise<void>;
   listCustomThemes(): Promise<unknown[]>;
   saveCustomTheme(id: string, theme: unknown): Promise<void>;
   deleteCustomTheme(id: string): Promise<void>;

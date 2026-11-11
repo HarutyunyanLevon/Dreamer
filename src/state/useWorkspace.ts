@@ -40,6 +40,7 @@ export function useWorkspace() {
   const [active, setActive] = useState<string | null>(null);
   const [data, setData] = useState<ProjectData | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [ready, setReady] = useState(false);
   const [canUndo, setCanUndo] = useState(false);
   const [canRedo, setCanRedo] = useState(false);
@@ -506,6 +507,23 @@ export function useWorkspace() {
     createProject: async (name: string) => {
       const p = await run(() => api.createProject(name));
       if (p) await select(p.slug);
+    },
+    notice,
+    clearNotice: () => setNotice(null),
+    /**
+     * Sidebar "Delete project" (after the user confirmed). Moves the selection to the Inbox first,
+     * so neither the reload nor the file watcher ever looks for the vanished folder.
+     */
+    deleteProject: async (slug: string) => {
+      if (slug === INBOX) return;
+      if (activeRef.current === slug) await select(INBOX);
+      try {
+        const out = await api.deleteProject(slug);
+        setNotice(out.recycled ? "Project moved to the Recycle Bin." : "Project deleted from disk.");
+      } catch (e) {
+        setError(message(e));
+      }
+      await refresh();
     },
     setProjectTheme: (themeId: string | null) => run(() => api.updateProject(activeRef.current!, { theme: themeId ?? "" })),
     createCard,

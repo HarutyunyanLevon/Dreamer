@@ -42,9 +42,21 @@ function MainApp() {
     <ThemeProvider projectTheme={ws.data?.meta.theme ?? null}>
       <ShaderBackground />
       <CanvasArea ws={ws} />
-      <Sidebar projects={ws.projects} active={ws.active} onSelect={(s) => void ws.select(s)} onCreate={(n) => void ws.createProject(n)} />
+      <Sidebar
+        projects={ws.projects}
+        active={ws.active}
+        onSelect={(s) => void ws.select(s)}
+        onCreate={(n) => void ws.createProject(n)}
+        onDelete={(s) => void ws.deleteProject(s)}
+      />
       <ChatPanel ws={ws} />
       {searchOpen && <SearchPalette ws={ws} onClose={() => setSearchOpen(false)} />}
+      {ws.notice && !ws.error && (
+        <div className="toast" role="status">
+          <span>{ws.notice}</span>
+          <button type="button" className="btn" onClick={ws.clearNotice}>Close</button>
+        </div>
+      )}
       {ws.error && (
         <div className="toast" role="alert">
           <span>{ws.error}</span>

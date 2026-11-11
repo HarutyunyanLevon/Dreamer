@@ -33,6 +33,8 @@ export function checkTheme(t: Theme): ContrastCheck[] {
     ["muted on cloud card", t.ui.muted, cloudCard, 4.5],
     ["accent on cloud card (links)", t.ui.accent, cloudCard, 4.5],
     ["white on accent (buttons)", "#ffffff", hexToRgb(t.ui.accent), 4.5],
+    // Fixed (theme-independent) destructive button, e.g. "Delete project".
+    ["white on danger button", "#ffffff", hexToRgb("#a3283b"), 4.5],
     // Non-text UI component (WCAG 1.4.11): the scrollbar thumb against its track on glass.
     ["scrollbar thumb on track (UI)", thumb, track, 3],
   ];

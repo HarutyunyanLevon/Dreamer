@@ -220,17 +220,48 @@ fn run_tool(state: &AppState, tool: &str, input: Value) -> Result<Value> {
     }
 }
 
-/// Sends one chat turn. `context` (a card's title/body/tags, already formatted by the caller) is
-/// prepended to `text` so the sidecar stays unaware of Dreamer's card shape entirely.
-pub fn send_message(app: &AppHandle, state: &AppState, slug: String, id: String, text: String, context: Option<String>) -> Result<()> {
+/// One chat turn from the UI.
+pub struct Turn {
+    pub slug: String,
+    pub id: String,
+    pub text: String,
+    /// Pre-formatted card context (title/body/tags) from the UI.
+    pub context: Option<String>,
+    /// Chat thread: a card id, or "project".
+    pub thread: String,
+    /// Claude session id saved in that thread's file, to resume the conversation.
+    pub resume: Option<String>,
+}
+
+/// The sidecar's key for a thread: one Claude session per (project, thread).
+fn thread_key(slug: &str, thread: &str) -> String {
+    format!("{slug}/{thread}")
+}
+
+/// Sends one chat turn. `context` is prepended to `text` so the sidecar stays unaware of
+/// Dreamer's card shape entirely.
+pub fn send_message(app: &AppHandle, state: &AppState, turn: Turn) -> Result<()> {
+    if turn.thread != "project" {
+        crate::storage::check_id(&turn.thread)?;
+    }
+    crate::storage::check_slug(&turn.slug)?;
     ensure_started(app, state)?;
-    *state.claude.active_slug.lock().map_err(|_| AppError::Invalid("sidecar lock poisoned".into()))? = slug;
-    let full_text = match context {
-        Some(c) if !c.trim().is_empty() => format!("{c}\n\n---\n\n{text}"),
-        _ => text,
+    *state.claude.active_slug.lock().map_err(|_| AppError::Invalid("sidecar lock poisoned".into()))? = turn.slug.clone();
+    let full_text = match turn.context {
+        Some(c) if !c.trim().is_empty() => format!("{c}\n\n---\n\n{}", turn.text),
+        _ => turn.text,
     };
-    write_line(state, &json!({ "type": "user_message", "id": id, "text": full_text }));
+    write_line(
+        state,
+        &json!({ "type": "user_message", "id": turn.id, "text": full_text, "thread": thread_key(&turn.slug, &turn.thread), "resume": turn.resume }),
+    );
     Ok(())
+}
+
+/// Drops the sidecar's live session for one thread (after "Reset chat"). No-op when the
+/// sidecar isn't running: a fresh start has no sessions anyway.
+pub fn reset_thread(state: &AppState, slug: &str, thread: &str) {
+    write_line(state, &json!({ "type": "reset_thread", "thread": thread_key(slug, thread) }));
 }
 
 pub fn interrupt(state: &AppState) -> Result<()> {

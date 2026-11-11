@@ -1,4 +1,4 @@
-import type { Api, Canvas, Card, ChangeEvent, NewCard, ProjectData, ProjectSummary, SearchHit, Settings, TrashItem } from "./types";
+import type { Api, Canvas, Card, ChangeEvent, ChatThreadFile, NewCard, ProjectData, ProjectSummary, SearchHit, Settings, TrashItem } from "./types";
 
 /** A rough browser-only stand-in for the Rust scorer (title > tags > fields > body). */
 const foldText = (s: string) => s.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase();
@@ -51,6 +51,7 @@ export function createMockApi(): Api {
   const settings: Settings = { version: 1, theme: "pearl-glow", hotkey: "Ctrl+Shift+Space", last_project: null };
   const projects = new Map<string, MockProject>();
   const customThemes = new Map<string, unknown>();
+  const chats = new Map<string, ChatThreadFile>();
   const listeners = new Set<(e: ChangeEvent[]) => void>();
   const emit = (slug: string) => listeners.forEach((l) => l([{ scope: "project", project: slug }]));
 
@@ -212,6 +213,21 @@ export function createMockApi(): Api {
         }
       }
       return hits.sort((a, b) => b.score - a.score).slice(0, limit);
+    },
+    deleteProject: async (slug) => {
+      if (slug === "inbox") throw new Error("The Inbox can't be deleted.");
+      need(slug);
+      projects.delete(slug);
+      if (settings.last_project === slug) settings.last_project = null;
+      listeners.forEach((l) => l([{ scope: "project", project: slug }]));
+      return { slug, path: `(in-memory)/projects/${slug}`, recycled: true };
+    },
+    loadChat: async (slug, thread) => structuredClone(chats.get(`${slug}/${thread}`) ?? { version: 1, messages: [] }),
+    saveChat: async (slug, thread, data) => {
+      chats.set(`${slug}/${thread}`, structuredClone(data));
+    },
+    resetChat: async (slug, thread) => {
+      chats.delete(`${slug}/${thread}`);
     },
     listCustomThemes: async () => [...customThemes.values()],
     saveCustomTheme: async (id, theme) => {

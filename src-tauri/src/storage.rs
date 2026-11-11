@@ -305,6 +305,73 @@ impl Workspace {
         Err(AppError::Invalid("could not find a free project id".into()))
     }
 
+    /// Removes a project folder from disk (a user action: Claude has no tool for this). With
+    /// `recycle`, the folder goes to the OS Recycle Bin / Trash; if that isn't possible it is
+    /// deleted outright. The Inbox can't be deleted. Returns whether it was recycled.
+    pub fn delete_project(&self, slug: &str, recycle: bool) -> Result<DeletedProject> {
+        if slug == INBOX_SLUG {
+            return Err(AppError::Invalid("The Inbox can't be deleted.".into()));
+        }
+        let dir = self.existing_project_dir(slug)?;
+        // Belt and braces: never remove anything that isn't exactly <root>/projects/<slug>.
+        if dir.parent() != Some(self.root.join("projects").as_path()) {
+            return Err(AppError::Invalid(format!("refusing to delete {}", dir.display())));
+        }
+        let mut recycled = false;
+        if recycle {
+            match trash::delete(&dir) {
+                Ok(()) => recycled = true,
+                Err(e) => eprintln!("[dreamer] Recycle Bin unavailable for {} ({e}); deleting instead", dir.display()),
+            }
+        }
+        if !recycled && dir.exists() {
+            fs::remove_dir_all(&dir).map_err(|e| AppError::io(format!("delete {}", dir.display()), e))?;
+        }
+        let settings = self.get_settings()?;
+        if settings.last_project.as_deref() == Some(slug) {
+            self.update_settings(SettingsPatch { last_project: Some(String::new()), ..Default::default() })?;
+        }
+        Ok(DeletedProject { slug: slug.into(), path: dir.display().to_string(), recycled })
+    }
+
+    // ----- chat threads (plain JSON files in <project>/chats/) -----
+
+    /// `thread` is a card id, or "project" for the project-level thread.
+    fn chat_path(&self, slug: &str, thread: &str) -> Result<PathBuf> {
+        if thread != "project" {
+            check_id(thread)?;
+        }
+        Ok(self.existing_project_dir(slug)?.join("chats").join(format!("{thread}.json")))
+    }
+
+    /// The saved thread, or an empty one. The shape is the UI's business; Rust stores it as-is.
+    pub fn load_chat(&self, slug: &str, thread: &str) -> Result<Value> {
+        let path = self.chat_path(slug, thread)?;
+        match fs::read_to_string(&path) {
+            Ok(t) => serde_json::from_str(&t).map_err(|e| AppError::Parse { context: path.display().to_string(), message: e.to_string() }),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(serde_json::json!({ "version": 1, "messages": [] })),
+            Err(e) => Err(AppError::io(format!("read {}", path.display()), e)),
+        }
+    }
+
+    pub fn save_chat(&self, slug: &str, thread: &str, data: &Value) -> Result<()> {
+        let path = self.chat_path(slug, thread)?;
+        if let Some(dir) = path.parent() {
+            fs::create_dir_all(dir).map_err(|e| AppError::io("create chats folder", e))?;
+        }
+        write_json(&path, data)
+    }
+
+    /// "Reset chat": clears one thread (and only that one). A user action with confirmation.
+    pub fn reset_chat(&self, slug: &str, thread: &str) -> Result<()> {
+        let path = self.chat_path(slug, thread)?;
+        match fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(AppError::io(format!("reset {}", path.display()), e)),
+        }
+    }
+
     pub fn update_project(&self, slug: &str, patch: ProjectPatch) -> Result<ProjectSummary> {
         let dir = self.existing_project_dir(slug)?;
         let mut meta = read_json_or_default_meta(&dir.join("project.json"), slug)?;
@@ -924,6 +991,55 @@ mod tests {
         assert!(ws.list_trash(INBOX_SLUG).unwrap().is_empty());
         assert!(ws.restore_card(INBOX_SLUG, &id).is_err());
         assert!(matches!(ws.delete_card(INBOX_SLUG, "01NOPE"), Err(AppError::NotFound(_))));
+    }
+
+    #[test]
+    fn delete_project_removes_folder_refuses_inbox_and_clears_last_project() {
+        let (_d, ws) = ws();
+        let p = ws.create_project("Doomed").unwrap();
+        ws.create_card(&p.slug, new_card("x")).unwrap();
+        ws.save_chat(&p.slug, "project", &serde_json::json!({"messages": []})).unwrap();
+        ws.update_settings(SettingsPatch { last_project: Some(p.slug.clone()), ..Default::default() }).unwrap();
+        assert!(matches!(ws.delete_project(INBOX_SLUG, false), Err(AppError::Invalid(_))));
+        assert!(matches!(ws.delete_project("nope", false), Err(AppError::NotFound(_))));
+        assert!(ws.delete_project("../inbox", false).is_err());
+        let out = ws.delete_project(&p.slug, false).unwrap();
+        assert!(!out.recycled);
+        assert!(!ws.root.join("projects").join(&p.slug).exists());
+        assert_eq!(ws.get_settings().unwrap().last_project, None);
+        assert!(ws.list_projects().unwrap().iter().all(|s| s.slug != p.slug));
+        assert!(ws.root.join("inbox").is_dir(), "inbox untouched");
+    }
+
+    /// Moves a throwaway project to the real Recycle Bin: `cargo test -- --ignored recycle`.
+    #[test]
+    #[ignore]
+    fn delete_project_recycles_live() {
+        let (_d, ws) = ws();
+        let p = ws.create_project("dreamer-recycle-test").unwrap();
+        let out = ws.delete_project(&p.slug, true).unwrap();
+        println!("recycled={} path={}", out.recycled, out.path);
+        assert!(out.recycled);
+        assert!(!ws.root.join("projects").join(&p.slug).exists());
+    }
+
+    #[test]
+    fn chat_threads_are_per_card_files_and_reset_clears_one() {
+        let (_d, ws) = ws();
+        let a = ws.create_card(INBOX_SLUG, new_card("a")).unwrap();
+        let empty = ws.load_chat(INBOX_SLUG, &a.meta.id).unwrap();
+        assert_eq!(empty["messages"], serde_json::json!([]));
+        let t1 = serde_json::json!({"version": 1, "sessionId": "s1", "messages": [{"id": "m1", "role": "user", "text": "hi"}]});
+        ws.save_chat(INBOX_SLUG, &a.meta.id, &t1).unwrap();
+        ws.save_chat(INBOX_SLUG, "project", &serde_json::json!({"messages": [1]})).unwrap();
+        assert!(ws.root.join(format!("inbox/chats/{}.json", a.meta.id)).is_file());
+        assert_eq!(ws.load_chat(INBOX_SLUG, &a.meta.id).unwrap(), t1);
+        ws.reset_chat(INBOX_SLUG, &a.meta.id).unwrap();
+        assert_eq!(ws.load_chat(INBOX_SLUG, &a.meta.id).unwrap()["messages"], serde_json::json!([]));
+        assert_eq!(ws.load_chat(INBOX_SLUG, "project").unwrap()["messages"], serde_json::json!([1]), "other threads untouched");
+        ws.reset_chat(INBOX_SLUG, &a.meta.id).unwrap(); // idempotent
+        assert!(ws.load_chat(INBOX_SLUG, "../workspace").is_err());
+        assert!(ws.save_chat(INBOX_SLUG, "a/b", &serde_json::json!({})).is_err());
     }
 
     #[test]

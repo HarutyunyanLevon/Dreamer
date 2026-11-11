@@ -169,3 +169,25 @@ Manual checklist (native window; not driven by me):
 - [ ] Card editor: the notes area is large. "+ More" is collapsed and shows custom fields and web clip URL with helper text. On a card with values, the count badge shows, and the toggle state is remembered when you reopen that card.
 - [ ] Drag a card, then Ctrl+Z, then reload: the card is still at the undone position (regression check for the flush fix).
 - [ ] `npm run dev` with `?stress=1`, Fit, then pan and drag: smooth. I didn't measure this here (no profiler on the native window).
+
+## Fix pass 3: Housekeeping checks
+Automated: `cargo test` gives 43 passing, plus 2 ignored live tests.
+- `delete_project_removes_folder_refuses_inbox_and_clears_last_project`: the Inbox is refused (Invalid), an unknown slug is NotFound, `../inbox` is refused, the folder is gone, `last_project` is cleared, the project is no longer listed, and the Inbox is untouched.
+- `chat_threads_are_per_card_files_and_reset_clears_one`: an empty default thread, a save/load round trip, the file at `inbox/chats/<id>.json`, reset clearing only that thread, reset being idempotent, and bad thread names (`../workspace`, `a/b`) being refused.
+- `watcher::classifies_paths_and_ignores_noise` (extended): `chats/*.json` writes are ignored, a project whose slug is "chats" still counts, and deleting a whole project folder still reports that project.
+
+`cargo check`, `npm run build` and `npm run check:themes` (new "white on danger button" row) are all clean.
+
+File effects, checked live from the shell:
+- **Recycle Bin.** `cargo test -- --ignored delete_project_recycles_live --nocapture` printed `recycled=true` for a throwaway project in a temp workspace. A PowerShell query of the Windows Recycle Bin (`Shell.Application` namespace 10) then listed `dreamer-recycle-test`, so the real Recycle Bin path works on this machine. That test folder is still in the Recycle Bin and is safe to empty.
+- **Per-thread sessions against the real Claude Code** (a harness standing in for Rust, sending the exact `user_message`/`reset_thread` protocol):
+  - Thread A was told the codeword PELICAN. Thread B in the same project didn't know it.
+  - Thread A recalled it, and still recalled it after the sidecar process was killed and restarted with A's saved `sessionId` (resume works).
+  - After `reset_thread` for A, it no longer knew it.
+  - A bogus saved session id recovered to a fresh session and answered. This last case failed on the first run; it was fixed (the zero-turn error result before the throw) and re-run. All 5 checks passed.
+
+Manual checklist (native window; not driven by me):
+- [ ] Sidebar ▸ New theme: the dialog is large, like the card editor. Controls are on the left and the preview on the right updates live as you drag sliders and pick colours. Contrast warnings appear inside the preview. It stacks on a narrow window.
+- [ ] Hover a project: a trash icon appears (always shown on the active row; there is none on the Inbox). Click it and the dialog shows the folder path and the Recycle Bin wording. Cancel does nothing. Delete moves the selection to the Inbox, and the project disappears from the list without an error toast. A "moved to the Recycle Bin" notice appears, and Explorer's Recycle Bin has the folder. Restore it from Explorer and it reappears in the sidebar live.
+- [ ] Select card A and chat, then select card B: an empty, separate thread. Back to A: the A thread is intact. Deselect the card: the project thread. Restart Dreamer: all three threads are still there, and Claude still remembers A's context.
+- [ ] Reset chat on A, then confirm: A's thread is empty, `chats/<A id>.json` is gone, and Claude no longer remembers it. B and the project thread are untouched.

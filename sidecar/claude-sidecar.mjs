@@ -2,7 +2,8 @@
 // the user's locally installed, already-logged-in Claude Code — no API key.
 //
 // Protocol: newline-delimited JSON on stdin/stdout.
-//   in:  {type:"user_message", id, text}
+//   in:  {type:"user_message", id, text, thread, resume?}   -- thread = "<project>/<card id|project>"
+//        {type:"reset_thread", thread}                    -- "Reset chat": drop that thread's session
 //        {type:"interrupt"}
 //        {type:"tool_response", reqId, result} | {type:"tool_response", reqId, error}
 //   out: {type:"ready"}
@@ -152,7 +153,8 @@ const proposeLinkTool = tool(
   },
 );
 
-const dreamerServer = createSdkMcpServer({
+// A fresh MCP server instance per session: an SDK server object binds to one transport.
+const makeServer = () => createSdkMcpServer({
   name: "dreamer",
   version: "1.0.0",
   tools: [createCardTool, askQuestionTool, searchCardsTool, readCardTool, listRelatedTool, proposeLinkTool],
@@ -178,64 +180,145 @@ const SYSTEM_PROMPT =
 function makeTurnQueue() {
   const waiting = [];
   const buffered = [];
+  const END = Symbol("end");
+  let ended = false;
   return {
     push(msg) {
+      if (ended) return;
       const w = waiting.shift();
       if (w) w(msg);
       else buffered.push(msg);
     },
+    /** Ends the prompt stream, which ends that Claude session. */
+    end() {
+      ended = true;
+      waiting.splice(0).forEach((w) => w(END));
+    },
     async *[Symbol.asyncIterator]() {
       for (;;) {
-        if (buffered.length) yield buffered.shift();
-        else yield await new Promise((resolve) => waiting.push(resolve));
+        if (ended && !buffered.length) return;
+        const next = buffered.length ? buffered.shift() : await new Promise((resolve) => waiting.push(resolve));
+        if (next === END) return;
+        yield next;
       }
     },
   };
 }
 
-const turns = makeTurnQueue();
-let currentId = null;
-let currentText = "";
+// ---- Sessions: one Claude session per chat thread ("<project>/<card id | project>") ----
+//
+// Each thread gets its own long-lived query() whose async-iterable prompt carries that thread's
+// turns. A thread's Claude session id is saved by the UI in the thread's chat file and passed
+// back as `resume`, so a thread continues where it left off even after Dreamer restarts. At most
+// MAX_LIVE sessions run at once (each is a Claude Code process); the least recently used idle one
+// is closed and simply resumed later. "Reset chat" drops the thread's session so its next message
+// starts a fresh one.
 
-const q = query({
-  prompt: turns,
-  options: {
-    systemPrompt: { type: "custom", prompt: SYSTEM_PROMPT },
-    mcpServers: { dreamer: dreamerServer },
-    tools: [],
-    allowedTools: [
-      "mcp__dreamer__create_card",
-      "mcp__dreamer__ask_question",
-      "mcp__dreamer__search_cards",
-      "mcp__dreamer__read_card",
-      "mcp__dreamer__list_related",
-      "mcp__dreamer__propose_link",
-    ],
-    permissionMode: "bypassPermissions",
-    includePartialMessages: true,
-  },
-});
+const MAX_LIVE = 3;
+const sessions = new Map();
+let currentId = null; // the turn being answered (one at a time; the UI gates on "busy")
+let currentSession = null;
 
-(async () => {
+const BASE_OPTIONS = {
+  systemPrompt: { type: "custom", prompt: SYSTEM_PROMPT },
+  tools: [],
+  allowedTools: [
+    "mcp__dreamer__create_card",
+    "mcp__dreamer__ask_question",
+    "mcp__dreamer__search_cards",
+    "mcp__dreamer__read_card",
+    "mcp__dreamer__list_related",
+    "mcp__dreamer__propose_link",
+  ],
+  permissionMode: "bypassPermissions",
+  includePartialMessages: true,
+};
+
+function closeSession(s) {
+  sessions.delete(s.key);
+  s.closed = true;
+  s.turns.end();
   try {
-    for await (const msg of q) {
-      if (msg.type === "stream_event" && msg.event?.type === "content_block_delta" && msg.event.delta?.type === "text_delta") {
-        currentText += msg.event.delta.text;
-        if (currentId) send({ type: "delta", id: currentId, text: msg.event.delta.text });
-      } else if (msg.type === "result") {
-        if (currentId) {
-          send({ type: "message_done", id: currentId, text: msg.subtype === "success" ? msg.result : currentText, sessionId: msg.session_id, isError: msg.is_error });
+    s.q.close?.();
+  } catch {
+    /* already gone */
+  }
+}
+
+function evictIfNeeded() {
+  while (sessions.size >= MAX_LIVE) {
+    const idle = [...sessions.values()].filter((s) => s !== currentSession).sort((a, b) => a.lastUsed - b.lastUsed)[0];
+    if (!idle) break;
+    closeSession(idle);
+  }
+}
+
+function openSession(key, resume) {
+  evictIfNeeded();
+  const turns = makeTurnQueue();
+  const q = query({ prompt: turns, options: { ...BASE_OPTIONS, mcpServers: { dreamer: makeServer() }, ...(resume ? { resume } : {}) } });
+  const s = { key, q, turns, resume: resume || null, lastUsed: Date.now(), text: "", answered: false, pending: null, closed: false };
+  sessions.set(key, s);
+  pump(s);
+  return s;
+}
+
+function restartFresh(s) {
+  sessions.delete(s.key);
+  s.closed = true;
+  const fresh = openSession(s.key, null);
+  if (currentSession === s) currentSession = fresh;
+  if (s.pending) {
+    fresh.pending = s.pending;
+    fresh.turns.push(s.pending);
+  }
+}
+
+function pump(s) {
+  (async () => {
+    try {
+      for await (const msg of s.q) {
+        if (msg.type === "stream_event" && msg.event?.type === "content_block_delta" && msg.event.delta?.type === "text_delta") {
+          s.answered = true;
+          s.text += msg.event.delta.text;
+          if (currentSession === s && currentId) send({ type: "delta", id: currentId, text: msg.event.delta.text });
+        } else if (msg.type === "result") {
+          // A resume that can't find its session reports a zero-turn error result (then throws):
+          // don't surface it, recover below by starting the thread afresh.
+          if (msg.is_error && msg.num_turns === 0 && s.resume && !s.answered) {
+            s.resumeFailed = true;
+            continue;
+          }
+          s.answered = true;
+          if (currentSession === s && currentId) {
+            send({ type: "message_done", id: currentId, text: msg.subtype === "success" ? msg.result : s.text, sessionId: msg.session_id, isError: msg.is_error });
+            currentId = null;
+            currentSession = null;
+          }
+          s.text = "";
+          s.pending = null;
+        } else if (msg.type === "assistant" && msg.message?.error) {
+          if (currentSession === s && currentId) send({ type: "error", id: currentId, message: `Claude could not respond (${msg.message.error}).` });
         }
+      }
+      if (s.resumeFailed && !s.closed) restartFresh(s);
+    } catch (e) {
+      if (s.closed) return;
+      // A saved session that can't be resumed (deleted, expired): start that thread afresh and
+      // replay the turn that was waiting, instead of failing the user's message.
+      if (s.resume && !s.answered && s.pending) {
+        restartFresh(s);
+        return;
+      }
+      sessions.delete(s.key);
+      if (currentSession === s) {
+        send({ type: "error", id: currentId, message: e?.message ?? String(e) });
         currentId = null;
-        currentText = "";
-      } else if (msg.type === "assistant" && msg.message?.error) {
-        if (currentId) send({ type: "error", id: currentId, message: `Claude could not respond (${msg.message.error}).` });
+        currentSession = null;
       }
     }
-  } catch (e) {
-    send({ type: "error", id: currentId, message: e?.message ?? String(e) });
-  }
-})();
+  })();
+}
 
 const rl = createInterface({ input: process.stdin });
 rl.on("line", (line) => {
@@ -247,11 +330,23 @@ rl.on("line", (line) => {
     return;
   }
   if (msg.type === "user_message") {
+    const key = msg.thread || "default";
+    const s = sessions.get(key) ?? openSession(key, msg.resume);
+    s.lastUsed = Date.now();
+    s.text = "";
     currentId = msg.id;
-    currentText = "";
-    turns.push({ type: "user", message: { role: "user", content: [{ type: "text", text: msg.text }] }, parent_tool_use_id: null });
+    currentSession = s;
+    s.pending = { type: "user", message: { role: "user", content: [{ type: "text", text: msg.text }] }, parent_tool_use_id: null };
+    s.turns.push(s.pending);
   } else if (msg.type === "interrupt") {
-    q.interrupt?.().catch(() => {});
+    currentSession?.q.interrupt?.().catch(() => {});
+  } else if (msg.type === "reset_thread") {
+    const s = sessions.get(msg.thread);
+    if (s) closeSession(s);
+    if (currentSession === s) {
+      currentId = null;
+      currentSession = null;
+    }
   } else if (msg.type === "tool_response") {
     const pending = pendingToolReplies.get(msg.reqId);
     if (!pending) return;

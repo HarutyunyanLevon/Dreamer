@@ -27,6 +27,12 @@ pub fn classify(root: &Path, path: &Path) -> Option<ChangeEvent> {
     if parts.iter().any(|p| p == ".git") || parts.last().is_some_and(|f| f.ends_with(".tmp")) {
         return None;
     }
+    // <project>/chats/*.json is written by the chat panel itself on every turn; reloading the
+    // canvas (and re-statting the search index) for those writes would be pure churn.
+    let chats_at = if first == "inbox" { 1 } else { 2 };
+    if parts.get(chats_at).is_some_and(|p| p == "chats") && parts.len() > chats_at + 1 {
+        return None;
+    }
     match first.as_str() {
         "workspace.json" => Some(ChangeEvent { scope: "settings".into(), project: None }),
         "themes" => Some(ChangeEvent { scope: "themes".into(), project: None }),
@@ -68,6 +74,12 @@ mod tests {
         assert_eq!(ev("/w/.git/index"), None);
         assert_eq!(ev("/w/projects/fish/.git/HEAD"), None);
         assert_eq!(ev("/elsewhere/x"), None);
+        assert_eq!(ev("/w/inbox/chats/01A.json"), None);
+        assert_eq!(ev("/w/projects/fish/chats/project.json"), None);
+        // A project whose slug is "chats" is still a real change.
+        assert!(ev("/w/projects/chats/cards/01A.md").is_some());
+        // Deleting a whole project folder still reports that project.
+        assert_eq!(ev("/w/projects/fish"), Some(ChangeEvent { scope: "project".into(), project: Some("fish".into()) }));
     }
 
     #[test]

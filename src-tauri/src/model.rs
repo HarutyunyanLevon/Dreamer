@@ -260,6 +260,14 @@ pub struct TrashIndex {
     pub items: Vec<TrashItem>,
 }
 
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct DeletedProject {
+    pub slug: String,
+    pub path: String,
+    /// true = moved to the OS Recycle Bin / Trash; false = deleted outright.
+    pub recycled: bool,
+}
+
 #[derive(Serialize, Clone, Debug)]
 pub struct ProjectData {
     pub slug: String,

@@ -30,6 +30,7 @@ notify = "8"
 notify-debouncer-mini = "0.7.0"
 base64 = "0.22"
 unicode-normalization = "0.1"
+trash = "5"
 
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration

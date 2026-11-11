@@ -6,6 +6,7 @@ import { STAGE_LABEL } from "../theme/types";
 import { ClaudeSetup, needsSetup } from "./ClaudeSetup";
 import { IconSend } from "./Icons";
 import { ScrollArea } from "../ui/Scroll";
+import { Modal } from "../ui/Modal";
 
 const CHIPS = ["/grill-me", "/related", "Summarize", "Give me 3 takes"];
 /** Chips that only make sense about a specific card. */
@@ -24,10 +25,15 @@ function formatContext(ws: Workspace, card: Card | null): string | undefined {
 }
 
 export function ChatPanel({ ws }: { ws: Workspace }) {
+  // One thread per card; the project-level thread when no card is selected.
+  const thread = ws.contextCardId ?? "project";
   const chat = useClaudeChat({
+    slug: ws.active,
+    thread,
     onLinkProposal: (p) => ws.addGhostLink({ slug: p.slug, from: p.from, to: p.to, label: p.label, reason: p.reason }),
   });
   const [text, setText] = useState("");
+  const [confirmReset, setConfirmReset] = useState(false);
   const bodyRef = useRef<HTMLElement | null>(null);
 
   const contextCard = ws.data?.cards.find((c) => c.id === ws.contextCardId) ?? null;
@@ -51,7 +57,7 @@ export function ChatPanel({ ws }: { ws: Workspace }) {
     if (display === "/related" && contextCard) {
       v = `/related: find cards related to "${contextCard.title}" (id ${contextCard.id}) in this project and propose the strongest links from it with propose_link (from "${contextCard.id}"). Don't create cards.`;
     }
-    chat.sendText(ws.active, v, formatContext(ws, contextCard), display);
+    chat.sendText(v, formatContext(ws, contextCard), display);
     setText("");
   };
 
@@ -71,12 +77,46 @@ export function ChatPanel({ ws }: { ws: Workspace }) {
           <div className="chat-title">Claude</div>
           <div className="chat-sub">{contextCard ? `About "${contextCard.title}" · ${STAGE_LABEL[contextCard.stage]}` : "Your idea partner"}</div>
         </div>
-        {contextCard && (
-          <button type="button" className="chip context-clear" onClick={() => ws.setContextCard(null)}>
-            Clear
+        <div className="chat-head-actions">
+          {contextCard && (
+            <button type="button" className="chip" title="Back to the project thread" onClick={() => ws.setContextCard(null)}>
+              Clear
+            </button>
+          )}
+          <button
+            type="button"
+            className="chip"
+            disabled={chat.busy || chat.messages.length === 0}
+            title={contextCard ? `Clear the chat about "${contextCard.title}"` : "Clear the project chat"}
+            onClick={() => setConfirmReset(true)}
+          >
+            Reset chat
           </button>
-        )}
+        </div>
       </header>
+      {confirmReset && (
+        <Modal onClose={() => setConfirmReset(false)} label="Reset chat" size="sm">
+          <h3 className="dialog-title">Reset this chat?</h3>
+          <p>
+            This clears the conversation {contextCard ? <>about <strong>{contextCard.title}</strong></> : <>for the whole project</>} and starts Claude on a
+            fresh session. Other cards' chats and all cards stay as they are.
+          </p>
+          <div className="editor-actions">
+            <div className="side-spacer" />
+            <button type="button" className="btn" onClick={() => setConfirmReset(false)}>Cancel</button>
+            <button
+              type="button"
+              className="btn primary"
+              onClick={() => {
+                setConfirmReset(false);
+                void chat.reset().catch((e) => ws.setError(String(e)));
+              }}
+            >
+              Reset chat
+            </button>
+          </div>
+        </Modal>
+      )}
 
       <ScrollArea boundary className="chat-body" ref={bodyRef}>
         {chat.messages.length === 0 && (

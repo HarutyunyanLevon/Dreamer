@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type CSSProperties } from "react";
+import { themeVars } from "../theme/applyTheme";
 import { checkTheme } from "../theme/contrast";
 import { useTheme } from "../theme/ThemeContext";
 import { STAGES, STAGE_LABEL, type StageId, type Theme } from "../theme/types";
@@ -53,6 +54,8 @@ export function ThemeEditor({ initial, isNew, onClose }: { initial: Theme; isNew
           <button type="button" className="icon-btn" aria-label="Close" onClick={onClose}><IconClose /></button>
         </div>
 
+        <div className="theme-editor-grid">
+        <div className="theme-controls">
         <div className="editor-row">
           <span className="side-label">Palette</span>
           <div className="swatch-row">
@@ -100,14 +103,9 @@ export function ThemeEditor({ initial, isNew, onClose }: { initial: Theme; isNew
           </div>
         </div>
 
-        {warnings.length > 0 && (
-          <div className="contrast-warnings">
-            <span className="side-label">Contrast warnings</span>
-            {warnings.map((w) => (
-              <div key={w.label} className="warn-row">{w.label}: {w.ratio.toFixed(2)} (needs {w.min})</div>
-            ))}
-          </div>
-        )}
+        </div>
+        <ThemePreview theme={draft} warnings={warnings} />
+        </div>
 
         <div className="editor-actions">
           {!isNew && (
@@ -128,5 +126,57 @@ function Slider({ label, value, min, max, step, onChange }: { label: string; val
       <input type="range" min={min} max={max} step={step} value={value} onChange={(e) => onChange(Number(e.target.value))} />
       <span className="slider-val">{value.toFixed(2)}</span>
     </label>
+  );
+}
+
+/**
+ * Live preview of the draft, scoped to this box via the theme's CSS variables (the whole app
+ * behind the dialog previews it too). Shows every token in use: glass panel text, accent button,
+ * chip, the four stage cards, a ghost card, a link, the scrollbar, and any contrast warnings.
+ */
+function ThemePreview({ theme, warnings }: { theme: Theme; warnings: { label: string; ratio: number; min: number }[] }) {
+  const p = theme.shader.palette;
+  const style = {
+    ...themeVars(theme),
+    background: `radial-gradient(120% 90% at 15% 10%, ${p[1]} 0%, transparent 60%), radial-gradient(100% 80% at 90% 90%, ${p[3]} 0%, transparent 60%), linear-gradient(135deg, ${p[0]}, ${p[2]} 55%, ${p[4]})`,
+  } as CSSProperties;
+  return (
+    <aside className="theme-preview" style={style} aria-label="Theme preview">
+      <div className="preview-panel glass">
+        <div className="preview-title">{theme.name || "Untitled theme"}</div>
+        <p className="preview-body">Body text on glass reads like this.</p>
+        <p className="preview-muted">Muted labels and helper text.</p>
+        <div className="preview-row">
+          <button type="button" className="btn primary" tabIndex={-1}>Primary</button>
+          <button type="button" className="chip" tabIndex={-1}>Chip</button>
+        </div>
+      </div>
+      <div className="preview-cards">
+        {STAGES.map((s) => (
+          <div key={s} className={`card stage-${s}`}>
+            <div className="card-head">
+              <span className={`dot dot-${s}`} aria-hidden="true" />
+              <span className="stage-name">{STAGE_LABEL[s]}</span>
+            </div>
+            <h3>{STAGE_LABEL[s]} idea</h3>
+            <p className="card-body">A line of notes with a <a>link</a>.</p>
+          </div>
+        ))}
+        <div className="card ghost stage-cloud">
+          <div className="ghost-label">Claude suggests</div>
+          <h3>Ghost card</h3>
+        </div>
+      </div>
+      {warnings.length > 0 ? (
+        <div className="contrast-warnings" role="status">
+          <span className="side-label">Contrast warnings</span>
+          {warnings.map((w) => (
+            <div key={w.label} className="warn-row">{w.label}: {w.ratio.toFixed(2)} (needs {w.min})</div>
+          ))}
+        </div>
+      ) : (
+        <div className="preview-ok" role="status">All text meets the contrast targets.</div>
+      )}
+    </aside>
   );
 }
