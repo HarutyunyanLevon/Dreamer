@@ -36,6 +36,7 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
   const rootRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const sizeRef = useRef({ w: 1200, h: 800 });
+  const originRef = useRef({ x: 0, y: 0 });
   const [cameraAnim, setCameraAnim] = useState(false);
   const cameraAnimTimer = useRef<number | undefined>(undefined);
   const [menu, setMenu] = useState<{ id: string; x: number; y: number } | null>(null);
@@ -74,7 +75,11 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
     });
 
   const vp = data?.canvas.viewport ?? { x: 300, y: 110, zoom: 1 };
-  const camera = { "--pan-x": `${vp.x}px`, "--pan-y": `${vp.y}px`, "--zoom": vp.zoom } as CSSProperties;
+  // The camera is applied to exactly two elements: the world's transform and the grid's background.
+  // It is deliberately not an inherited custom property on the canvas: changing one of those every
+  // pan frame made the browser re-resolve the styles of every card on screen (see decisions, item 4).
+  const worldStyle = { transform: `translate(${vp.x}px, ${vp.y}px) scale(${vp.zoom})` } as CSSProperties;
+  const gridStyle = { backgroundSize: `${30 * vp.zoom}px ${30 * vp.zoom}px`, backgroundPosition: `${vp.x}px ${vp.y}px` } as CSSProperties;
   const title = data?.meta.name ?? "";
 
   const visible = useMemo(() => (data?.cards ?? []).filter((c) => filter.has(c.stage)), [data, filter]);
@@ -134,9 +139,9 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
       // Ctrl+wheel always zooms the canvas, even over a scrollable card body.
       if (!(e.ctrlKey || e.metaKey) && wheelBelongsToContent(t, el, e.deltaX, e.deltaY)) return;
       e.preventDefault();
-      const rect = el.getBoundingClientRect();
-      const sx = e.clientX - rect.left;
-      const sy = e.clientY - rect.top;
+      // Cached origin: measuring here would force a synchronous style recalc on every wheel event.
+      const sx = e.clientX - originRef.current.x;
+      const sy = e.clientY - originRef.current.y;
       if (e.ctrlKey || e.metaKey) {
         zoomAt(sx, sy, vp.zoom * Math.exp(-e.deltaY * 0.0015));
       } else {
@@ -184,9 +189,13 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
     if (!el) return;
     const ro = new ResizeObserver(() => {
       sizeRef.current = { w: el.clientWidth, h: el.clientHeight };
+      const r = el.getBoundingClientRect();
+      originRef.current = { x: r.left, y: r.top };
     });
     ro.observe(el);
     sizeRef.current = { w: el.clientWidth, h: el.clientHeight };
+    const r = el.getBoundingClientRect();
+    originRef.current = { x: r.left, y: r.top };
     return () => ro.disconnect();
   }, []);
 
@@ -238,7 +247,8 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
   }, [focusRequest, data, filter, vp.zoom, ws, clearFocus, setError]);
 
   const fit = useCallback(() => {
-    if (!data || onScreen.length === 0) {
+    // Bail out only when nothing passes the filter: "no card on screen" is exactly when Fit is needed.
+    if (!data || visible.length === 0) {
       if (data) ws.setViewport({ x: sizeRef.current.w / 2, y: sizeRef.current.h / 2, zoom: 1 });
       return;
     }
@@ -253,7 +263,7 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
     const zoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, Math.min((w - pad * 2) / (maxX - minX), (h - pad * 2) / (maxY - minY)) || 1));
     ws.setViewport({ x: w / 2 - ((minX + maxX) / 2) * zoom, y: h / 2 - ((minY + maxY) / 2) * zoom, zoom });
     void ws.flushCanvas();
-  }, [data, visible, ws, onScreen.length, rectOf]);
+  }, [data, visible, ws, rectOf]);
 
   const createAt = useCallback(
     async (extra: Parameters<Workspace["createCard"]>[0] = {}) => {
@@ -318,9 +328,9 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
   return (
     <main
       ref={rootRef}
-      className={"canvas" + (cameraAnim ? " camera-anim" : "") + (cloudsMove ? " clouds-move" : "")}
+      className={"canvas" + (cameraAnim ? " camera-anim" : "") + (cloudsMove ? " clouds-move" : "") + (vp.zoom < CLOUD_MOTION_MIN_ZOOM ? " far" : "")}
       aria-label="Canvas"
-      style={camera}
+      data-zoom={vp.zoom}
       onPointerDown={onBackgroundPointerDown}
       onPointerMove={onBackgroundPointerMove}
       onPointerUp={onBackgroundPointerUp}
@@ -329,8 +339,8 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
       onDragOver={(e) => e.preventDefault()}
       onDrop={(e) => void onDropFile(e)}
     >
-      <div className="grid" />
-      <div className="world">
+      <div className="grid" style={gridStyle} />
+      <div className="world" style={worldStyle}>
         {data && <LinkLayer cards={onScreen} rectOf={rectOf} ghosts={ws.ghostLinks} />}
         {/* Cards get their own stacking context, so card z-order never covers ghost-link controls. */}
         <div className="cards-layer">
@@ -570,7 +580,7 @@ function LinkLayer({ cards, rectOf, ghosts }: { cards: Card[]; rectOf: RectOf; g
 
 type CardActions = Pick<Workspace, "moveCard" | "resizeCard" | "flushCanvas" | "bringToFront" | "updateCard" | "deleteCard">;
 
-const currentZoom = () => Number(getComputedStyle(document.documentElement.querySelector(".canvas") ?? document.documentElement).getPropertyValue("--zoom")) || 1;
+const currentZoom = () => Number((document.querySelector(".canvas") as HTMLElement | null)?.dataset.zoom) || 1;
 
 const CardView = memo(function CardView({
   card,

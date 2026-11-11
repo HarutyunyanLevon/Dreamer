@@ -248,7 +248,8 @@ Manual:
 ### 4. Stage-based card borders
 Automated: `check:themes` has a 3:1 border row per stage, and all themes pass.
 
-Driven, first run (before the width change): Cloud has the SVG edge and no CSS border, Sketch is dashed, Draft is thin solid, Ghost is dashed with no cloud edge, and `.clouds-move` plus the `cloud-puff` animation are on at zoom 1 with few clouds. Pitch rendered 2px (the fractional width was snapped), which is fixed now (3px). **Not verified:** the rerun after that change failed every check because the page was in an unexpected state (left mid-debug). The 500-card frame timings collected were invalid (the camera had drifted off the cards, so only 2–10 cards were rendered), so **60fps at 500 cards is unverified for this item**.
+Driven (17/17 pass, two consecutive runs; production build served on the dev origin, real Rust core). Checks: Cloud has the SVG edge and no CSS border, Sketch is dashed, Draft is thin solid, Pitch is solid and thicker than Draft (3px vs 1px), and Ghost is dashed with no cloud edge. At zoom >= 1 in the Inbox the edge animates with `cloud-puff`. Zoomed out below 50%, Cloud uses the dotted fallback and its SVG is hidden. In the 500-card "Perf" project, animation follows the rule (zoom >= 0.5 and at most 60 clouds on screen). Panning frame times: 165fps at zoom 1, 111–129fps at 0.59, and 70–101fps at 0.29 with all 500 cards rendered; p95 <= 18.3ms in every case.
+Not covered: the subjective look of the wobble, and a real GPU under other load. The frame-time test dispatches wheel events from page script (one per frame), which exercises the same handler as a mouse wheel.
 
 Manual:
 - [ ] Inbox with one card per stage: puffy Cloud, dashed hand-drawn Sketch, thin Draft, thick crisp Pitch, dashed Ghost.
