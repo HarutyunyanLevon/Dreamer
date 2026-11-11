@@ -1,6 +1,8 @@
 import { CanvasArea } from "./components/CanvasArea";
 import { CaptureWindow } from "./components/CaptureWindow";
 import { ChatPanel } from "./components/ChatPanel";
+import { PanelTabs } from "./components/PanelTabs";
+import { usePanels } from "./state/usePanels";
 import { SearchPalette } from "./components/SearchPalette";
 import { ShaderBackground } from "./components/ShaderBackground";
 import { Sidebar } from "./components/Sidebar";
@@ -24,6 +26,7 @@ export default function App() {
 
 function MainApp() {
   const ws = useWorkspace();
+  const panels = usePanels();
   const [searchOpen, setSearchOpen] = useState(false);
 
   // Ctrl+K (Cmd+K) opens card search from anywhere, even while typing in a field.
@@ -50,6 +53,7 @@ function MainApp() {
         onDelete={(s) => void ws.deleteProject(s)}
       />
       <ChatPanel ws={ws} />
+      <PanelTabs left={panels.left} right={panels.right} onLeft={panels.toggleLeft} onRight={panels.toggleRight} />
       {searchOpen && <SearchPalette ws={ws} onClose={() => setSearchOpen(false)} />}
       {ws.notice && !ws.error && (
         <div className="toast" role="status">

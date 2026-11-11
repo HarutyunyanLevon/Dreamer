@@ -6,6 +6,7 @@ import type { GhostLink, Workspace } from "../state/useWorkspace";
 import { useTheme } from "../theme/ThemeContext";
 import { STAGES, STAGE_LABEL, type StageId } from "../theme/types";
 import { Layer } from "../ui/Layer";
+import { freeArea } from "../ui/layout";
 import { Modal } from "../ui/Modal";
 import { ScrollArea, wheelBelongsToContent } from "../ui/Scroll";
 import { dialogOpen } from "../util/useEscClose";
@@ -16,9 +17,6 @@ import { TrashView } from "./TrashView";
 
 const MIN_ZOOM = 0.2;
 const MAX_ZOOM = 3;
-/** Floating panels over the canvas (sidebar left, chat right, incl. margins), to center focused cards in the free column. */
-const LEFT_PANEL = 240;
-const RIGHT_PANEL = 356;
 const FOCUS_ZOOM = 1.15;
 
 export function CanvasArea({ ws }: { ws: Workspace }) {
@@ -216,7 +214,8 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
     const r = cardRect(pos, heights.current.get(card.id));
     const { w, h } = sizeRef.current;
     const zoom = Math.min(MAX_ZOOM, Math.max(FOCUS_ZOOM, vp.zoom));
-    const cx = w > LEFT_PANEL + RIGHT_PANEL + 200 ? (LEFT_PANEL + w - RIGHT_PANEL) / 2 : w / 2;
+    const free = freeArea(w);
+    const cx = free.right - free.left > 200 ? (free.left + free.right) / 2 : w / 2;
     setCameraAnim(true);
     ws.setViewport({ x: cx - (r.x + r.w / 2) * zoom, y: h / 2 - (r.y + Math.min(r.h, h / zoom - 80) / 2) * zoom, zoom });
     // Not an effect cleanup: the viewport change re-renders right away and must not cancel this.

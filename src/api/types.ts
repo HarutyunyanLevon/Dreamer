@@ -85,12 +85,18 @@ export interface Settings {
   theme: string;
   hotkey: string;
   last_project: string | null;
+  /** Left panel (projects) shown. */
+  show_projects: boolean;
+  /** Right panel (Claude chat) shown. */
+  show_chat: boolean;
 }
 export interface SettingsPatch {
   theme?: string;
   hotkey?: string;
   /** Empty string clears it. */
   last_project?: string;
+  show_projects?: boolean;
+  show_chat?: boolean;
 }
 
 export interface TrashItem {

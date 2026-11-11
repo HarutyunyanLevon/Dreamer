@@ -84,7 +84,7 @@ export function ChatPanel({ ws }: { ws: Workspace }) {
   };
 
   return (
-    <aside className="glass chat" aria-label="Claude chat" data-wheel-boundary="" ref={panelRef}>
+    <aside id="chat-panel" className="glass chat" aria-label="Claude chat" data-wheel-boundary="" ref={panelRef}>
       <header className="chat-head">
         <div className="orb" aria-hidden="true" />
         <div>

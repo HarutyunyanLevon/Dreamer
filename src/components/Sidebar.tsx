@@ -34,7 +34,7 @@ export function Sidebar({ projects, active, onSelect, onCreate, onDelete }: Prop
   };
 
   return (
-    <aside className="glass sidebar" aria-label="Projects" data-wheel-boundary="">
+    <aside id="projects-panel" className="glass sidebar" aria-label="Projects" data-wheel-boundary="">
       <div className="wordmark">Dreamer</div>
 
       <div className="side-label">Projects</div>

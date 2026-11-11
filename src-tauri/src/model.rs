@@ -220,8 +220,17 @@ pub struct Settings {
     pub hotkey: String,
     #[serde(default)]
     pub last_project: Option<String>,
+    /// Left panel (projects) shown. Older files without the key show it.
+    #[serde(default = "yes")]
+    pub show_projects: bool,
+    /// Right panel (Claude chat) shown.
+    #[serde(default = "yes")]
+    pub show_chat: bool,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
+}
+fn yes() -> bool {
+    true
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -230,6 +239,8 @@ impl Default for Settings {
             theme: "pearl-glow".into(),
             hotkey: "Ctrl+Shift+Space".into(),
             last_project: None,
+            show_projects: true,
+            show_chat: true,
             extra: BTreeMap::new(),
         }
     }
@@ -241,6 +252,8 @@ pub struct SettingsPatch {
     pub hotkey: Option<String>,
     /// Empty string clears it.
     pub last_project: Option<String>,
+    pub show_projects: Option<bool>,
+    pub show_chat: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]

@@ -48,7 +48,7 @@ function seedProject(slug: string, name: string): MockProject {
 }
 
 export function createMockApi(): Api {
-  const settings: Settings = { version: 1, theme: "pearl-glow", hotkey: "Ctrl+Shift+Space", last_project: null };
+  const settings: Settings = { version: 1, theme: "pearl-glow", hotkey: "Ctrl+Shift+Space", last_project: null, show_projects: true, show_chat: true };
   const projects = new Map<string, MockProject>();
   const customThemes = new Map<string, unknown>();
   const chats = new Map<string, ChatThreadFile>();
@@ -104,6 +104,8 @@ export function createMockApi(): Api {
       if (patch.theme) settings.theme = patch.theme;
       if (patch.hotkey) settings.hotkey = patch.hotkey;
       if (patch.last_project !== undefined) settings.last_project = patch.last_project || null;
+      if (patch.show_projects !== undefined) settings.show_projects = patch.show_projects;
+      if (patch.show_chat !== undefined) settings.show_chat = patch.show_chat;
       return { ...settings };
     },
     listProjects: async () => [...projects.values()].map(summary),

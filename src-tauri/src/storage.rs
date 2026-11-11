@@ -231,6 +231,12 @@ impl Workspace {
         if let Some(p) = patch.last_project {
             s.last_project = if p.is_empty() { None } else { Some(p) };
         }
+        if let Some(v) = patch.show_projects {
+            s.show_projects = v;
+        }
+        if let Some(v) = patch.show_chat {
+            s.show_chat = v;
+        }
         write_json(&self.root.join("workspace.json"), &s)?;
         Ok(s)
     }
@@ -809,6 +815,25 @@ mod tests {
         ws.create_card(INBOX_SLUG, new_card("keep me")).unwrap();
         let again = Workspace::open(&ws.root).unwrap();
         assert_eq!(again.list_projects().unwrap()[0].card_count, 1);
+    }
+
+    #[test]
+    fn panel_visibility_persists_and_defaults_to_shown() {
+        let (_d, ws) = ws();
+        // An older workspace.json without the keys shows both panels and keeps unknown keys.
+        fs::write(ws.root.join("workspace.json"), r#"{"version":1,"theme":"pearl-glow","hotkey":"Ctrl+Shift+Space","mine":7}"#).unwrap();
+        let s = ws.get_settings().unwrap();
+        assert!(s.show_projects && s.show_chat);
+        let s = ws.update_settings(SettingsPatch { show_projects: Some(false), ..Default::default() }).unwrap();
+        assert!(!s.show_projects && s.show_chat);
+        ws.update_settings(SettingsPatch { show_chat: Some(false), ..Default::default() }).unwrap();
+        let s = ws.get_settings().unwrap();
+        assert!(!s.show_projects && !s.show_chat);
+        assert_eq!(s.extra.get("mine"), Some(&serde_json::json!(7)), "unknown keys survive");
+        let raw: serde_json::Value = serde_json::from_str(&fs::read_to_string(ws.root.join("workspace.json")).unwrap()).unwrap();
+        assert_eq!((raw["show_projects"].clone(), raw["show_chat"].clone()), (serde_json::json!(false), serde_json::json!(false)));
+        ws.update_settings(SettingsPatch { show_projects: Some(true), show_chat: Some(true), ..Default::default() }).unwrap();
+        assert!(ws.get_settings().unwrap().show_projects && ws.get_settings().unwrap().show_chat);
     }
 
     #[test]

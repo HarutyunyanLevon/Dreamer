@@ -198,10 +198,10 @@ button:disabled { cursor: default; }
 /* Center column between the two panels: used to place the floating pills. */
 .pill {
   position: absolute; z-index: 5;
-  left: calc(var(--gap) * 2 + var(--side-w) + (100% - var(--side-w) - var(--chat-w) - var(--gap) * 4) / 2);
+  left: calc(var(--inset-l) + (100% - var(--inset-l) - var(--inset-r)) / 2);
   transform: translateX(-50%);
   display: flex; align-items: center; gap: 6px;
-  padding: 4px 8px; border-radius: 30px; max-width: calc(100% - var(--side-w) - var(--chat-w) - var(--gap) * 5);
+  padding: 4px 8px; border-radius: 30px; max-width: calc(100% - var(--inset-l) - var(--inset-r) - var(--gap));
   background: var(--glass); border: 1px solid rgba(255, 255, 255, 0.95);
   backdrop-filter: blur(18px); -webkit-backdrop-filter: blur(18px);
   box-shadow: 0 8px 28px var(--ink-shadow);
@@ -215,7 +215,7 @@ button:disabled { cursor: default; }
   display: inline-flex; align-items: center; gap: 7px; color: var(--muted); font-weight: 600; font-size: 14px; opacity: 0.8;
 }
 .filter.on { background: rgba(255, 255, 255, 0.8); color: var(--ink); opacity: 1; }
-.zoom-pill { left: calc(var(--gap) * 2 + var(--side-w)); transform: none; bottom: var(--gap); padding: 4px; }
+.zoom-pill { left: var(--inset-l); transform: none; bottom: var(--gap); padding: 4px; }
 .zoom-val { min-width: 48px; text-align: center; font-weight: 700; color: var(--ink); font-size: 14px; }
 .icon-btn { width: 44px; height: 44px; border-radius: 50%; border: 0; background: transparent; display: grid; place-items: center; color: var(--ink); }
 .icon-btn:hover { background: rgba(255, 255, 255, 0.7); }
@@ -314,7 +314,7 @@ button:disabled { cursor: default; }
 .tags { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 8px; }
 .tag { font-size: 12px; font-weight: 600; padding: 2px 9px; border-radius: 10px; background: var(--accent-soft); color: var(--ink); }
 .empty {
-  position: absolute; left: calc(var(--gap) * 2 + var(--side-w) + (100% - var(--side-w) - var(--chat-w) - var(--gap) * 4) / 2);
+  position: absolute; left: calc(var(--inset-l) + (100% - var(--inset-l) - var(--inset-r)) / 2);
   top: 42%; transform: translate(-50%, -50%); text-align: center; max-width: 360px; color: var(--body);
   pointer-events: none; /* the empty-state text is part of the canvas: pressing on it pans */
 }
@@ -567,3 +567,33 @@ button:disabled { cursor: default; }
 .btn.danger { background: #a3283b; color: #fff; border-color: transparent; }
 .chat-head-actions { margin-left: auto; display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
 .chat-head-actions .chip { padding: 0 12px; font-size: 13px; }
+
+/* ---------- Fix pass #3 (2nd round), item 3: side panel toggles ----------
+   <html data-left/data-right="shown|hidden"> (usePanels) drives everything: the panels slide out,
+   the insets shrink to the bookmark strip, and pills, the empty state and canvas-placed popups move
+   into the freed space. Transitions only after the saved state is restored (data-panels-ready);
+   the global reduced-motion rule turns them into instant switches. */
+:root { --tab-w: 30px; }
+:root[data-left="hidden"] { --inset-l: calc(var(--tab-w) + var(--gap)); }
+:root[data-right="hidden"] { --inset-r: calc(var(--tab-w) + var(--gap)); }
+:root[data-panels-ready] .sidebar,
+:root[data-panels-ready] .chat { transition: transform var(--panel-ease), opacity var(--panel-ease), visibility 0s linear 0s, background-color 0.5s ease, border-color 0.5s ease, box-shadow 0.5s ease; }
+:root[data-left="hidden"] .sidebar { transform: translateX(calc(-100% - var(--gap) - 8px)); opacity: 0; visibility: hidden; }
+:root[data-right="hidden"] .chat { transform: translateX(calc(100% + var(--gap) + 8px)); opacity: 0; visibility: hidden; }
+/* Keep the panel visible while it slides out, then hide it (out of tab order and the a11y tree). */
+:root[data-panels-ready][data-left="hidden"] .sidebar,
+:root[data-panels-ready][data-right="hidden"] .chat { transition: transform var(--panel-ease), opacity var(--panel-ease), visibility 0s linear 0.32s; }
+:root[data-panels-ready] .pill,
+:root[data-panels-ready] .empty { transition: left var(--panel-ease), max-width var(--panel-ease), background-color 0.5s ease, color 0.5s ease, border-color 0.5s ease, box-shadow 0.5s ease; }
+
+/* Bookmark tabs: flush with the window edge, above the panels, never moving. The notch points into
+   the window. White chevron on the accent colour (same pair as primary buttons, checked >= 4.5:1). */
+.panel-tab {
+  position: fixed; z-index: 30; top: 28px; width: var(--tab-w); height: 52px; padding: 0; border: 0;
+  display: grid; align-items: center; background: var(--accent); color: #fff;
+  box-shadow: 0 4px 14px var(--ink-shadow);
+}
+.panel-tab-left { left: 0; clip-path: polygon(0 0, 100% 0, 74% 50%, 100% 100%, 0 100%); justify-items: start; padding-left: 5px; border-radius: 0 4px 4px 0; }
+.panel-tab-right { right: 0; clip-path: polygon(0 0, 100% 0, 100% 100%, 0 100%, 26% 50%); justify-items: end; padding-right: 5px; border-radius: 4px 0 0 4px; }
+.panel-tab:hover { filter: brightness(1.08); }
+.panel-tab:focus-visible { outline: 2px solid var(--ink); outline-offset: -4px; }

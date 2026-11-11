@@ -234,3 +234,13 @@ Driven (all pass): with the editor open, its box was measured against the sideba
 
 Manual:
 - [ ] Drag the native window down to its minimum (1100x600) with a card open: the editor shrinks with it and never runs under the chat panel or off the bottom.
+
+### 3. Sidebar toggles
+Automated: `storage::panel_visibility_persists_and_defaults_to_shown` (older files show both, round trip, unknown keys kept).
+
+Driven (all pass): two tabs 30×52px, flush with both edges, with the tooltips "Hide projects (Ctrl+B)" and "Hide chat (Ctrl+J)". Clicking the left tab hides the sidebar (`visibility: hidden` after the slide), writes `show_projects: false` to the real `workspace.json`, keeps the tab at x=0, and flips its tooltip to "Show". Ctrl+J hides the chat and writes `show_chat: false`. The title pill re-centres at 720/1440 and the zoom pill moves to x=46. Both states survive a page reload. With the editor open, Ctrl+B and Ctrl+J resize it live, and it stays open and inside the free area.
+
+Manual:
+- [ ] The slide looks smooth, and with Windows animation effects off it switches instantly.
+- [ ] Ctrl+J in the native window toggles the chat and does not open WebView2's downloads panel.
+- [ ] Quit and relaunch: the panels come back as you left them, with no slide on startup.
