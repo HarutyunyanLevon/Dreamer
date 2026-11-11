@@ -5,6 +5,7 @@ import type { Workspace } from "../state/useWorkspace";
 import { STAGE_LABEL } from "../theme/types";
 import { ClaudeSetup, needsSetup } from "./ClaudeSetup";
 import { IconSend } from "./Icons";
+import { ScrollArea } from "../ui/Scroll";
 
 const CHIPS = ["/grill-me", "/related", "Summarize", "Give me 3 takes"];
 /** Chips that only make sense about a specific card. */
@@ -27,7 +28,7 @@ export function ChatPanel({ ws }: { ws: Workspace }) {
     onLinkProposal: (p) => ws.addGhostLink({ slug: p.slug, from: p.from, to: p.to, label: p.label, reason: p.reason }),
   });
   const [text, setText] = useState("");
-  const bodyRef = useRef<HTMLDivElement | null>(null);
+  const bodyRef = useRef<HTMLElement | null>(null);
 
   const contextCard = ws.data?.cards.find((c) => c.id === ws.contextCardId) ?? null;
 
@@ -63,7 +64,7 @@ export function ChatPanel({ ws }: { ws: Workspace }) {
   };
 
   return (
-    <aside className="glass chat" aria-label="Claude chat">
+    <aside className="glass chat" aria-label="Claude chat" data-wheel-boundary="">
       <header className="chat-head">
         <div className="orb" aria-hidden="true" />
         <div>
@@ -77,14 +78,14 @@ export function ChatPanel({ ws }: { ws: Workspace }) {
         )}
       </header>
 
-      <div className="chat-body" ref={bodyRef}>
+      <ScrollArea boundary className="chat-body" ref={bodyRef}>
         {chat.messages.length === 0 && (
           <div className="msg claude">Hi! Pick a card and I can suggest links, grill you about it, or give you a few different takes.</div>
         )}
         {chat.messages.map((m) => (
           <ChatBubble key={m.id} message={m} onAnswer={(choice) => answer(m, choice)} onOpenCard={(id, project) => void ws.focusCard(id, project)} activeProject={ws.active} />
         ))}
-      </div>
+      </ScrollArea>
 
       <div className="chips">
         {CHIPS.map((c) => (

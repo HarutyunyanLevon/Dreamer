@@ -3,9 +3,10 @@ import { api, type Card, type Link } from "../api";
 import type { Workspace } from "../state/useWorkspace";
 import { STAGES, STAGE_LABEL, type StageId } from "../theme/types";
 import { renderMarkdown } from "../util/markdown";
-import { useEscClose } from "../util/useEscClose";
+import { Modal } from "../ui/Modal";
 import { BranchCompare, branchGroup } from "./BranchCompare";
 import { IconClose, IconFork, IconTrash } from "./Icons";
+import { ScrollArea } from "../ui/Scroll";
 
 const RESERVED_FIELDS = new Set(["image", "url", "clip_title"]);
 
@@ -24,7 +25,6 @@ export function CardEditor({ card, ws, onClose }: { card: Card; ws: Workspace; o
   const [comparing, setComparing] = useState(false);
   const [briefMsg, setBriefMsg] = useState<string | null>(null);
   const group = branchGroup(card);
-  useEscClose(onClose);
 
   const exportBrief = async () => {
     if (!ws.active) return;
@@ -83,8 +83,8 @@ export function CardEditor({ card, ws, onClose }: { card: Card; ws: Workspace; o
   };
 
   return (
-    <div className="modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="modal card-editor glass" onPaste={onPaste}>
+    <>
+      <Modal onClose={onClose} label={`Edit card ${title || "Untitled"}`} size="lg" className="card-editor" onPaste={(e) => void onPaste(e)}>
         <div className="modal-head">
           <input className="editor-title" value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Title" aria-label="Title" />
           <button type="button" className="icon-btn" aria-label="Close" onClick={onClose}><IconClose /></button>
@@ -121,9 +121,9 @@ export function CardEditor({ card, ws, onClose }: { card: Card; ws: Workspace; o
             <button type="button" className="chip" onClick={() => setPreview((p) => !p)}>{preview ? "Edit" : "Preview"}</button>
           </div>
           {preview ? (
-            <div className="md-preview" dangerouslySetInnerHTML={{ __html: renderMarkdown(body) }} />
+            <ScrollArea className="md-preview" dangerouslySetInnerHTML={{ __html: renderMarkdown(body) }} />
           ) : (
-            <textarea className="editor-body" value={body} onChange={(e) => setBody(e.target.value)} placeholder="Paste an image, or write markdown notes…" rows={7} />
+            <textarea className="editor-body scroll scroll-y" value={body} onChange={(e) => setBody(e.target.value)} placeholder="Paste an image, or write markdown notes…" rows={7} />
           )}
         </div>
 
@@ -194,9 +194,9 @@ export function CardEditor({ card, ws, onClose }: { card: Card; ws: Workspace; o
           <button type="button" className="btn" onClick={onClose}>Cancel</button>
           <button type="button" className="btn primary" onClick={() => void save()}>Save</button>
         </div>
-      </div>
+      </Modal>
       {comparing && <BranchCompare card={card} ws={ws} onClose={() => { setComparing(false); onClose(); }} />}
-    </div>
+    </>
   );
 }
 

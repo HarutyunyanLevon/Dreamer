@@ -3,7 +3,9 @@ import { api, type Card, type ProjectData } from "../api";
 import type { GhostLink, Workspace } from "../state/useWorkspace";
 import { useTheme } from "../theme/ThemeContext";
 import { STAGES, STAGE_LABEL, type StageId } from "../theme/types";
-import { useEscClose } from "../util/useEscClose";
+import { Modal } from "../ui/Modal";
+import { ScrollArea, wheelBelongsToContent } from "../ui/Scroll";
+import { dialogOpen } from "../util/useEscClose";
 import { branchGroup } from "./BranchCompare";
 import { CardEditor } from "./CardEditor";
 import { IconCard, IconClip, IconFit, IconImage, IconLink, IconMinus, IconPlus, IconRedo, IconTrash as IconTrashCan, IconUndo } from "./Icons";
@@ -81,6 +83,12 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
     const el = rootRef.current;
     if (!el) return;
     const onWheel = (e: WheelEvent) => {
+      // Popups, pills and modals inside the canvas, and card bodies that can still scroll, keep
+      // the wheel: the browser scrolls them natively and the canvas does not move.
+      const t = e.target as Element;
+      if (t.closest?.("[data-wheel-boundary]")) return;
+      // Ctrl+wheel always zooms the canvas, even over a scrollable card body.
+      if (!(e.ctrlKey || e.metaKey) && wheelBelongsToContent(t, el, e.deltaX, e.deltaY)) return;
       e.preventDefault();
       const rect = el.getBoundingClientRect();
       const sx = e.clientX - rect.left;
@@ -147,7 +155,7 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
       } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "y") {
         e.preventDefault();
         void ws.redo();
-      } else if (e.key === "Escape" && linkMode) {
+      } else if (e.key === "Escape" && linkMode && !dialogOpen()) {
         setLinkMode(false);
         setLinkFrom(null);
       }
@@ -291,7 +299,7 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
         </div>
       )}
 
-      <div className="pill title-pill">
+      <div className="pill title-pill" data-wheel-boundary="">
         <span className="proj-title">{title || "…"}</span>
         <span className="pill-sep" />
         <div className="stage-filter" role="group" aria-label="Stage filter">
@@ -311,7 +319,7 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
               Theme: {themes.find((t) => t.id === data.meta.theme)?.name ?? "Workspace default"}
             </button>
             {themePickerOpen && (
-              <div className="theme-picker-pop glass">
+              <ScrollArea boundary className="theme-picker-pop glass">
                 <button type="button" className="theme-picker-row" onClick={() => { void ws.setProjectTheme(null); setThemePickerOpen(false); }}>
                   Workspace default
                 </button>
@@ -320,7 +328,7 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
                     {t.name}
                   </button>
                 ))}
-              </div>
+              </ScrollArea>
             )}
           </div>
         )}
@@ -328,14 +336,14 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
 
       {data && data.warnings.length > 0 && <Warnings data={data} />}
 
-      <div className="pill zoom-pill" aria-label="Zoom">
+      <div className="pill zoom-pill" aria-label="Zoom" data-wheel-boundary="">
         <button type="button" className="icon-btn" aria-label="Zoom out" onClick={() => zoomAt(sizeRef.current.w / 2, sizeRef.current.h / 2, vp.zoom / 1.2)}><IconMinus /></button>
         <span className="zoom-val">{Math.round(vp.zoom * 100)}%</span>
         <button type="button" className="icon-btn" aria-label="Zoom in" onClick={() => zoomAt(sizeRef.current.w / 2, sizeRef.current.h / 2, vp.zoom * 1.2)}><IconPlus /></button>
         <button type="button" className="icon-btn" aria-label="Fit to content" onClick={fit}><IconFit /></button>
       </div>
 
-      <div className="pill toolbar" role="toolbar" aria-label="Add">
+      <div className="pill toolbar" role="toolbar" aria-label="Add" data-wheel-boundary="">
         <button type="button" className="tool" disabled={!data} onClick={() => void createAt()}>
           <IconCard />
           <span>Card</span>
@@ -410,6 +418,7 @@ function GhostLinkControls({ cards, canvas, ghosts, ws }: { cards: Card[]; canva
         <div
           key={g.key}
           className="ghost-link-ctl"
+          data-wheel-boundary=""
           style={{ left: (x1 + x2) / 2, top: (y1 + y2) / 2 }}
           title={g.reason}
           onPointerDown={(e) => e.stopPropagation()}
@@ -562,10 +571,8 @@ const CardView = memo(function CardView({
 function WebClipPrompt({ onClose, onCreate }: { onClose: () => void; onCreate: (url: string, title: string) => void }) {
   const [url, setUrl] = useState("");
   const [name, setName] = useState("");
-  useEscClose(onClose);
   return (
-    <div className="modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="modal glass clip-prompt">
+    <Modal onClose={onClose} label="Web clip" size="sm" className="clip-prompt">
         <h3>Web clip</h3>
         <input className="name-input" autoFocus value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://…" />
         <input className="name-input" value={name} onChange={(e) => setName(e.target.value)} placeholder="Title (optional)" />
@@ -583,7 +590,6 @@ function WebClipPrompt({ onClose, onCreate }: { onClose: () => void; onCreate: (
             Add
           </button>
         </div>
-      </div>
-    </div>
+    </Modal>
   );
 }

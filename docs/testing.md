@@ -142,3 +142,17 @@ Not verified live: clicking result chips, the camera pan, ghost-link Keep/Dismis
 - Open a card, click `/related`, and expect dashed accent links with Keep/Dismiss. Keep one, press Ctrl+Z (the link goes back to a ghost), then press Ctrl+Shift+Z.
 - Press Ctrl+K, type, use ↑↓ and Enter, and try the This project / All toggle.
 - Browser preview: `npm run dev` with `?stress=1` gives the mock Ctrl+K search a 500-card project to search.
+
+## Fix pass 1: Scrolling checks
+Automated: `npm run build` (tsc + vite, no warnings). `npm run check:themes` passes, including the new "scrollbar thumb on track (UI)" row (3:1); it failed at the first alpha and was tuned. No Rust changed in this section.
+
+Manual checklist (native window, `npm run tauri dev`). Not driven by me, because I can't click in the native WebView2 window:
+- [ ] Chat thread, card editor, trash list, Ctrl+K results, fork compare, sidebar project list (make 20+ projects), and setup log all show the same slim bar with the same width and colors. None has the old grey OS bar.
+- [ ] Filling any of them from empty to overflowing makes no text jump sideways.
+- [ ] Wheel over the chat panel or sidebar: the canvas never moves.
+- [ ] Open the card editor (it sits inside the canvas element) and wheel over its body, its notes textarea, and the dimmed backdrop: the canvas never moves.
+- [ ] Notes textarea scrolled to its end: further wheeling scrolls the editor dialog. The dialog at its end: nothing else moves.
+- [ ] Wheel over the title pill, toolbar, zoom pill, or a ghost-link Keep/Dismiss pill: no pan.
+- [ ] Wheel over empty canvas pans, Ctrl+wheel zooms. Wheel over a short card pans too.
+- [ ] Theme switch: the scrollbar colors follow the theme.
+- [ ] Esc with Compare forks open over the card editor closes only Compare.

@@ -1,5 +1,5 @@
 import { rgba } from "./color";
-import { STAGES, type Theme } from "./types";
+import { SCROLL_THUMB_ALPHA, SCROLL_THUMB_HOVER_ALPHA, SCROLL_TRACK_ALPHA, STAGES, type Theme } from "./types";
 
 /** Write a theme's tokens to CSS variables on :root. */
 export function applyTheme(t: Theme, root: HTMLElement = document.documentElement) {
@@ -16,6 +16,9 @@ export function applyTheme(t: Theme, root: HTMLElement = document.documentElemen
   s.setProperty("--ink-shadow", rgba(t.ui.ink, 0.16));
   s.setProperty("--accent-soft", rgba(t.ui.accent, 0.12));
   s.setProperty("--ghost-glow", rgba(t.ui.ghost, 0.38));
+  s.setProperty("--scroll-thumb", rgba(t.ui.ink, SCROLL_THUMB_ALPHA));
+  s.setProperty("--scroll-thumb-hover", rgba(t.ui.ink, SCROLL_THUMB_HOVER_ALPHA));
+  s.setProperty("--scroll-track", rgba(t.ui.ink, SCROLL_TRACK_ALPHA));
   for (const id of STAGES) {
     s.setProperty(`--stage-${id}`, t.stages[id]);
     s.setProperty(`--stage-${id}-glow`, rgba(t.stages[id], 0.6));

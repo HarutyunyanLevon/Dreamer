@@ -1,5 +1,5 @@
 import { contrast, hexToRgb, over } from "./color";
-import type { Theme } from "./types";
+import { SCROLL_THUMB_ALPHA, SCROLL_TRACK_ALPHA, type Theme } from "./types";
 
 export interface ContrastCheck {
   label: string;
@@ -19,7 +19,9 @@ export function checkTheme(t: Theme): ContrastCheck[] {
   const bg = hexToRgb(t.ui.fallbackBg);
   const glass = over(WHITE, bg, t.ui.glass);
   const cloudCard = over(WHITE, bg, 0.3);
-  const rows: [string, string, number[], number][] = [
+  const track = over(hexToRgb(t.ui.ink), glass, SCROLL_TRACK_ALPHA);
+  const thumb = over(hexToRgb(t.ui.ink), track, SCROLL_THUMB_ALPHA);
+  const rows: [string, string | number[], number[], number][] = [
     ["ink on glass", t.ui.ink, glass, 4.5],
     ["body on glass", t.ui.body, glass, 4.5],
     ["muted on glass", t.ui.muted, glass, 4.5],
@@ -28,9 +30,11 @@ export function checkTheme(t: Theme): ContrastCheck[] {
     ["ink on cloud card", t.ui.ink, cloudCard, 4.5],
     ["body on cloud card", t.ui.body, cloudCard, 4.5],
     ["white on accent (buttons)", "#ffffff", hexToRgb(t.ui.accent), 4.5],
+    // Non-text UI component (WCAG 1.4.11): the scrollbar thumb against its track on glass.
+    ["scrollbar thumb on track (UI)", thumb, track, 3],
   ];
   return rows.map(([label, fg, surface, min]) => {
-    const ratio = contrast(hexToRgb(fg), surface as [number, number, number]);
+    const ratio = contrast(typeof fg === "string" ? hexToRgb(fg) : (fg as [number, number, number]), surface as [number, number, number]);
     return { label, ratio, min, pass: ratio >= min };
   });
 }

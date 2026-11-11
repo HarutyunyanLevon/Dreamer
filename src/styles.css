@@ -24,6 +24,10 @@
   --chat-w: 340px;
   --gap: 16px;
   --radius: 26px;
+  --scrollbar-w: 10px;
+  --scroll-thumb: rgba(71, 42, 75, 0.58);
+  --scroll-thumb-hover: rgba(71, 42, 75, 0.75);
+  --scroll-track: rgba(71, 42, 75, 0.07);
 
   /* Canvas camera: step 4 drives these. */
   --pan-x: 0px;
@@ -51,6 +55,25 @@ button:disabled { cursor: default; }
 /* Smooth theme cross-fade for colors. */
 .glass, .card, .pill, .badge, .btn, .chip, .swatch, .filter, .tool, .icon-btn, .side-row, .new-project,
 .wordmark, h3, p, .stage-name { transition: background-color 0.5s ease, color 0.5s ease, border-color 0.5s ease, box-shadow 0.5s ease; }
+
+/* ---------- Scrolling (one system: src/ui/Scroll.tsx) ----------
+   Every scrollable region uses .scroll: the same slim themed bar everywhere, gutter reserved so
+   nothing shifts when the thumb appears, never an auto-hiding overlay. Classic ::-webkit-scrollbar
+   styling (WebView2 is Chromium); scrollbar-width/-color are deliberately NOT set because they
+   would switch Chromium back to native bars. */
+.scroll { scrollbar-gutter: stable; overscroll-behavior: auto; }
+.scroll-y { overflow-y: auto; overflow-x: hidden; }
+.scroll-x { overflow-x: auto; overflow-y: hidden; }
+.scroll-boundary { overscroll-behavior: contain; }
+.scroll::-webkit-scrollbar { width: var(--scrollbar-w); height: var(--scrollbar-w); }
+.scroll::-webkit-scrollbar-track { background: var(--scroll-track); border-radius: 99px; }
+.scroll::-webkit-scrollbar-thumb {
+  background-color: var(--scroll-thumb); border-radius: 99px; min-height: 36px; min-width: 36px;
+  border: 2px solid transparent; background-clip: padding-box;
+}
+.scroll::-webkit-scrollbar-thumb:hover { background-color: var(--scroll-thumb-hover); }
+.scroll::-webkit-scrollbar-button { display: none; width: 0; height: 0; }
+.scroll::-webkit-scrollbar-corner { background: transparent; }
 
 /* ---------- Background ---------- */
 .bg-canvas {
@@ -82,6 +105,7 @@ button:disabled { cursor: default; }
   font-size: 30px; color: var(--ink); padding: 0 8px 18px; letter-spacing: 0.01em;
 }
 .side-section { display: flex; flex-direction: column; gap: 4px; }
+.project-list { flex: 1; min-height: 0; margin: 0 -6px 12px; padding: 0 6px; }
 .side-label {
   font-size: 11px; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase;
   color: var(--muted); padding: 0 8px 4px;
@@ -134,7 +158,7 @@ button:disabled { cursor: default; }
 @keyframes orb { 50% { box-shadow: 0 0 0 4px rgba(255,255,255,.6), 0 0 34px 8px var(--ghost-glow); } }
 .chat-title { font-family: var(--font-title); font-size: 20px; font-weight: 600; color: var(--ink); line-height: 1.1; }
 .chat-sub { font-size: 13px; color: var(--muted); }
-.chat-body { flex: 1; overflow-y: auto; padding: 4px 20px 12px; display: flex; flex-direction: column; gap: 10px; user-select: text; }
+.chat-body { flex: 1; min-height: 0; padding: 4px 20px 12px; display: flex; flex-direction: column; gap: 10px; user-select: text; }
 .msg { padding: 12px 14px; border-radius: 18px; max-width: 92%; background: rgba(255, 255, 255, 0.75); color: var(--ink); }
 .msg.claude { border-top-left-radius: 6px; }
 .chips { display: flex; flex-wrap: wrap; gap: 8px; padding: 0 20px 12px; }
@@ -281,10 +305,13 @@ button:disabled { cursor: default; }
   position: fixed; inset: 0; z-index: 40; background: rgba(40, 20, 40, 0.28);
   display: flex; align-items: center; justify-content: center; padding: 24px;
 }
-.modal { width: 100%; max-width: 520px; max-height: 86vh; overflow-y: auto; padding: 22px 24px; display: flex; flex-direction: column; gap: 14px; user-select: text; }
+.modal { width: 100%; max-width: 520px; max-height: 86vh; padding: 22px 24px; display: flex; flex-direction: column; gap: 14px; user-select: text; }
 .clip-prompt { max-width: 380px; gap: 12px; }
 .clip-prompt h3 { font-family: var(--font-title); font-size: 20px; color: var(--ink); margin: 0; }
 .modal-head { display: flex; align-items: center; gap: 10px; }
+.modal-sm { max-width: 400px; }
+.modal-md { max-width: 560px; }
+.modal-lg { max-width: min(960px, calc(100vw - 48px)); height: min(86vh, 900px); }
 .editor-title {
   flex: 1; font-family: var(--font-title); font-size: 22px; font-weight: 600; color: var(--ink);
   border: 0; background: transparent; padding: 6px 4px; user-select: text;
@@ -360,7 +387,7 @@ button:disabled { cursor: default; }
 @keyframes setup-spin { to { transform: rotate(360deg); } }
 .setup-error { background: color-mix(in srgb, #e05a5a 16%, rgba(255, 255, 255, 0.75)); color: #7a2323; border-radius: 10px; padding: 8px 12px; font-size: 13px; }
 .setup-log {
-  margin: 0; max-height: 160px; overflow: auto; background: rgba(0, 0, 0, 0.06); border-radius: 10px; padding: 8px 10px;
+  margin: 0; max-height: 160px; flex: none; background: rgba(0, 0, 0, 0.06); border-radius: 10px; padding: 8px 10px;
   font-family: ui-monospace, Consolas, monospace; font-size: 11.5px; line-height: 1.45; color: var(--ink);
   white-space: pre-wrap; overflow-wrap: anywhere; user-select: text;
 }
@@ -374,7 +401,7 @@ button:disabled { cursor: default; }
 .modal-head h3 { display: flex; align-items: center; gap: 8px; font-family: var(--font-title); font-size: 20px; color: var(--ink); margin: 0; flex: 1; }
 .modal-head h3 svg { width: 18px; height: 18px; }
 .compare-modal { max-width: 920px; }
-.compare-columns { display: flex; gap: 14px; overflow-x: auto; padding-bottom: 4px; }
+.compare-columns { display: flex; gap: 14px; padding-bottom: 6px; flex: none; }
 .compare-col { flex: 1; min-width: 220px; background: rgba(255, 255, 255, 0.5); border-radius: 16px; padding: 14px; display: flex; flex-direction: column; gap: 10px; }
 .compare-col h4 { font-family: var(--font-title); font-size: 16px; color: var(--ink); margin: 0; }
 .compare-body { flex: 1; font-size: 13px; color: var(--body); }
@@ -382,7 +409,7 @@ button:disabled { cursor: default; }
 .diff-add { background: color-mix(in srgb, #4caf6a 22%, transparent); border-radius: 4px; padding: 0 4px; }
 .diff-del { background: color-mix(in srgb, #e05a5a 18%, transparent); text-decoration: line-through; border-radius: 4px; padding: 0 4px; opacity: 0.8; }
 .trash-modal { max-width: 480px; }
-.trash-list { display: flex; flex-direction: column; gap: 6px; max-height: 50vh; overflow-y: auto; }
+.trash-list { display: flex; flex-direction: column; gap: 6px; max-height: 50vh; flex: none; }
 .trash-row { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 14px; background: rgba(255, 255, 255, 0.45); }
 .trash-row-info { flex: 1; min-width: 0; }
 .trash-title { font-weight: 700; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -390,7 +417,7 @@ button:disabled { cursor: default; }
 /* ---------- Step 7: theme editor + project theme override ---------- */
 .theme-picker { position: relative; }
 .theme-picker-pop {
-  position: absolute; top: calc(100% + 6px); left: 0; z-index: 20; min-width: 180px; max-height: 260px; overflow-y: auto;
+  position: absolute; top: calc(100% + 6px); left: 0; z-index: 20; min-width: 180px; max-height: 260px;
   padding: 6px; display: flex; flex-direction: column; gap: 2px;
 }
 .theme-picker-row { min-height: 40px; padding: 0 12px; border-radius: 10px; border: 0; background: transparent; text-align: left; color: var(--ink); font-weight: 600; }
@@ -427,7 +454,7 @@ button:disabled { cursor: default; }
 .palette { width: min(640px, calc(100vw - 32px)); max-height: 70vh; display: flex; flex-direction: column; gap: 10px; }
 .palette-input-row { display: flex; gap: 10px; align-items: center; }
 .palette-input { flex: 1; margin: 0; }
-.palette-results { list-style: none; margin: 0; padding: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; }
+.palette-results { list-style: none; margin: 0; padding: 0; min-height: 0; display: flex; flex-direction: column; gap: 4px; }
 .palette-hit { padding: 9px 12px; border-radius: 12px; cursor: pointer; }
 .palette-hit.on { background: color-mix(in srgb, var(--accent) 16%, rgba(255, 255, 255, 0.6)); }
 .palette-hit.ghost .palette-hit-title { font-style: italic; }
@@ -442,3 +469,4 @@ button:disabled { cursor: default; }
 @media (prefers-reduced-motion: reduce) {
   .canvas.camera-anim .world { transition: none; }
 }
+.modal > * { flex-shrink: 0; }

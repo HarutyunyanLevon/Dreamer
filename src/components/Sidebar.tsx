@@ -3,6 +3,7 @@ import type { ProjectSummary } from "../api";
 import { useTheme } from "../theme/ThemeContext";
 import { IconFolder, IconInbox, IconPlus } from "./Icons";
 import { ThemeEditor } from "./ThemeEditor";
+import { ScrollArea } from "../ui/Scroll";
 
 interface Props {
   projects: ProjectSummary[];
@@ -30,11 +31,11 @@ export function Sidebar({ projects, active, onSelect, onCreate }: Props) {
   };
 
   return (
-    <aside className="glass sidebar" aria-label="Projects">
+    <aside className="glass sidebar" aria-label="Projects" data-wheel-boundary="">
       <div className="wordmark">Dreamer</div>
 
-      <nav className="side-section">
-        <div className="side-label">Projects</div>
+      <div className="side-label">Projects</div>
+      <ScrollArea as="nav" boundary className="side-section project-list" aria-label="Project list">
         {projects.map((p) => (
           <button
             key={p.slug}
@@ -52,9 +53,7 @@ export function Sidebar({ projects, active, onSelect, onCreate }: Props) {
             )}
           </button>
         ))}
-      </nav>
-
-      <div className="side-spacer" />
+      </ScrollArea>
 
       <div className="side-section">
         <div className="side-label">Theme</div>

@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { checkTheme } from "../theme/contrast";
 import { useTheme } from "../theme/ThemeContext";
 import { STAGES, STAGE_LABEL, type StageId, type Theme } from "../theme/types";
-import { useEscClose } from "../util/useEscClose";
+import { Modal } from "../ui/Modal";
 import { IconClose, IconTrash } from "./Icons";
 
 function slugifyId(name: string): string {
@@ -18,7 +18,6 @@ export function ThemeEditor({ initial, isNew, onClose }: { initial: Theme; isNew
     isNew ? { ...initial, id: slugifyId(`${initial.name} copy`), name: `${initial.name} copy`, builtin: false } : initial,
   );
 
-  useEscClose(onClose);
 
   useEffect(() => {
     setPreviewTheme(draft);
@@ -48,8 +47,7 @@ export function ThemeEditor({ initial, isNew, onClose }: { initial: Theme; isNew
   };
 
   return (
-    <div className="modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="modal glass theme-editor">
+    <Modal onClose={onClose} label={isNew ? "New theme" : `Edit theme ${draft.name}`} size="lg" className="theme-editor">
         <div className="modal-head">
           <input className="editor-title" value={draft.name} onChange={(e) => setDraft((d) => ({ ...d, name: e.target.value }))} aria-label="Theme name" />
           <button type="button" className="icon-btn" aria-label="Close" onClick={onClose}><IconClose /></button>
@@ -119,8 +117,7 @@ export function ThemeEditor({ initial, isNew, onClose }: { initial: Theme; isNew
           <button type="button" className="btn" onClick={onClose}>Cancel</button>
           <button type="button" className="btn primary" onClick={() => void save()}>Save</button>
         </div>
-      </div>
-    </div>
+    </Modal>
   );
 }
 

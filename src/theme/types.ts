@@ -1,3 +1,8 @@
+/** Scrollbar thumb = ink at this alpha (checked for 3:1 against glass in check:themes). */
+export const SCROLL_THUMB_ALPHA = 0.58;
+export const SCROLL_THUMB_HOVER_ALPHA = 0.75;
+export const SCROLL_TRACK_ALPHA = 0.07;
+
 export type StageId = "cloud" | "sketch" | "draft" | "pitch";
 export const STAGES: StageId[] = ["cloud", "sketch", "draft", "pitch"];
 export const STAGE_LABEL: Record<StageId, string> = {

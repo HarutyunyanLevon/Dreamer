@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { api, type SearchHit } from "../api";
 import type { Workspace } from "../state/useWorkspace";
-import { useEscClose } from "../util/useEscClose";
+import { Modal } from "../ui/Modal";
+import { ScrollArea } from "../ui/Scroll";
 
 const DEBOUNCE_MS = 100;
 
@@ -16,8 +17,7 @@ export function SearchPalette({ ws, onClose }: { ws: Workspace; onClose: () => v
   const [cursor, setCursor] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const seq = useRef(0);
-  const listRef = useRef<HTMLUListElement | null>(null);
-  useEscClose(onClose);
+  const listRef = useRef<HTMLElement | null>(null);
 
   useEffect(() => {
     const q = query.trim();
@@ -51,8 +51,7 @@ export function SearchPalette({ ws, onClose }: { ws: Workspace; onClose: () => v
   };
 
   return (
-    <div className="modal-backdrop palette-backdrop" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="modal glass palette" role="dialog" aria-label="Search cards">
+    <Modal onClose={onClose} label="Search cards" size="md" className="palette" backdropClassName="palette-backdrop">
         <div className="palette-input-row">
           <input
             className="name-input palette-input"
@@ -88,7 +87,7 @@ export function SearchPalette({ ws, onClose }: { ws: Workspace; onClose: () => v
         {error && <p className="setup-error">{error}</p>}
         {query.trim() && !error && hits.length === 0 && <p className="palette-empty">No cards match “{query.trim()}”.</p>}
         {hits.length > 0 && (
-          <ul className="palette-results" id="palette-results" role="listbox" ref={listRef}>
+          <ScrollArea as="ul" className="palette-results" id="palette-results" role="listbox" ref={listRef}>
             {hits.map((h, i) => (
               <li
                 key={`${h.project}:${h.id}`}
@@ -110,10 +109,9 @@ export function SearchPalette({ ws, onClose }: { ws: Workspace; onClose: () => v
                 {h.tags.length > 0 && <div className="palette-tags">{h.tags.map((t) => `#${t}`).join(" ")}</div>}
               </li>
             ))}
-          </ul>
+          </ScrollArea>
         )}
         <div className="palette-foot chat-sub">↑↓ to move · Enter to open · Esc to close</div>
-      </div>
-    </div>
+    </Modal>
   );
 }

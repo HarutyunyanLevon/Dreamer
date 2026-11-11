@@ -2,13 +2,13 @@ import { useEffect, useState } from "react";
 import { api, type TrashItem } from "../api";
 import type { Workspace } from "../state/useWorkspace";
 import { STAGE_LABEL } from "../theme/types";
-import { useEscClose } from "../util/useEscClose";
+import { Modal } from "../ui/Modal";
+import { ScrollArea } from "../ui/Scroll";
 import { IconClose, IconTrash } from "./Icons";
 
 export function TrashView({ ws, onClose }: { ws: Workspace; onClose: () => void }) {
   const [items, setItems] = useState<TrashItem[]>([]);
   const [confirmEmpty, setConfirmEmpty] = useState(false);
-  useEscClose(onClose);
 
   const load = () => {
     if (ws.active) void api.listTrash(ws.active).then(setItems);
@@ -30,8 +30,7 @@ export function TrashView({ ws, onClose }: { ws: Workspace; onClose: () => void 
   };
 
   return (
-    <div className="modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="modal glass trash-modal">
+    <Modal onClose={onClose} label="Trash" size="md" className="trash-modal">
         <div className="modal-head">
           <h3><IconTrash /> Trash</h3>
           <button type="button" className="icon-btn" aria-label="Close" onClick={onClose}><IconClose /></button>
@@ -39,7 +38,7 @@ export function TrashView({ ws, onClose }: { ws: Workspace; onClose: () => void 
 
         {items.length === 0 && <p className="chat-sub">Nothing in the trash for this project.</p>}
 
-        <div className="trash-list">
+        <ScrollArea className="trash-list">
           {items.map((item) => (
             <div key={item.id} className="trash-row">
               <span className={`dot dot-${item.stage}`} aria-hidden="true" />
@@ -50,7 +49,7 @@ export function TrashView({ ws, onClose }: { ws: Workspace; onClose: () => void 
               <button type="button" className="btn" onClick={() => void restore(item.id)}>Restore</button>
             </div>
           ))}
-        </div>
+        </ScrollArea>
 
         {items.length > 0 && (
           <div className="editor-actions">
@@ -66,7 +65,6 @@ export function TrashView({ ws, onClose }: { ws: Workspace; onClose: () => void 
             )}
           </div>
         )}
-      </div>
-    </div>
+    </Modal>
   );
 }

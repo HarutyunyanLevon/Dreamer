@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { claudeApi, type ClaudeStatus, type SetupJob } from "../api/claudeIndex";
+import { ScrollArea } from "../ui/Scroll";
 
 const POLL_MS = 4000;
 const MAX_LOG_LINES = 200;
@@ -22,7 +23,7 @@ export function ClaudeSetup({ status, refresh }: { status: ClaudeStatus; refresh
   const [loginUrl, setLoginUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [checking, setChecking] = useState(false);
-  const logRef = useRef<HTMLPreElement | null>(null);
+  const logRef = useRef<HTMLElement | null>(null);
   const jobRef = useRef(job);
   jobRef.current = job;
 
@@ -93,7 +94,7 @@ export function ClaudeSetup({ status, refresh }: { status: ClaudeStatus; refresh
   const subtitle = job === "install" ? "Installing Claude Code…" : job === "login" ? "Waiting for sign-in" : installed ? "Not signed in" : "Claude Code not installed";
 
   return (
-    <aside className="glass chat" aria-label="Claude chat">
+    <aside className="glass chat" aria-label="Claude chat" data-wheel-boundary="">
       <header className="chat-head">
         <div className="orb" aria-hidden="true" />
         <div>
@@ -101,7 +102,7 @@ export function ClaudeSetup({ status, refresh }: { status: ClaudeStatus; refresh
           <div className="chat-sub">{subtitle}</div>
         </div>
       </header>
-      <div className="chat-body setup-screen">
+      <ScrollArea boundary className="chat-body setup-screen">
         <p>Dreamer talks to Claude through your own Claude Code install and sign-in — no API key needed.</p>
 
         {job === "login" ? (
@@ -184,9 +185,9 @@ export function ClaudeSetup({ status, refresh }: { status: ClaudeStatus; refresh
         )}
 
         {log.length > 0 && (
-          <pre className="setup-log" ref={logRef} aria-label="Setup output">
+          <ScrollArea as="pre" className="setup-log" ref={logRef} aria-label="Setup output">
             {log.join("\n")}
-          </pre>
+          </ScrollArea>
         )}
 
         {!job && (
@@ -194,7 +195,7 @@ export function ClaudeSetup({ status, refresh }: { status: ClaudeStatus; refresh
             {checking ? "Checking…" : "Check again"}
           </button>
         )}
-      </div>
+      </ScrollArea>
     </aside>
   );
 }
