@@ -647,3 +647,30 @@ button:disabled { cursor: default; }
 .panel-tab-right { right: 0; clip-path: polygon(0 0, 100% 0, 100% 100%, 0 100%, 26% 50%); justify-items: end; padding-right: 5px; border-radius: 4px 0 0 4px; }
 .panel-tab:hover { filter: brightness(1.08); }
 .panel-tab:focus-visible { outline: 2px solid var(--ink); outline-offset: -4px; }
+
+/* ---------- Fix pass #3 (2nd round), item 6: bottom bar ----------
+   One grid across the free canvas area: zoom pill in the left column (at least its own width), the
+   Add toolbar centred in the middle one. If the zoom pill needs more room the toolbar shifts right
+   instead of overlapping it. The bar itself ignores the pointer (presses between the pills reach the
+   canvas). */
+.bottom-bar {
+  position: absolute; z-index: 5; left: var(--inset-l); right: var(--inset-r); bottom: var(--gap);
+  display: grid; grid-template-columns: minmax(max-content, 1fr) auto minmax(0, 1fr); align-items: end; column-gap: 12px;
+  container-type: inline-size; container-name: bottom-bar; pointer-events: none;
+}
+:root[data-panels-ready] .bottom-bar { transition: left var(--panel-ease), right var(--panel-ease); }
+.bottom-bar > .pill { position: static; transform: none; max-width: none; pointer-events: auto; }
+.bottom-bar > .zoom-pill { justify-self: start; }
+.bottom-bar > .toolbar { grid-column: 2; }
+/* Compact zoom controls. 32px buttons are a documented exception to the 44px minimum (decisions,
+   item 6): four small, well-separated, non-destructive controls in a fixed corner. */
+.zoom-pill { padding: 3px; gap: 2px; }
+.zoom-pill .icon-btn { width: 32px; height: 32px; }
+.zoom-pill .icon-btn svg { width: 16px; height: 16px; }
+.zoom-val { min-width: 42px; font-size: 13px; font-variant-numeric: tabular-nums; }
+.tool { white-space: nowrap; }
+/* Narrow bar: tools become 44px icon buttons (labels stay as aria-label and tooltip). */
+@container bottom-bar (max-width: 680px) {
+  .tool { width: 44px; padding: 0; justify-content: center; }
+  .tool > span { display: none; }
+}

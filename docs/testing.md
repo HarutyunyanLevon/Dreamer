@@ -261,3 +261,10 @@ Driven (52/52 pass, at 1440x900 and at an emulated 1100x600): five dialogs were 
 Manual:
 - [ ] Sidebar › trash icon on a project: a 460px dialog in the middle of the window (not a small box in the sidebar) shows the full folder path. The path only appears after item 8; before that, opening this dialog froze the Rust core.
 - [ ] A packaged build (`npm run tauri build`): panels, pills and dialogs are frosted (blurred), not just translucent.
+
+### 6. Bottom bar
+Driven (51/51 pass): at 1100x600, 1280x800, 1440x900 and 1700x1000 (emulated viewport), each with panels shown and hidden, plus link mode at 1440. The zoom pill and toolbar never overlap (narrowest gap 12px, at 1100 with both panels and at 1440 in link mode), and both stay inside the free area. Each time, `elementFromPoint` at Fit's centre is Fit. Tools are 44px or more, zoom buttons exactly 32px, and every tool has an aria-label and a tooltip. Labels collapse to icons at 1100 and 1280 with both panels open, are shown at 1440 and up, and come back at 1100 when the panels are hidden. A real click on Fit moves the camera and creates no card.
+
+Manual:
+- [ ] Hover each icon-only tool at 1100px: the tooltip names it.
+- [ ] The zoom buttons are comfortable to hit with a mouse at 32px.

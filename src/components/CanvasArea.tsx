@@ -429,23 +429,35 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
 
       {data && data.warnings.length > 0 && <Warnings data={data} />}
 
-      <div className="pill zoom-pill" aria-label="Zoom" data-wheel-boundary="">
-        <button type="button" className="icon-btn" aria-label="Zoom out" onClick={() => zoomAt(sizeRef.current.w / 2, sizeRef.current.h / 2, vp.zoom / 1.2)}><IconMinus /></button>
-        <span className="zoom-val">{Math.round(vp.zoom * 100)}%</span>
-        <button type="button" className="icon-btn" aria-label="Zoom in" onClick={() => zoomAt(sizeRef.current.w / 2, sizeRef.current.h / 2, vp.zoom * 1.2)}><IconPlus /></button>
-        <button type="button" className="icon-btn" aria-label="Fit to content" onClick={fit}><IconFit /></button>
+      {/* Bottom bar: zoom pill and Add toolbar in one grid spanning the free canvas area, so they can
+          never overlap. Below ~680px of bar width the tool labels collapse to icons (container
+          query in styles.css); every tool keeps an aria-label and a tooltip either way. */}
+      <div className="bottom-bar">
+      <div className="pill zoom-pill" role="group" aria-label="Zoom" data-wheel-boundary="">
+        <button type="button" className="icon-btn" aria-label="Zoom out" title="Zoom out" onClick={() => zoomAt(sizeRef.current.w / 2, sizeRef.current.h / 2, vp.zoom / 1.2)}><IconMinus /></button>
+        <span className="zoom-val" aria-live="polite">{Math.round(vp.zoom * 100)}%</span>
+        <button type="button" className="icon-btn" aria-label="Zoom in" title="Zoom in" onClick={() => zoomAt(sizeRef.current.w / 2, sizeRef.current.h / 2, vp.zoom * 1.2)}><IconPlus /></button>
+        <button type="button" className="icon-btn" aria-label="Fit to content" title="Fit to content" onClick={fit}><IconFit /></button>
       </div>
 
       <div className="pill toolbar" role="toolbar" aria-label="Add" data-wheel-boundary="">
-        <button type="button" className="tool" disabled={!data} onClick={() => void createAt()}>
+        <button type="button" className="tool" aria-label="Add a card" title="Add a card" disabled={!data} onClick={() => void createAt()}>
           <IconCard />
           <span>Card</span>
         </button>
-        <button type="button" className={"tool" + (linkMode ? " on" : "")} disabled={!data} onClick={() => { setLinkMode((v) => !v); setLinkFrom(null); }}>
+        <button
+          type="button"
+          className={"tool" + (linkMode ? " on" : "")}
+          aria-label={linkMode ? "Linking: pick two cards" : "Link two cards"}
+          aria-pressed={linkMode}
+          title={linkMode ? "Pick two cards… (Esc cancels)" : "Link two cards"}
+          disabled={!data}
+          onClick={() => { setLinkMode((v) => !v); setLinkFrom(null); }}
+        >
           <IconLink />
           <span>{linkMode ? "Pick two cards…" : "Link"}</span>
         </button>
-        <button type="button" className="tool" disabled={!data} onClick={() => fileInputRef.current?.click()}>
+        <button type="button" className="tool" aria-label="Add an image" title="Add an image" disabled={!data} onClick={() => fileInputRef.current?.click()}>
           <IconImage />
           <span>Image</span>
         </button>
@@ -462,14 +474,15 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
             if (created) await ws.addImage(created.id, file, file.name);
           }}
         />
-        <button type="button" className="tool" disabled={!data} onClick={() => setClipPrompt(true)}>
+        <button type="button" className="tool" aria-label="Add a web clip" title="Add a web clip" disabled={!data} onClick={() => setClipPrompt(true)}>
           <IconClip />
           <span>Web clip</span>
         </button>
-        <button type="button" className="tool" disabled={!data} onClick={() => setTrashOpen(true)}>
+        <button type="button" className="tool" aria-label="Open the trash" title="Open the trash" disabled={!data} onClick={() => setTrashOpen(true)}>
           <IconTrashCan />
           <span>Trash</span>
         </button>
+      </div>
       </div>
 
       {clipPrompt && <WebClipPrompt onClose={() => setClipPrompt(false)} onCreate={(url, name) => createAt({ title: name || url, fields: { url, clip_title: name } })} />}
