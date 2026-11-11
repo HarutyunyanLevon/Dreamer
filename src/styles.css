@@ -702,3 +702,9 @@ button:disabled { cursor: default; }
    OS error with a full path) scrolls inside instead of being cut off. */
 .capture-card { max-height: 100%; min-height: 0; }
 .capture-error { flex: 0 1 auto; min-height: 0; overflow-y: auto; }
+
+/* ---------- Fix pass #3 (2nd round), item 10: Undo / Redo ----------
+   Disabled = clearly dimmed, no hover highlight, "not allowed" cursor; still focusable and still
+   shows its tooltip (aria-disabled). */
+.history-btn[aria-disabled="true"] { opacity: 0.32; cursor: not-allowed; }
+.history-btn[aria-disabled="true"]:hover { background: transparent; }

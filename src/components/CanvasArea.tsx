@@ -394,8 +394,29 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
           ))}
         </div>
         <span className="pill-sep" />
-        <button type="button" className="icon-btn" aria-label="Undo" disabled={!ws.canUndo} onClick={() => void ws.undo()}><IconUndo /></button>
-        <button type="button" className="icon-btn" aria-label="Redo" disabled={!ws.canRedo} onClick={() => void ws.redo()}><IconRedo /></button>
+        {/* aria-disabled (not disabled) so the tooltip still shows when there's nothing to undo. */}
+        <button
+          type="button"
+          className="icon-btn history-btn"
+          aria-label="Undo"
+          aria-keyshortcuts="Control+Z"
+          aria-disabled={!ws.canUndo}
+          title={ws.canUndo ? "Undo (Ctrl+Z)" : "Undo (Ctrl+Z): nothing to undo"}
+          onClick={() => ws.canUndo && void ws.undo()}
+        >
+          <IconUndo />
+        </button>
+        <button
+          type="button"
+          className="icon-btn history-btn"
+          aria-label="Redo"
+          aria-keyshortcuts="Control+Shift+Z"
+          aria-disabled={!ws.canRedo}
+          title={ws.canRedo ? "Redo (Ctrl+Shift+Z)" : "Redo (Ctrl+Shift+Z): nothing to redo"}
+          onClick={() => ws.canRedo && void ws.redo()}
+        >
+          <IconRedo />
+        </button>
         {data && !data.is_inbox && (
           <div className="theme-picker">
             <button

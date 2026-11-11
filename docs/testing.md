@@ -317,3 +317,9 @@ Manual:
 - [ ] Same, but stop `npm run tauri dev` with Ctrl+C instead of quitting: no node/claude process is left.
 - [ ] First X on a fresh workspace shows the notice once; after "Keep running", tray › Show Dreamer brings the window back and X hides it without the notice.
 - [ ] Hotkey from another app (e.g. a browser): the popup gets focus, and clicking back into that app closes it.
+
+### 10. Undo/Redo buttons
+Driven (9/9 pass): both buttons are curved-arrow icons with aria-labels and `aria-keyshortcuts`. With no history, both show `aria-disabled="true"` at opacity 0.32 with a not-allowed cursor, and the tooltips "Undo (Ctrl+Z): nothing to undo" / "Redo (Ctrl+Shift+Z): nothing to redo". A real click on the disabled Undo does nothing. After a real card drag, Undo is active at full opacity with the tooltip "Undo (Ctrl+Z)"; a real click on it moves the card back, Redo becomes active, and a real click on Redo re-applies the move. Close-up screenshots of both states were checked.
+
+Manual:
+- [ ] Hover each button: the native tooltip shows the shortcut, also while dimmed.
