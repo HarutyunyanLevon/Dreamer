@@ -215,3 +215,16 @@ Manual checklist (native window; not driven by me):
 - [ ] After the last item, a dashed ghost card "Spec: …" appears on the canvas, linked to the card, and the chat shows only "Proposed a spec card."
 - [ ] Ask a general question: the reply is formal and short, with no exclamation marks.
 - [ ] Ask "which cards mention water?" in a 300-card project: the answer reflects the project overview, and replies don't slow down noticeably (the overview is capped).
+
+## Fix pass #3, second round
+How it was checked: `npm run tauri dev` against a throwaway `DREAMER_WORKSPACE`, with `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9222`. A Node script (Chrome DevTools Protocol, no extra packages) then sent real mouse, wheel and key input to the WebView and read the DOM. "Driven" below means checked that way in the real app with the real Rust core. "Manual" means it still needs your click-through, usually because it is OS-level (tray, native window focus, global hotkey) or visual judgement.
+
+### 1. Popups isolate from the canvas
+Driven (all pass): the editor renders in a layer that is a direct child of `<body>`. Dragging on a non-interactive label inside the editor scrolls the editor and does not pan. Dragging inside the notes textarea selects text, and the popup neither drag-scrolls nor pans. The wheel inside the editor and over the scrim does not pan. Ctrl+Z with the editor open does not run canvas undo. A click on bare canvas outside closes the editor and doesn't pan. After that, dragging on empty canvas pans, and a drag that starts on the title pill does not. Right-click on a card opens the menu in the layer, and an outside click closes it without panning.
+
+Manual:
+- [ ] Open a card and drag inside it with the mouse on the stage chips' gaps and on the "Notes" and "Tags" labels: the editor scrolls, and the canvas behind stays still.
+- [ ] Select text inside the title input, notes and a tag input by dragging: normal selection, no scrolling jump.
+- [ ] Theme editor: the sliders and colour pickers drag normally (no popup scrolling).
+- [ ] With the editor open, click a card behind it, the sidebar or the chat panel: the editor closes and nothing else happens (no card opens, no project switches).
+- [ ] Project title pill › Theme: the list closes when you click anywhere outside it.

@@ -1,11 +1,11 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
 import { api, type Card, type Pos, type ProjectData } from "../api";
 import { renderMarkdown } from "../util/markdown";
-import { useEscClose } from "../util/useEscClose";
 import { CARD_H, CARD_W, HANDLES, cardRect, displayStack, resizeRect, type HandleDir, type Rect } from "./cardGeometry";
 import type { GhostLink, Workspace } from "../state/useWorkspace";
 import { useTheme } from "../theme/ThemeContext";
 import { STAGES, STAGE_LABEL, type StageId } from "../theme/types";
+import { Layer } from "../ui/Layer";
 import { Modal } from "../ui/Modal";
 import { ScrollArea, wheelBelongsToContent } from "../ui/Scroll";
 import { dialogOpen } from "../util/useEscClose";
@@ -29,7 +29,7 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
   const [linkFrom, setLinkFrom] = useState<string | null>(null);
   const [clipPrompt, setClipPrompt] = useState(false);
   const [trashOpen, setTrashOpen] = useState(false);
-  const [themePickerOpen, setThemePickerOpen] = useState(false);
+  const [themePicker, setThemePicker] = useState<{ left: number; top: number } | null>(null);
   const { themes } = useTheme();
   const rootRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -135,30 +135,33 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
     return () => el.removeEventListener("wheel", onWheel);
   }, [vp, ws, zoomAt]);
 
-  const panDrag = useRef<{ x: number; y: number; vx: number; vy: number } | null>(null);
+  const panDrag = useRef<{ id: number; x: number; y: number; vx: number; vy: number } | null>(null);
   const onBackgroundPointerDown = useCallback(
     (e: ReactPointerEvent) => {
-      if (e.button !== 0) return;
+      // Only presses that start on empty canvas (the canvas itself or its dot grid) pan. Presses on
+      // pills, cards, ghost-link controls or the empty-state text bubble up here and are ignored.
+      const t = e.target as Element;
+      if (e.button !== 0 || (t !== e.currentTarget && !t.classList.contains("grid"))) return;
       if (linkMode) {
         setLinkMode(false);
         setLinkFrom(null);
         return;
       }
-      panDrag.current = { x: e.clientX, y: e.clientY, vx: vp.x, vy: vp.y };
-      (e.target as Element).setPointerCapture(e.pointerId);
+      panDrag.current = { id: e.pointerId, x: e.clientX, y: e.clientY, vx: vp.x, vy: vp.y };
+      (e.currentTarget as Element).setPointerCapture(e.pointerId);
     },
     [vp, linkMode],
   );
   const onBackgroundPointerMove = useCallback(
     (e: ReactPointerEvent) => {
-      if (!panDrag.current) return;
       const d = panDrag.current;
+      if (!d || e.pointerId !== d.id) return;
       ws.setViewport({ x: d.vx + (e.clientX - d.x), y: d.vy + (e.clientY - d.y), zoom: vp.zoom });
     },
     [ws, vp.zoom],
   );
-  const onBackgroundPointerUp = useCallback(() => {
-    if (panDrag.current) {
+  const onBackgroundPointerUp = useCallback((e: ReactPointerEvent) => {
+    if (panDrag.current && e.pointerId === panDrag.current.id) {
       panDrag.current = null;
       ws.flushCanvas();
     }
@@ -178,6 +181,8 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
   // Keyboard: Ctrl+Z / Ctrl+Shift+Z (and Ctrl+Y), ignored while typing in a field.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      // While a popup is open the canvas takes no keyboard input (Esc belongs to the popup).
+      if (dialogOpen()) return;
       const tag = (e.target as HTMLElement)?.tagName;
       if (tag === "INPUT" || tag === "TEXTAREA") return;
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") {
@@ -187,7 +192,7 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
       } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "y") {
         e.preventDefault();
         void ws.redo();
-      } else if (e.key === "Escape" && linkMode && !dialogOpen()) {
+      } else if (e.key === "Escape" && linkMode) {
         setLinkMode(false);
         setLinkFrom(null);
       }
@@ -306,6 +311,8 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
       onPointerDown={onBackgroundPointerDown}
       onPointerMove={onBackgroundPointerMove}
       onPointerUp={onBackgroundPointerUp}
+      onPointerCancel={onBackgroundPointerUp}
+      onLostPointerCapture={onBackgroundPointerUp}
       onDragOver={(e) => e.preventDefault()}
       onDrop={(e) => void onDropFile(e)}
     >
@@ -368,20 +375,30 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
         <button type="button" className="icon-btn" aria-label="Redo" disabled={!ws.canRedo} onClick={() => void ws.redo()}><IconRedo /></button>
         {data && !data.is_inbox && (
           <div className="theme-picker">
-            <button type="button" className="chip" onClick={() => setThemePickerOpen((v) => !v)}>
+            <button
+              type="button"
+              className="chip"
+              aria-expanded={!!themePicker}
+              onClick={(e) => {
+                const r = e.currentTarget.getBoundingClientRect();
+                setThemePicker({ left: r.left, top: r.bottom + 6 });
+              }}
+            >
               Theme: {themes.find((t) => t.id === data.meta.theme)?.name ?? "Workspace default"}
             </button>
-            {themePickerOpen && (
-              <ScrollArea boundary className="theme-picker-pop glass">
-                <button type="button" className="theme-picker-row" onClick={() => { void ws.setProjectTheme(null); setThemePickerOpen(false); }}>
-                  Workspace default
-                </button>
-                {themes.map((t) => (
-                  <button key={t.id} type="button" className="theme-picker-row" onClick={() => { void ws.setProjectTheme(t.id); setThemePickerOpen(false); }}>
-                    {t.name}
+            {themePicker && (
+              <Layer onClose={() => setThemePicker(null)}>
+                <ScrollArea boundary className="theme-picker-pop glass" style={{ left: themePicker.left, top: themePicker.top }} role="menu" aria-label="Project theme">
+                  <button type="button" role="menuitem" className="theme-picker-row" onClick={() => { void ws.setProjectTheme(null); setThemePicker(null); }}>
+                    Workspace default
                   </button>
-                ))}
-              </ScrollArea>
+                  {themes.map((t) => (
+                    <button key={t.id} type="button" role="menuitem" className="theme-picker-row" onClick={() => { void ws.setProjectTheme(t.id); setThemePicker(null); }}>
+                      {t.name}
+                    </button>
+                  ))}
+                </ScrollArea>
+              </Layer>
             )}
           </div>
         )}
@@ -622,6 +639,15 @@ const CardView = memo(function CardView({
     },
     [card.id, ws],
   );
+  // A cancelled press (window lost focus, gesture took over) keeps a move but never opens the card.
+  const onPointerCancel = useCallback(() => {
+    const d = dragState.current;
+    dragState.current = null;
+    if (d?.moved) {
+      ws.moveCard(card.id, d.last, { undoable: true, from: { x: d.ox, y: d.oy } });
+      void ws.flushCanvas();
+    }
+  }, [ws, card.id]);
   const onPointerUp = useCallback(() => {
     const d = dragState.current;
     dragState.current = null;
@@ -678,6 +704,7 @@ const CardView = memo(function CardView({
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
+      onPointerCancel={onPointerCancel}
       onContextMenu={(e) => {
         e.preventDefault();
         e.stopPropagation();
@@ -731,7 +758,6 @@ const CardView = memo(function CardView({
 
 /** Right-click / ⋯ menu for a card: Open, Bring to front, Send to back. */
 function CardMenu({ x, y, onClose, onOpen, onFront, onBack }: { x: number; y: number; onClose: () => void; onOpen: () => void; onFront: () => void; onBack: () => void }) {
-  useEscClose(onClose);
   const first = useRef<HTMLButtonElement | null>(null);
   useEffect(() => first.current?.focus(), []);
   const item = (label: string, fn: () => void, ref?: React.Ref<HTMLButtonElement>) => (
@@ -752,24 +778,13 @@ function CardMenu({ x, y, onClose, onOpen, onFront, onBack }: { x: number; y: nu
   const left = Math.min(x, window.innerWidth - 220);
   const top = Math.min(y, window.innerHeight - 170);
   return (
-    <div
-      className="menu-overlay"
-      data-wheel-boundary=""
-      onPointerDown={(e) => {
-        e.stopPropagation();
-        if (e.target === e.currentTarget) onClose();
-      }}
-      onContextMenu={(e) => {
-        e.preventDefault();
-        onClose();
-      }}
-    >
+    <Layer onClose={onClose}>
       <div className="card-menu glass" role="menu" style={{ left, top }}>
         {item("Open", onOpen, first)}
         {item("Bring to front", onFront)}
         {item("Send to back", onBack)}
       </div>
-    </div>
+    </Layer>
   );
 }
 

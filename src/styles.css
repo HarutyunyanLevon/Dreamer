@@ -302,7 +302,6 @@ button:disabled { cursor: default; }
   content: ""; position: absolute; left: 12px; top: 12px; width: 9px; height: 9px;
   border-right: 2px solid var(--muted); border-bottom: 2px solid var(--muted); border-radius: 0 0 4px 0; opacity: 0.8;
 }
-.menu-overlay { position: fixed; inset: 0; z-index: 45; }
 .card-menu { position: fixed; min-width: 200px; padding: 6px; border-radius: 16px; display: flex; flex-direction: column; gap: 2px; }
 .menu-item { min-height: 44px; padding: 0 14px; border: 0; border-radius: 10px; background: transparent; text-align: left; color: var(--ink); font-weight: 600; }
 .menu-item:hover, .menu-item:focus-visible { background: rgba(255, 255, 255, 0.75); }
@@ -311,6 +310,7 @@ button:disabled { cursor: default; }
 .empty {
   position: absolute; left: calc(var(--gap) * 2 + var(--side-w) + (100% - var(--side-w) - var(--chat-w) - var(--gap) * 4) / 2);
   top: 42%; transform: translate(-50%, -50%); text-align: center; max-width: 360px; color: var(--body);
+  pointer-events: none; /* the empty-state text is part of the canvas: pressing on it pans */
 }
 .empty-title { font-family: var(--font-title); font-style: italic; font-size: 30px; color: var(--ink); margin-bottom: 6px; }
 .warn-pill { top: calc(var(--gap) + 74px); padding: 8px 16px; font-weight: 600; color: var(--ink); }
@@ -335,11 +335,17 @@ button:disabled { cursor: default; }
 .card-image { width: 100%; max-height: 140px; object-fit: cover; border-radius: 12px; margin: 6px 0; }
 .card-clip { display: block; font-size: 12px; color: var(--link); margin: 2px 0 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-/* Modals */
-.modal-backdrop {
-  position: fixed; inset: 0; z-index: 40; background: rgba(40, 20, 40, 0.28);
-  display: flex; align-items: center; justify-content: center; padding: 24px;
+/* Popup layer (src/ui/Layer.tsx): portal into <body>, a scrim that swallows input outside the popup,
+   then the popup itself. Every dialog, menu and popover sits in one of these. */
+.layer { position: fixed; inset: 0; z-index: 40; }
+.layer-scrim { position: absolute; inset: 0; background: rgba(40, 20, 40, 0.28); }
+.modal-stage {
+  position: absolute; inset: 0; padding: 24px; pointer-events: none;
+  display: flex; align-items: center; justify-content: center;
 }
+.modal-stage.align-top { align-items: flex-start; padding-top: 12vh; }
+.modal-stage > * { pointer-events: auto; }
+.drag-scrolling, .drag-scrolling * { user-select: none !important; cursor: grabbing; }
 .modal { width: 100%; max-width: 520px; max-height: 86vh; padding: 22px 24px; display: flex; flex-direction: column; gap: 14px; user-select: text; }
 .clip-prompt { max-width: 380px; gap: 12px; }
 .clip-prompt h3 { font-family: var(--font-title); font-size: 20px; color: var(--ink); margin: 0; }
@@ -378,15 +384,15 @@ button:disabled { cursor: default; }
 .capture-popup { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; padding: 14px; }
 .capture-card {
   width: 100%; padding: 18px 20px; display: flex; flex-direction: column; gap: 10px;
-  -webkit-app-region: drag;
+
 }
 .capture-label { font-family: var(--font-title); font-style: italic; font-size: 17px; color: var(--ink); }
 .capture-input {
   min-height: 48px; padding: 0 16px; border-radius: 18px; font: inherit; color: var(--ink); user-select: text;
-  border: 1.5px solid var(--accent); background: rgba(255, 255, 255, 0.85); -webkit-app-region: no-drag;
+  border: 1.5px solid var(--accent); background: rgba(255, 255, 255, 0.85);
 }
 .capture-input::placeholder { color: var(--muted); }
-.capture-error { font-size: 12px; color: #a33; -webkit-app-region: no-drag; }
+.capture-error { font-size: 12px; color: #a33; }
 
 /* ---------- Step 5: Claude chat ---------- */
 .chat-head { position: relative; }
@@ -451,7 +457,7 @@ button:disabled { cursor: default; }
 /* ---------- Step 7: theme editor + project theme override ---------- */
 .theme-picker { position: relative; }
 .theme-picker-pop {
-  position: absolute; top: calc(100% + 6px); left: 0; z-index: 20; min-width: 180px; max-height: 260px;
+  position: fixed; min-width: 180px; max-height: 260px;
   padding: 6px; display: flex; flex-direction: column; gap: 2px;
 }
 .theme-picker-row { min-height: 40px; padding: 0 12px; border-radius: 10px; border: 0; background: transparent; text-align: left; color: var(--ink); font-weight: 600; }
@@ -483,7 +489,6 @@ button:disabled { cursor: default; }
 .result-chip { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; }
 .result-chip.ghost { border-style: dashed; }
 .result-proj { font-size: 11px; opacity: 0.75; }
-.palette-backdrop { align-items: flex-start; padding-top: 12vh; }
 .palette { width: min(640px, calc(100vw - 32px)); max-height: 70vh; display: flex; flex-direction: column; gap: 10px; }
 .palette-input-row { display: flex; gap: 10px; align-items: center; }
 .palette-input { flex: 1; margin: 0; }

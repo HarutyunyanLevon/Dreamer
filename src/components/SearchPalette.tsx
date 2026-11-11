@@ -51,7 +51,7 @@ export function SearchPalette({ ws, onClose }: { ws: Workspace; onClose: () => v
   };
 
   return (
-    <Modal onClose={onClose} label="Search cards" size="md" className="palette" backdropClassName="palette-backdrop">
+    <Modal onClose={onClose} label="Search cards" size="md" className="palette" align="top">
         <div className="palette-input-row">
           <input
             className="name-input palette-input"
