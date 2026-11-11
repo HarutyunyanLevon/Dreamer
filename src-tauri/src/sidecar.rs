@@ -247,10 +247,21 @@ pub fn send_message(app: &AppHandle, state: &AppState, turn: Turn) -> Result<()>
     crate::storage::check_slug(&turn.slug)?;
     ensure_started(app, state)?;
     *state.claude.active_slug.lock().map_err(|_| AppError::Invalid("sidecar lock poisoned".into()))? = turn.slug.clone();
-    let full_text = match turn.context {
-        Some(c) if !c.trim().is_empty() => format!("{c}\n\n---\n\n{}", turn.text),
-        _ => turn.text,
-    };
+    // Every turn carries a compact overview of the whole project (titles, tags, stage), so
+    // Claude knows what exists without a tool call; then the selected card's details, if any.
+    let overview = state
+        .with_search(|idx| idx.overview(&turn.slug))
+        .ok()
+        .flatten()
+        .map(|(name, cards)| crate::search::format_project_context(&name, &cards, crate::search::CONTEXT_MAX_CARDS, crate::search::CONTEXT_MAX_CHARS));
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(o) = overview {
+        parts.push(o);
+    }
+    if let Some(c) = turn.context.filter(|c| !c.trim().is_empty()) {
+        parts.push(c);
+    }
+    let full_text = if parts.is_empty() { turn.text } else { format!("{}\n\n---\n\n{}", parts.join("\n\n"), turn.text) };
     write_line(
         state,
         &json!({ "type": "user_message", "id": turn.id, "text": full_text, "thread": thread_key(&turn.slug, &turn.thread), "resume": turn.resume }),

@@ -31,7 +31,7 @@ export interface SearchResultRef {
 
 export type ClaudeEvent =
   | { type: "delta"; id: string; text: string }
-  | { type: "question"; id: string; question: string; choices: string[] }
+  | { type: "question"; id: string; turnId?: string | null; question: string; choices: string[] }
   | { type: "message_done"; id: string; text: string; sessionId?: string; isError?: boolean }
   | { type: "error"; id: string | null; message: string }
   | { type: "search"; id: string; query: string; results: SearchResultRef[] }

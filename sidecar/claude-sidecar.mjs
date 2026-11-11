@@ -8,7 +8,7 @@
 //        {type:"tool_response", reqId, result} | {type:"tool_response", reqId, error}
 //   out: {type:"ready"}
 //        {type:"delta", id, text}                      -- streamed assistant text
-//        {type:"question", id, question, choices}       -- ask_question tool fired
+//        {type:"question", id, turnId, question, choices}  -- ask_question fired during turn `turnId`
 //        {type:"message_done", id, text, sessionId, isError}
 //        {type:"tool_request", reqId, tool, input}      -- Rust must reply (create_card, search_cards,
 //                                                          read_card, list_related, propose_link)
@@ -63,15 +63,30 @@ const createCardTool = tool(
 
 const askQuestionTool = tool(
   "ask_question",
-  "Ask the user exactly one multiple-choice question (used for /grill-me). Present 2-5 short, concrete choices. " +
-    "Wait for their answer as the next message before asking another question.",
+  "Ask the user exactly one multiple-choice question (used for /grill-me). Present 2-5 short, neutral, concrete " +
+    "choices. The question is shown to the user as a card with buttons, so do not also write it as text. Wait for " +
+    "their answer as the next message before asking another question.",
   {
     question: z.string(),
     choices: z.array(z.string()).min(2).max(5),
   },
   async (args) => {
-    send({ type: "question", id: `q${++reqSeq}`, question: args.question, choices: args.choices });
-    return { content: [{ type: "text", text: "The question is shown to the user; their answer will arrive as the next message." }] };
+    // turnId ties the question to the reply it belongs to, so the UI shows it once, as the
+    // question card, instead of also showing any streamed text for that turn.
+    send({ type: "question", id: `q${++reqSeq}`, turnId: currentId, question: args.question, choices: args.choices });
+    // Anything the model writes after asking is noise ("the question is above"): drop it, so the
+    // turn is the question card and nothing else.
+    if (currentSession) currentSession.questionAsked = true;
+    // Observed live: without a firm stop here the model sometimes kept going and wrote a guessed
+    // "[Answer] ..." itself. The real answer only ever comes as the user's next message.
+    return {
+      content: [
+        {
+          type: "text",
+          text: "The question is now shown to the user as buttons. END YOUR TURN NOW: write nothing more, do not guess or state an answer. The user's real answer will arrive as their next message.",
+        },
+      ],
+    };
   },
 );
 
@@ -160,20 +175,43 @@ const makeServer = () => createSdkMcpServer({
   tools: [createCardTool, askQuestionTool, searchCardsTool, readCardTool, listRelatedTool, proposeLinkTool],
 });
 
-const SYSTEM_PROMPT =
-  "You are Claude, embedded as a creative partner inside Dreamer, a desktop app for collecting and deepening game " +
-  "ideas. Be a chatty, encouraging collaborator, not a project manager. " +
-  "You can READ the user's cards with search_cards, read_card and list_related. Before answering questions about " +
-  "the user's ideas, search the cards. Cite cards by title. Never invent cards: if a search finds nothing, say so. " +
-  "The only things you can create are suggestions the user must accept: create_card makes a ghost card, " +
-  "propose_link makes a ghost link. You have no file, shell, edit or delete access, by design, so the user's " +
-  "plain-file workspace stays theirs. " +
-  "When the user asks for /grill-me, use ask_question to ask exactly ONE multiple-choice question at a time about " +
-  "the card in context, then stop and wait for their answer before asking the next one; keep questions concrete " +
-  "and fun, in the voice of someone who loves the idea and wants it sharper. When the user asks for /related, use " +
-  "list_related and search_cards (scope 'project') on the card in context, read promising candidates, then call " +
-  "propose_link for the 1-5 strongest connections, each with a short label and reason, and summarize them briefly. " +
-  "When given 'Give me 3 takes', propose three distinctly different create_card calls.";
+// The checklist /grill-me works through, in order. Kept here so the prompt and any future UI
+// progress indicator agree on what "every item covered" means.
+const GRILL_ITEMS = [
+  "core experience (what the player should feel)",
+  "target player",
+  "core loop",
+  "key mechanics",
+  "setting and tone",
+  "scope and platform",
+  "what makes it different",
+  "biggest risk or open question",
+];
+
+const SYSTEM_PROMPT = [
+  "You are Claude, embedded in Dreamer, a desktop app for collecting and developing game ideas.",
+  "Tone: formal, neutral and concise. Answer directly. No exclamation marks, no flattery, no filler, no emoji.",
+  "Each user message starts with a [Project context] block listing every card in the project (title, tags, stage), " +
+    "then, when a card is selected, that card's details and id. Use read_card for a card's full text and links. " +
+    "You can also use search_cards and list_related. Before answering questions about the user's ideas, search the cards. " +
+    "Cite cards by title. Never invent cards: if nothing matches, say so.",
+  "The only things you can create are suggestions the user must accept: create_card makes a ghost card and " +
+    "propose_link makes a ghost link. You have no file, shell, edit or delete access, by design.",
+  "/grill-me: interview the user about the selected card, one multiple-choice question per turn, working through " +
+    "these items in order and skipping any the card's notes already answer: " +
+    GRILL_ITEMS.map((x, i) => `${i + 1}. ${x}`).join("; ") +
+    ". On each turn, call ask_question exactly once and write NO other text: no preamble, no restating the question, " +
+    "no reaction to the previous answer, no praise or encouragement, no commentary on the option the user chose. " +
+    "Questions and options are neutral and specific (2-5 options). The user's answers are recorded in the card's " +
+    "notes automatically. When every item has been covered, do not ask another question and do not write a summary " +
+    "in chat: call create_card exactly once to propose a spec card with title 'Spec: <card title>', stage 'draft', " +
+    "tags including 'spec', a link to the selected card with label 'spec of', and a markdown body with one short " +
+    "section per item, built only from the user's answers and the card's notes. Then reply with exactly: " +
+    "Proposed a spec card.",
+  "/related: use list_related and search_cards (scope 'project') on the selected card, read promising candidates, " +
+    "then call propose_link for the 1-5 strongest connections, each with a short label and reason, and list them briefly.",
+  "'Give me 3 takes': propose three distinctly different create_card calls.",
+].join("\n\n");
 
 // A queue that the stdin reader pushes into and the query's async-iterable prompt pulls from,
 // so one long-lived streaming session can carry many chat turns (and survive interrupts).
@@ -281,7 +319,7 @@ function pump(s) {
         if (msg.type === "stream_event" && msg.event?.type === "content_block_delta" && msg.event.delta?.type === "text_delta") {
           s.answered = true;
           s.text += msg.event.delta.text;
-          if (currentSession === s && currentId) send({ type: "delta", id: currentId, text: msg.event.delta.text });
+          if (currentSession === s && currentId && !s.questionAsked) send({ type: "delta", id: currentId, text: msg.event.delta.text });
         } else if (msg.type === "result") {
           // A resume that can't find its session reports a zero-turn error result (then throws):
           // don't surface it, recover below by starting the thread afresh.
@@ -291,7 +329,8 @@ function pump(s) {
           }
           s.answered = true;
           if (currentSession === s && currentId) {
-            send({ type: "message_done", id: currentId, text: msg.subtype === "success" ? msg.result : s.text, sessionId: msg.session_id, isError: msg.is_error });
+            const text = s.questionAsked && !msg.is_error ? "" : msg.subtype === "success" ? msg.result : s.text;
+            send({ type: "message_done", id: currentId, text, sessionId: msg.session_id, isError: msg.is_error });
             currentId = null;
             currentSession = null;
           }
@@ -334,6 +373,7 @@ rl.on("line", (line) => {
     const s = sessions.get(key) ?? openSession(key, msg.resume);
     s.lastUsed = Date.now();
     s.text = "";
+    s.questionAsked = false;
     currentId = msg.id;
     currentSession = s;
     s.pending = { type: "user", message: { role: "user", content: [{ type: "text", text: msg.text }] }, parent_tool_use_id: null };

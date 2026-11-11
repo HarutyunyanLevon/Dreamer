@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { Card } from "../api";
 import { useClaudeChat, type ChatMessage } from "../state/useClaudeChat";
 import type { Workspace } from "../state/useWorkspace";
@@ -12,16 +12,16 @@ const CHIPS = ["/grill-me", "/related", "Summarize", "Give me 3 takes"];
 /** Chips that only make sense about a specific card. */
 const NEEDS_CARD = new Set(["/related"]);
 
-function formatContext(ws: Workspace, card: Card | null): string | undefined {
-  const projectName = ws.data?.meta.name;
-  if (!card) return projectName ? `Project: ${projectName}` : undefined;
-  const others = (ws.data?.cards ?? []).filter((c) => c.id !== card.id && !c.ghost).slice(0, 24).map((c) => c.title);
-  const lines = [
-    `Context: card "${card.title}" (stage: ${card.stage}${card.tags.length ? `, tags: ${card.tags.join(", ")}` : ""})`,
+/**
+ * The selected card's details for this turn. The project overview (every card's title, tags and
+ * stage) is added by Rust on every turn, so it isn't repeated here.
+ */
+function formatContext(card: Card | null): string | undefined {
+  if (!card) return undefined;
+  return [
+    `[Selected card] "${card.title}" (id ${card.id}, stage: ${card.stage}${card.tags.length ? `, tags: ${card.tags.join(", ")}` : ""})`,
     card.body || "(no notes yet)",
-  ];
-  if (others.length) lines.push(`Other cards in "${projectName}": ${others.join(", ")}`);
-  return lines.join("\n");
+  ].join("\n");
 }
 
 export function ChatPanel({ ws }: { ws: Workspace }) {
@@ -34,6 +34,19 @@ export function ChatPanel({ ws }: { ws: Workspace }) {
   });
   const [text, setText] = useState("");
   const [confirmReset, setConfirmReset] = useState(false);
+  const panelRef = useRef<HTMLElement | null>(null);
+  const inputRef = useRef<HTMLTextAreaElement | null>(null);
+
+  // Auto-grow the message box with its text, up to half the panel's height, then scroll inside.
+  // Runs on every text change, so clearing after send also shrinks it back.
+  useLayoutEffect(() => {
+    const el = inputRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    const max = Math.max(48, Math.floor((panelRef.current?.clientHeight ?? 600) / 2));
+    const needed = el.scrollHeight + (el.offsetHeight - el.clientHeight);
+    el.style.height = `${Math.min(needed, max)}px`;
+  }, [text]);
   const bodyRef = useRef<HTMLElement | null>(null);
 
   const contextCard = ws.data?.cards.find((c) => c.id === ws.contextCardId) ?? null;
@@ -46,7 +59,7 @@ export function ChatPanel({ ws }: { ws: Workspace }) {
     return <ClaudeSetup status={chat.status} refresh={chat.refreshStatus} />;
   }
 
-  const send = (value: string) => {
+  const send = (value: string, opts?: { answering?: boolean }) => {
     const display = value.trim();
     if (!display || !ws.active || chat.busy) return;
     let v = display;
@@ -57,7 +70,8 @@ export function ChatPanel({ ws }: { ws: Workspace }) {
     if (display === "/related" && contextCard) {
       v = `/related: find cards related to "${contextCard.title}" (id ${contextCard.id}) in this project and propose the strongest links from it with propose_link (from "${contextCard.id}"). Don't create cards.`;
     }
-    chat.sendText(v, formatContext(ws, contextCard), display);
+    const quiet = display === "/grill-me" || !!opts?.answering;
+    chat.sendText(v, formatContext(contextCard), display, { quiet });
     setText("");
   };
 
@@ -66,16 +80,16 @@ export function ChatPanel({ ws }: { ws: Workspace }) {
     if (contextCard) {
       void ws.updateCard(contextCard.id, { body: `${contextCard.body}${contextCard.body ? "\n\n" : ""}**Q:** ${m.question!.question}\n**A:** ${choice}` });
     }
-    send(choice);
+    send(choice, { answering: true });
   };
 
   return (
-    <aside className="glass chat" aria-label="Claude chat" data-wheel-boundary="">
+    <aside className="glass chat" aria-label="Claude chat" data-wheel-boundary="" ref={panelRef}>
       <header className="chat-head">
         <div className="orb" aria-hidden="true" />
         <div>
           <div className="chat-title">Claude</div>
-          <div className="chat-sub">{contextCard ? `About "${contextCard.title}" · ${STAGE_LABEL[contextCard.stage]}` : "Your idea partner"}</div>
+          <div className="chat-sub">{contextCard ? `About "${contextCard.title}" · ${STAGE_LABEL[contextCard.stage]}` : "Project chat"}</div>
         </div>
         <div className="chat-head-actions">
           {contextCard && (
@@ -120,7 +134,11 @@ export function ChatPanel({ ws }: { ws: Workspace }) {
 
       <ScrollArea boundary className="chat-body" ref={bodyRef}>
         {chat.messages.length === 0 && (
-          <div className="msg claude">Hi! Pick a card and I can suggest links, grill you about it, or give you a few different takes.</div>
+          <div className="msg claude">
+            {contextCard
+              ? `This is the chat for "${contextCard.title}". Ask a question, or use /grill-me, /related or Give me 3 takes.`
+              : "This is the project chat. Select a card to open its own thread."}
+          </div>
         )}
         {chat.messages.map((m) => (
           <ChatBubble key={m.id} message={m} onAnswer={(choice) => answer(m, choice)} onOpenCard={(id, project) => void ws.focusCard(id, project)} activeProject={ws.active} />
@@ -149,7 +167,23 @@ export function ChatPanel({ ws }: { ws: Workspace }) {
           send(text);
         }}
       >
-        <input aria-label="Message Claude" value={text} onChange={(e) => setText(e.target.value)} placeholder="Ask Claude about this card…" disabled={chat.busy || !ws.active} />
+        <textarea
+          ref={inputRef}
+          className="scroll scroll-y"
+          rows={1}
+          aria-label="Message Claude"
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          onKeyDown={(e) => {
+            // Enter sends; Shift+Enter is a newline; never send mid-IME-composition.
+            if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+              e.preventDefault();
+              send(text);
+            }
+          }}
+          placeholder={contextCard ? "Message Claude about this card…" : "Message Claude about this project…"}
+          disabled={chat.busy || !ws.active}
+        />
         {chat.busy ? (
           <button type="button" className="send" aria-label="Stop" onClick={chat.interrupt}>
             ■
@@ -217,7 +251,7 @@ function ChatBubble({
         </div>
       ))}
       <div className={"msg" + (message.role === "claude" ? " claude" : " user") + (message.isError ? " error" : "")}>
-        {message.text || (message.streaming ? "…" : "")}
+        {message.quiet && message.streaming ? "…" : message.text || (message.streaming ? "…" : "")}
       </div>
     </>
   );

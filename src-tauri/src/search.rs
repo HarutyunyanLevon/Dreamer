@@ -249,6 +249,69 @@ pub fn snippet(text: &str, query: &[String]) -> String {
     out
 }
 
+// ---------- project context for every chat turn ----------
+
+/// One line of the per-turn project overview.
+#[derive(Clone, Debug, PartialEq)]
+pub struct OverviewCard {
+    pub title: String,
+    pub tags: Vec<String>,
+    pub stage: Stage,
+    pub ghost: bool,
+    pub updated: String,
+}
+
+pub const CONTEXT_MAX_CARDS: usize = 200;
+pub const CONTEXT_MAX_CHARS: usize = 12_000;
+const CONTEXT_MAX_TAGS: usize = 6;
+const CONTEXT_MAX_TITLE: usize = 90;
+
+fn clip(s: &str, max: usize) -> String {
+    let s = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    if s.chars().count() <= max {
+        s
+    } else {
+        format!("{}…", s.chars().take(max - 1).collect::<String>())
+    }
+}
+
+/// A compact overview Claude gets on every turn: project name, then one line per card (title,
+/// tags, stage), most recently updated first. Stops at `max_cards` cards or `max_chars`
+/// characters, whichever comes first, and says how many were left out.
+pub fn format_project_context(name: &str, cards: &[OverviewCard], max_cards: usize, max_chars: usize) -> String {
+    let mut sorted: Vec<&OverviewCard> = cards.iter().collect();
+    sorted.sort_by(|a, b| b.updated.cmp(&a.updated).then_with(|| a.title.cmp(&b.title)));
+    let n = cards.len();
+    let mut out = format!(
+        "[Project context] Project \"{}\" has {n} card{}{}.",
+        clip(name, CONTEXT_MAX_TITLE),
+        if n == 1 { "" } else { "s" },
+        if n == 0 { "" } else { " (title [tags] · stage; * = unkept suggestion), most recently updated first" }
+    );
+    let mut listed = 0;
+    for c in sorted {
+        if listed >= max_cards {
+            break;
+        }
+        let mut line = format!("\n- {}{}", if c.ghost { "*" } else { "" }, clip(&c.title, CONTEXT_MAX_TITLE));
+        if !c.tags.is_empty() {
+            let tags: Vec<String> = c.tags.iter().take(CONTEXT_MAX_TAGS).map(|t| clip(t, 30)).collect();
+            line.push_str(&format!(" [{}{}]", tags.join(", "), if c.tags.len() > CONTEXT_MAX_TAGS { ", …" } else { "" }));
+        }
+        let stage = serde_json::to_value(c.stage).ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
+        line.push_str(&format!(" · {stage}"));
+        if out.chars().count() + line.chars().count() > max_chars {
+            break;
+        }
+        out.push_str(&line);
+        listed += 1;
+    }
+    if listed < n {
+        out.push_str(&format!("\n…and {} more card{} not listed.", n - listed, if n - listed == 1 { "" } else { "s" }));
+    }
+    out
+}
+
 // ---------- the index ----------
 
 #[derive(Serialize, Clone, Debug, PartialEq)]
@@ -440,6 +503,24 @@ impl SearchIndex {
                 }
             })
             .collect()
+    }
+
+    /// Name and card overview of one project (refreshing it first), for the per-turn context.
+    pub fn overview(&mut self, slug: &str) -> Option<(String, Vec<OverviewCard>)> {
+        self.refresh(Some(slug));
+        let p = self.projects.get(slug)?;
+        let cards = p
+            .docs
+            .values()
+            .map(|(_, d)| OverviewCard {
+                title: d.card.meta.title.clone(),
+                tags: d.card.meta.tags.clone(),
+                stage: d.card.meta.stage,
+                ghost: d.card.meta.ghost,
+                updated: d.card.meta.updated.clone(),
+            })
+            .collect();
+        Some((p.name.clone(), cards))
     }
 
     /// Finds a card anywhere in the workspace (ids are ULIDs, so unique across projects).
@@ -694,6 +775,38 @@ mod tests {
         let (slug, c) = idx.find("01IN", None).unwrap();
         assert_eq!(slug, "inbox");
         assert_eq!(idx.describe_links(&slug, &c.meta.links)[0]["title"], "Me");
+    }
+
+    #[test]
+    fn project_context_is_compact_ordered_and_capped() {
+        let card = |t: &str, u: &str, tags: &[&str], ghost: bool| OverviewCard {
+            title: t.into(),
+            tags: tags.iter().map(|s| s.to_string()).collect(),
+            stage: Stage::Sketch,
+            ghost,
+            updated: u.into(),
+        };
+        let ctx = format_project_context("Fish-punk", &[card("Old", "2026-01-01", &[], false), card("New", "2026-06-01", &["boss", "water"], true)], 200, 12_000);
+        assert_eq!(
+            ctx,
+            "[Project context] Project \"Fish-punk\" has 2 cards (title [tags] · stage; * = unkept suggestion), most recently updated first.\n- *New [boss, water] · sketch\n- Old · sketch"
+        );
+        assert_eq!(format_project_context("Empty", &[], 200, 12_000), "[Project context] Project \"Empty\" has 0 cards.");
+
+        // 500 cards: capped at 200 lines, with a graceful note about the rest.
+        let many: Vec<OverviewCard> = (0..500).map(|i| card(&format!("Idea {i:03}"), &format!("2026-01-01T00:{:02}:{:02}", i / 60, i % 60), &["tag"], false)).collect();
+        let ctx = format_project_context("Big", &many, CONTEXT_MAX_CARDS, CONTEXT_MAX_CHARS);
+        assert_eq!(ctx.lines().filter(|l| l.starts_with("- ")).count(), 200);
+        assert!(ctx.ends_with("…and 300 more cards not listed."), "{}", &ctx[ctx.len() - 60..]);
+        assert!(ctx.contains("- Idea 499 [tag]"), "newest first");
+        assert!(!ctx.contains("Idea 000"));
+
+        // The character budget wins when titles are long; output stays within it (+ the note).
+        let long: Vec<OverviewCard> = (0..200).map(|i| card(&"x".repeat(200), &format!("{i:03}"), &["a", "b", "c", "d", "e", "f", "g", "h"], false)).collect();
+        let ctx = format_project_context("Long", &long, 200, 2_000);
+        assert!(ctx.chars().count() < 2_100);
+        assert!(ctx.contains("…, …]") || ctx.contains(", …]"), "tags capped");
+        assert!(ctx.contains("more cards not listed"));
     }
 
     /// Mirrors the `?stress=1` seed in src/api/mock.ts (500 cards, 4 stages, every third tagged),

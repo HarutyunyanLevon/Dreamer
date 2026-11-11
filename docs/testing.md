@@ -191,3 +191,27 @@ Manual checklist (native window; not driven by me):
 - [ ] Hover a project: a trash icon appears (always shown on the active row; there is none on the Inbox). Click it and the dialog shows the folder path and the Recycle Bin wording. Cancel does nothing. Delete moves the selection to the Inbox, and the project disappears from the list without an error toast. A "moved to the Recycle Bin" notice appears, and Explorer's Recycle Bin has the folder. Restore it from Explorer and it reappears in the sidebar live.
 - [ ] Select card A and chat, then select card B: an empty, separate thread. Back to A: the A thread is intact. Deselect the card: the project thread. Restart Dreamer: all three threads are still there, and Claude still remembers A's context.
 - [ ] Reset chat on A, then confirm: A's thread is empty, `chats/<A id>.json` is gone, and Claude no longer remembers it. B and the project thread are untouched.
+
+## Fix pass 4: Claude chat checks
+Automated: `cargo test` gives 44 passing, plus 2 ignored live tests. The new `search::project_context_is_compact_ordered_and_capped` covers:
+- the exact format (newest first, `*` for ghosts, tags, stage) and the empty-project wording;
+- 500 cards capped to 200 lines with "…and 300 more cards not listed.", and the newest card included;
+- the character budget winning over long titles, and tags capped.
+
+`cargo check`, `npm run build` and `npm run check:themes` are clean.
+
+Verified against the real sidecar and real Claude Code. A Node harness sent exactly what Rust and the UI send (`[Project context]` + `[Selected card]` + message), answered each question with its first option, and appended Q/A to the notes like the UI does:
+- **First run:** after Q1 the account hit its usage limit, but Q1 already showed the model writing a made-up "[Answer] …" after asking. The tool result was then fixed.
+- **Second run:** 8 questions, one per turn, covering the 8 items in order. All neutral with no praise, ending in `create_card` "Spec: Clockwork leviathan" (tags spec/boss/water, stage draft, linked "spec of" to the card, one section per item from the answers), and final chat text exactly "Proposed a spec card." The model still streamed a short "The next question is on the card above." after each question, which the UI already hid. The sidecar now drops it.
+- **Third run:** all 7 checks passed: 8 questions, every turn question-only with no streamed text, no praise, spec proposed, spec linked to the card, the final line only, and a formal general reply with no exclamation marks.
+
+`npm run tauri dev`, run against a throwaway `DREAMER_WORKSPACE`: the app started (the binary was already built) and created `workspace.json`, `inbox/` (cards, media, briefs, trash, canvas.json, project.json), `projects/` and `themes/`. There were no errors or warnings in the dev log.
+- **Mishap on my first attempt:** my check found a Dreamer that was already running (the user's own session) and port 1420 already in use, and my cleanup force-stopped that running Dreamer. Writes are atomic, so files should be intact; at most an unsaved canvas move in the last 400 ms could be lost.
+- **Second attempt:** its final cleanup was refused by the permission system. That throwaway instance may still be open and is safe to close.
+
+Manual checklist (native window; not driven by me):
+- [ ] Type a long message: the box grows line by line up to half the panel, then scrolls. Shift+Enter adds a line, Enter sends, and the box shrinks back to one line.
+- [ ] Select a card and run /grill-me: each turn shows only a question card with options. There's no duplicate question text above it, and no "great choice" style text. Each click appends **Q:**/**A:** to the card's notes immediately, and Ctrl+Z undoes it.
+- [ ] After the last item, a dashed ghost card "Spec: …" appears on the canvas, linked to the card, and the chat shows only "Proposed a spec card."
+- [ ] Ask a general question: the reply is formal and short, with no exclamation marks.
+- [ ] Ask "which cards mention water?" in a 300-card project: the answer reflects the project overview, and replies don't slow down noticeably (the overview is capped).

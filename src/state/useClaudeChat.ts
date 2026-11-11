@@ -15,6 +15,8 @@ export interface ChatMessage {
   question?: { question: string; choices: string[]; answered?: string };
   /** search_cards calls Claude made while writing this reply (shown as result chips). */
   searches?: { query: string; results: SearchResultRef[] }[];
+  /** A /grill-me turn: show only a typing indicator while streaming, never the streamed text. */
+  quiet?: boolean;
 }
 
 type LinkProposal = Extract<ClaudeEvent, { type: "link_proposal" }>;
@@ -139,7 +141,7 @@ export function useClaudeChat(opts: { slug: string | null; thread: string; onLin
           const key = idToKey.current.get(e.id);
           const t = key ? threads.current.get(key) : undefined;
           if (t && e.sessionId) t.sessionId = e.sessionId;
-          update(key, (ms) => ms.map((m) => (m.id === e.id ? { ...m, text: e.text || m.text, streaming: false, isError: e.isError } : m)), true);
+          update(key, (ms) => ms.map((m) => (m.id === e.id ? { ...m, text: m.question ? "" : e.text || m.text, streaming: false, isError: e.isError } : m)), true);
           finishBusy(e.id);
         } else if (e.type === "search") {
           const entry = { query: e.query, results: e.results };
@@ -147,10 +149,16 @@ export function useClaudeChat(opts: { slug: string | null; thread: string; onLin
         } else if (e.type === "link_proposal") {
           onLinkProposal.current?.(e);
         } else if (e.type === "question") {
-          // The question belongs to the turn being answered.
-          const key = (busyId.current && idToKey.current.get(busyId.current)) || currentKey.current || undefined;
-          if (key) idToKey.current.set(e.id, key);
-          update(key, (ms) => [...ms, { id: e.id, role: "claude", text: "", question: { question: e.question, choices: e.choices } }], true);
+          // Attach the question to the reply it belongs to: that reply then renders only as the
+          // question card, so the question never appears twice (as streamed text and as a card).
+          const turn = e.turnId ?? busyId.current;
+          const key = (turn && idToKey.current.get(turn)) || currentKey.current || undefined;
+          const q = { question: e.question, choices: e.choices };
+          update(
+            key,
+            (ms) => (turn && ms.some((m) => m.id === turn) ? ms.map((m) => (m.id === turn ? { ...m, text: "", question: q } : m)) : [...ms, { id: e.id, role: "claude", text: "", question: q }]),
+            true,
+          );
         } else if (e.type === "error") {
           update(e.id ? idToKey.current.get(e.id) : undefined, (ms) => ms.map((m) => (m.id === e.id ? { ...m, text: e.message, streaming: false, isError: true } : m)), true);
           finishBusy(e.id);
@@ -165,7 +173,7 @@ export function useClaudeChat(opts: { slug: string | null; thread: string; onLin
   }, [update]);
 
   const sendText = useCallback(
-    (text: string, context?: string, displayText?: string) => {
+    (text: string, context?: string, displayText?: string, opts?: { quiet?: boolean }) => {
       const key = currentKey.current;
       const t = key ? threads.current.get(key) : undefined;
       if (!key || !t) return;
@@ -173,7 +181,7 @@ export function useClaudeChat(opts: { slug: string | null; thread: string; onLin
       idToKey.current.set(id, key);
       busyId.current = id;
       setBusy(true);
-      update(key, (ms) => [...ms, { id: `${id}-u`, role: "user", text: displayText ?? text }, { id, role: "claude", text: "", streaming: true }], true);
+      update(key, (ms) => [...ms, { id: `${id}-u`, role: "user", text: displayText ?? text }, { id, role: "claude", text: "", streaming: true, quiet: opts?.quiet }], true);
       claudeApi.send(t.slug, id, text, context, t.thread, t.sessionId).catch((e) => {
         update(key, (ms) => ms.map((m) => (m.id === id ? { ...m, text: String(e), streaming: false, isError: true } : m)), true);
         finishBusy(id);
