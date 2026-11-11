@@ -28,6 +28,12 @@
   --scroll-thumb: rgba(71, 42, 75, 0.58);
   --scroll-thumb-hover: rgba(71, 42, 75, 0.75);
   --scroll-track: rgba(71, 42, 75, 0.07);
+  /* Space the floating panels take from each window edge (panel + its margins). The free canvas
+     area between them hosts the pills and canvas-placed popups. Item 3 shrinks these when a panel
+     is hidden. */
+  --inset-l: calc(var(--gap) * 2 + var(--side-w));
+  --inset-r: calc(var(--gap) * 2 + var(--chat-w));
+  --panel-ease: 0.32s cubic-bezier(0.2, 0.7, 0.2, 1);
 
   /* Canvas camera: step 4 drives these. */
   --pan-x: 0px;
@@ -344,6 +350,14 @@ button:disabled { cursor: default; }
   display: flex; align-items: center; justify-content: center;
 }
 .modal-stage.align-top { align-items: flex-start; padding-top: 12vh; }
+/* Card editor / compare: centred in the free area between the sidebars, never wider or taller than
+   it (contents scroll inside), following panel toggles and window resizes live. */
+.modal-stage.place-canvas {
+  left: var(--inset-l); right: var(--inset-r); padding: var(--gap) 0;
+  transition: left var(--panel-ease), right var(--panel-ease);
+}
+.place-canvas > .modal { max-width: 100%; max-height: 100%; }
+.place-canvas > .modal-lg { width: min(960px, 100%); height: min(900px, 100%); max-width: 100%; }
 .modal-stage > * { pointer-events: auto; }
 .drag-scrolling, .drag-scrolling * { user-select: none !important; cursor: grabbing; }
 .modal { width: 100%; max-width: 520px; max-height: 86vh; padding: 22px 24px; display: flex; flex-direction: column; gap: 14px; user-select: text; }

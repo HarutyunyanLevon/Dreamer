@@ -24,7 +24,7 @@ export function BranchCompare({ card, ws, onClose }: { card: Card; ws: Workspace
   };
 
   return (
-    <Modal onClose={onClose} label="Compare forks" size="lg" className="compare-modal">
+    <Modal onClose={onClose} label="Compare forks" size="lg" placement="canvas" className="compare-modal">
         <div className="modal-head">
           <h3><IconFork /> Compare forks</h3>
           <button type="button" className="icon-btn" aria-label="Close" onClick={onClose}><IconClose /></button>

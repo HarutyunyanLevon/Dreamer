@@ -108,7 +108,7 @@ export function CardEditor({ card, ws, onClose }: { card: Card; ws: Workspace; o
 
   return (
     <>
-      <Modal onClose={onClose} label={`Edit card ${title || "Untitled"}`} size="lg" className="card-editor" onPaste={(e) => void onPaste(e)}>
+      <Modal onClose={onClose} label={`Edit card ${title || "Untitled"}`} size="lg" placement="canvas" className="card-editor" onPaste={(e) => void onPaste(e)}>
         <div className="modal-head">
           <input className="editor-title" value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Title" aria-label="Title" />
           <button type="button" className="icon-btn" aria-label="Close" onClick={onClose}><IconClose /></button>

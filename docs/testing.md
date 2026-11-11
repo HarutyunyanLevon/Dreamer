@@ -228,3 +228,9 @@ Manual:
 - [ ] Theme editor: the sliders and colour pickers drag normally (no popup scrolling).
 - [ ] With the editor open, click a card behind it, the sidebar or the chat panel: the editor closes and nothing else happens (no card opens, no project switches).
 - [ ] Project title pill › Theme: the list closes when you click anywhere outside it.
+
+### 2. Opened card fits the canvas area
+Driven (all pass): with the editor open, its box was measured against the sidebar's right edge, the chat panel's left edge and the window height. At 1440x900 it's [256,16 → 1068,884] inside 240..1084. Then the viewport was emulated, without closing the editor, at 1100x600 ([256,16 → 728,584] inside 240..744, contents scroll) and at 1700x1000. In each case it's centred within 30px of the free area's middle. The emulated sizes resize the page viewport, not the native window.
+
+Manual:
+- [ ] Drag the native window down to its minimum (1100x600) with a card open: the editor shrinks with it and never runs under the chat panel or off the bottom.

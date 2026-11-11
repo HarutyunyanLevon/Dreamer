@@ -10,12 +10,16 @@ import { ScrollArea, useDragScroll } from "./Scroll";
  *
  * `size`: "sm" prompts, "md" lists, "lg" editors (card editor, theme editor, compare).
  * `align`: "center" (default) or "top" (the Ctrl+K search box).
+ * `placement`: "window" (default) centres the dialog in the window; "canvas" keeps it inside the
+ * free area between the project sidebar and the chat panel (card editor, fork compare), sized to
+ * that area and following it live as panels are shown or hidden or the window is resized.
  */
 export function Modal({
   onClose,
   label,
   size = "md",
   align = "center",
+  placement = "window",
   className,
   onPaste,
   children,
@@ -24,6 +28,7 @@ export function Modal({
   label: string;
   size?: "sm" | "md" | "lg";
   align?: "center" | "top";
+  placement?: "window" | "canvas";
   className?: string;
   onPaste?: (e: React.ClipboardEvent) => void;
   children: ReactNode;
@@ -32,7 +37,7 @@ export function Modal({
   useDragScroll(panel);
   return (
     <Layer onClose={onClose}>
-      <div className={`modal-stage align-${align}`}>
+      <div className={`modal-stage align-${align} place-${placement}`}>
         <ScrollArea
           ref={panel}
           boundary
