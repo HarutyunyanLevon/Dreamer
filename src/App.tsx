@@ -2,6 +2,7 @@ import { CanvasArea } from "./components/CanvasArea";
 import { CaptureWindow } from "./components/CaptureWindow";
 import { ChatPanel } from "./components/ChatPanel";
 import { PanelTabs } from "./components/PanelTabs";
+import { TrayNotice } from "./components/TrayNotice";
 import { usePanels } from "./state/usePanels";
 import { SearchPalette } from "./components/SearchPalette";
 import { ShaderBackground } from "./components/ShaderBackground";
@@ -54,6 +55,7 @@ function MainApp() {
       />
       <ChatPanel ws={ws} />
       <PanelTabs left={panels.left} right={panels.right} onLeft={panels.toggleLeft} onRight={panels.toggleRight} />
+      <TrayNotice />
       {searchOpen && <SearchPalette ws={ws} onClose={() => setSearchOpen(false)} />}
       {ws.notice && !ws.error && (
         <div className="toast" role="status">

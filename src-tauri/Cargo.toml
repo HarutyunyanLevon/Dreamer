@@ -32,6 +32,11 @@ base64 = "0.22"
 unicode-normalization = "0.1"
 trash = "5"
 
+[target.'cfg(windows)'.dependencies]
+# Job Object so the Claude sidecar's whole process tree ends with the app (src/proc_guard.rs).
+# Already in the lock file through Tauri; this only enables the needed API features.
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
+
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
 [profile.release]

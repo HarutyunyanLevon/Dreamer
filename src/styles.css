@@ -459,7 +459,11 @@ button:disabled { cursor: default; }
   border: 1.5px solid var(--accent); background: rgba(255, 255, 255, 0.85);
 }
 .capture-input::placeholder { color: var(--muted); }
-.capture-error { font-size: 12px; color: #a33; }
+.capture-head { display: flex; align-items: center; justify-content: space-between; margin: -6px -8px -4px 0; }
+.capture-foot { display: flex; align-items: center; gap: 10px; }
+.capture-hint { flex: 1; font-size: 13px; color: var(--muted); }
+.capture-error { margin: 0; font-size: 13px; font-weight: 600; color: #a3283b; overflow-wrap: anywhere; user-select: text; }
+.btn.primary:disabled { opacity: 0.55; cursor: default; }
 
 /* ---------- Step 5: Claude chat ---------- */
 .chat-head { position: relative; }
@@ -686,3 +690,15 @@ button:disabled { cursor: default; }
 .toast { border-radius: 22px; }
 .toast > span { flex: 1; min-width: 0; overflow-wrap: anywhere; max-height: 40vh; overflow-y: auto; }
 .toast > .btn { flex: none; }
+
+/* ---------- Fix pass #3 (2nd round), item 9: quit ---------- */
+.side-quit {
+  display: flex; align-items: center; justify-content: center; gap: 8px; min-height: 44px; margin-top: 6px;
+  border: 0; border-radius: 16px; background: transparent; color: var(--muted); font-weight: 600; font-size: 14px;
+}
+.side-quit svg { width: 18px; height: 18px; }
+.side-quit:hover { background: rgba(255, 255, 255, 0.55); color: var(--ink); }
+/* The capture popup window has a fixed size: the card never outgrows it, and a long error (a real
+   OS error with a full path) scrolls inside instead of being cut off. */
+.capture-card { max-height: 100%; min-height: 0; }
+.capture-error { flex: 0 1 auto; min-height: 0; overflow-y: auto; }

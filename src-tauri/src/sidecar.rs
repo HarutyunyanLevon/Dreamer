@@ -31,6 +31,9 @@ impl Default for ClaudeState {
 struct Sidecar {
     child: Child,
     stdin: std::process::ChildStdin,
+    /// The sidecar and every Claude Code process it starts; ends them all on quit, and Windows
+    /// ends them by itself if Dreamer dies without quitting (see proc_guard.rs).
+    tree: crate::proc_guard::TreeGuard,
 }
 
 /// Full status for the chat panel's setup screen. Also notices when Claude Code has just become
@@ -85,6 +88,8 @@ fn ensure_started(app: &AppHandle, state: &AppState) -> Result<()> {
         cmd.current_dir(cwd);
     }
     let mut child = cmd.spawn().map_err(|e| AppError::io("spawn the Claude sidecar (is Node.js installed?)", e))?;
+    // Adopt it before it can start anything (it only starts Claude Code on the first message).
+    let tree = crate::proc_guard::TreeGuard::adopt(&child);
     let stdin = child.stdin.take().expect("piped stdin");
     let stdout = child.stdout.take().expect("piped stdout");
     let stderr = child.stderr.take().expect("piped stderr");
@@ -105,7 +110,7 @@ fn ensure_started(app: &AppHandle, state: &AppState) -> Result<()> {
         }
     });
 
-    *guard = Some(Sidecar { child, stdin });
+    *guard = Some(Sidecar { child, stdin, tree });
     Ok(())
 }
 
@@ -285,7 +290,10 @@ pub fn interrupt(state: &AppState) -> Result<()> {
 pub fn shutdown(state: &AppState) {
     if let Ok(mut guard) = state.claude.sidecar.lock() {
         if let Some(sc) = guard.as_mut() {
+            // The whole tree: the sidecar and the Claude Code processes it started.
+            sc.tree.kill_all();
             let _ = sc.child.kill();
+            let _ = sc.child.wait();
         }
         *guard = None;
     }

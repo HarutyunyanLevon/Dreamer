@@ -226,6 +226,9 @@ pub struct Settings {
     /// Right panel (Claude chat) shown.
     #[serde(default = "yes")]
     pub show_chat: bool,
+    /// The one-time "Dreamer is still running in the tray" notice has been seen.
+    #[serde(default)]
+    pub tray_notice_shown: bool,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -241,6 +244,7 @@ impl Default for Settings {
             last_project: None,
             show_projects: true,
             show_chat: true,
+            tray_notice_shown: false,
             extra: BTreeMap::new(),
         }
     }
@@ -254,6 +258,7 @@ pub struct SettingsPatch {
     pub last_project: Option<String>,
     pub show_projects: Option<bool>,
     pub show_chat: Option<bool>,
+    pub tray_notice_shown: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]

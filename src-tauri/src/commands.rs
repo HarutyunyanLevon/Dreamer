@@ -241,6 +241,18 @@ pub fn reset_chat(state: State<AppState>, slug: String, thread: String) -> Resul
     Ok(())
 }
 
+/// "Quit Dreamer" in the sidebar: stops the Claude sidecar (and everything it started), then exits.
+#[tauri::command(async)]
+pub fn quit_app(app: AppHandle) {
+    crate::quit(&app);
+}
+
+/// The tray notice's "Keep running": remember it was seen, hide the window to the tray.
+#[tauri::command(async)]
+pub fn hide_to_tray(app: AppHandle) {
+    crate::hide_to_tray(&app);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

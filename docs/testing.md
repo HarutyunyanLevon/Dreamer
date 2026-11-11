@@ -294,3 +294,26 @@ Driven after the fix (all pass): the delete dialog shows the full folder path an
 Manual:
 - [ ] Delete a project whose folder is open in Explorer (just viewing it). It should either work (Explorer doesn't lock), or refuse with the "in use" message and leave the project whole.
 - [ ] Restore a deleted project from the Recycle Bin: it reappears live.
+
+### 9. Quit and the Catch a thought popup
+Automated (`cargo test`: 58 passed):
+- `proc_guard::kill_all_ends_the_whole_tree`: node → detached node grandchild; both gone after `kill_all()`.
+- `dropping_the_guard_ends_the_tree_like_an_app_crash`: closing the job handle, which is what happens when dreamer.exe dies, ends both.
+- `plain_kill_leaves_the_grandchild_running`: why the guard exists.
+- `storage::tray_notice_is_remembered_once_seen`.
+
+Driven in the real app (all pass in the final runs). The popup was opened with the real global hotkey (Ctrl+Shift+Space sent as OS keyboard input) and driven in its own WebView:
+- Before the fix, calling `hide()` from the popup returned "window.hide not allowed … core:window:allow-hide" (root cause).
+- After: the hotkey opens it with focus in the field; X closes it, and the next open is empty; Esc closes it and discards the text; Enter closes it at once and creates exactly one new Inbox card with stage cloud.
+- A real failure, with the throwaway Inbox's cards folder write-protected via `icacls` and restored afterwards: the popup stays open with the text and shows "Couldn't add it: write …\inbox\cards\….md: Access is denied. (os error 5)", and the card stays inside the window.
+- Giving another window OS focus closes it, and it reopens empty with the error gone.
+
+Main window: a real `WM_CLOSE` (what the X sends) on a fresh app keeps the window open and shows "Dreamer is still running in the tray" with "Quit Dreamer" and "Keep running in the tray". "Keep running" hides the window (`IsWindowVisible` false) and writes `tray_notice_shown: true`. Once seen, the next X hides straight away without the notice. Clicking the sidebar's 44px "Quit Dreamer" for real: four seconds later `Get-CimInstance` showed **no dreamer.exe and no node.exe at all** (the Tauri CLI, Vite and npm went too).
+
+Not covered in the app: the Claude sidecar was not running during the quit test. Starting it needs a real chat message to Claude, which I didn't send. The process-tree kill is covered by the guard tests above, which spawn the same shape (node starting another node). The tray icon menu itself (Show / Quit) is OS UI I can't click.
+
+Manual:
+- [ ] Send one chat message (that starts the sidecar and a Claude Code process), then tray › Quit, then in PowerShell `Get-Process dreamer, node, claude -ErrorAction SilentlyContinue`: nothing from Dreamer remains.
+- [ ] Same, but stop `npm run tauri dev` with Ctrl+C instead of quitting: no node/claude process is left.
+- [ ] First X on a fresh workspace shows the notice once; after "Keep running", tray › Show Dreamer brings the window back and X hides it without the notice.
+- [ ] Hotkey from another app (e.g. a browser): the popup gets focus, and clicking back into that app closes it.

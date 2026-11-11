@@ -48,7 +48,7 @@ function seedProject(slug: string, name: string): MockProject {
 }
 
 export function createMockApi(): Api {
-  const settings: Settings = { version: 1, theme: "pearl-glow", hotkey: "Ctrl+Shift+Space", last_project: null, show_projects: true, show_chat: true };
+  const settings: Settings = { version: 1, theme: "pearl-glow", hotkey: "Ctrl+Shift+Space", last_project: null, show_projects: true, show_chat: true, tray_notice_shown: false };
   const projects = new Map<string, MockProject>();
   const customThemes = new Map<string, unknown>();
   const chats = new Map<string, ChatThreadFile>();
@@ -106,6 +106,7 @@ export function createMockApi(): Api {
       if (patch.last_project !== undefined) settings.last_project = patch.last_project || null;
       if (patch.show_projects !== undefined) settings.show_projects = patch.show_projects;
       if (patch.show_chat !== undefined) settings.show_chat = patch.show_chat;
+      if (patch.tray_notice_shown !== undefined) settings.tray_notice_shown = patch.tray_notice_shown;
       return { ...settings };
     },
     listProjects: async () => [...projects.values()].map(summary),
@@ -241,6 +242,10 @@ export function createMockApi(): Api {
     deleteCustomTheme: async (id) => {
       customThemes.delete(id);
     },
+    // In a plain browser there is no tray or process to quit.
+    quitApp: async () => {},
+    hideToTray: async () => {},
+    onTrayNotice: async () => () => {},
     onChange: async (cb) => {
       listeners.add(cb);
       return () => listeners.delete(cb);

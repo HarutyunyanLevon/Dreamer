@@ -89,6 +89,8 @@ export interface Settings {
   show_projects: boolean;
   /** Right panel (Claude chat) shown. */
   show_chat: boolean;
+  /** The one-time "still running in the tray" notice has been seen. */
+  tray_notice_shown: boolean;
 }
 export interface SettingsPatch {
   theme?: string;
@@ -97,6 +99,7 @@ export interface SettingsPatch {
   last_project?: string;
   show_projects?: boolean;
   show_chat?: boolean;
+  tray_notice_shown?: boolean;
 }
 
 export interface TrashItem {
@@ -173,6 +176,12 @@ export interface Api {
   readMedia(slug: string, rel: string): Promise<string>;
   /** Files changed on disk (by this app, Claude Code, git...). Returns an unsubscribe function. */
   onChange(cb: (events: ChangeEvent[]) => void): Promise<() => void>;
+  /** Quit for real: stops the Claude sidecar (and everything it started), then exits. */
+  quitApp(): Promise<void>;
+  /** Hide the main window to the tray and remember the tray notice was seen. */
+  hideToTray(): Promise<void>;
+  /** The main window's X was clicked for the first time: show the one-time tray notice. */
+  onTrayNotice(cb: () => void): Promise<() => void>;
   /** Only succeeds once the card has reached Pitch; returns the relative path written under briefs/. */
   exportBrief(slug: string, id: string): Promise<string>;
   /** Keyword search; `project` omitted = every project. Read-only, no Claude involved. */

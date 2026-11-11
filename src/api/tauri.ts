@@ -49,6 +49,9 @@ export const tauriApi: Api = {
   listCustomThemes: () => invoke("list_custom_themes"),
   saveCustomTheme: (id, theme) => invoke("save_custom_theme", { id, theme }),
   deleteCustomTheme: (id) => invoke("delete_custom_theme", { id }),
+  quitApp: () => invoke("quit_app"),
+  hideToTray: () => invoke("hide_to_tray"),
+  onTrayNotice: (cb) => listen("tray-notice", () => cb()),
   onChange: async (cb) => {
     const un = await listen<ChangeEvent[]>("workspace-changed", (e) => cb(e.payload));
     return un;

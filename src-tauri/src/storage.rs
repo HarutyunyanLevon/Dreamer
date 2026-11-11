@@ -281,6 +281,9 @@ impl Workspace {
         if let Some(v) = patch.show_chat {
             s.show_chat = v;
         }
+        if let Some(v) = patch.tray_notice_shown {
+            s.tray_notice_shown = v;
+        }
         write_json(&self.root.join("workspace.json"), &s)?;
         Ok(s)
     }
@@ -910,6 +913,17 @@ mod tests {
         assert_eq!((raw["show_projects"].clone(), raw["show_chat"].clone()), (serde_json::json!(false), serde_json::json!(false)));
         ws.update_settings(SettingsPatch { show_projects: Some(true), show_chat: Some(true), ..Default::default() }).unwrap();
         assert!(ws.get_settings().unwrap().show_projects && ws.get_settings().unwrap().show_chat);
+    }
+
+    #[test]
+    fn tray_notice_is_remembered_once_seen() {
+        let (_d, ws) = ws();
+        assert!(!ws.get_settings().unwrap().tray_notice_shown, "new and older workspaces haven't seen it");
+        ws.update_settings(SettingsPatch { tray_notice_shown: Some(true), ..Default::default() }).unwrap();
+        assert!(Workspace::open(&ws.root).unwrap().get_settings().unwrap().tray_notice_shown, "persists across restarts");
+        // Other settings writes keep it.
+        ws.update_settings(SettingsPatch { theme: Some("gold-sky".into()), ..Default::default() }).unwrap();
+        assert!(ws.get_settings().unwrap().tray_notice_shown);
     }
 
     #[test]

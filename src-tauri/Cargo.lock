@@ -720,6 +720,7 @@ dependencies = [
  "trash",
  "ulid",
  "unicode-normalization",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

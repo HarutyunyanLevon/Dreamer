@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { api, type ProjectSummary } from "../api";
 import { Modal } from "../ui/Modal";
 import { useTheme } from "../theme/ThemeContext";
-import { IconFolder, IconInbox, IconPlus, IconTrash } from "./Icons";
+import { IconFolder, IconInbox, IconPlus, IconPower, IconTrash } from "./Icons";
 import { ThemeEditor } from "./ThemeEditor";
 import { ScrollArea } from "../ui/Scroll";
 
@@ -183,6 +183,18 @@ export function Sidebar({ projects, active, onSelect, onCreate, onDelete }: Prop
         <button className="new-project" type="button" onClick={startNaming}>
           <IconPlus />
           New project
+        </button>
+      )}
+
+      {api.kind === "tauri" && (
+        <button
+          type="button"
+          className="side-quit"
+          title="Quit Dreamer completely (closing the window keeps it in the tray)"
+          onClick={() => void api.quitApp()}
+        >
+          <IconPower />
+          Quit Dreamer
         </button>
       )}
     </aside>

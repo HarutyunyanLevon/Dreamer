@@ -397,4 +397,12 @@ rl.on("line", (line) => {
   }
 });
 
+// Dreamer closed our stdin (it quit, crashed or was stopped): end every Claude session and exit,
+// so no Claude Code process outlives the app. (On Windows the app's job object also ends this
+// whole process tree; this covers other platforms and a graceful path everywhere.)
+rl.on("close", () => {
+  for (const s of [...sessions.values()]) closeSession(s);
+  setTimeout(() => process.exit(0), 200);
+});
+
 send({ type: "ready" });
