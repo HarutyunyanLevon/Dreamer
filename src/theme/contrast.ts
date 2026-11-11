@@ -29,6 +29,9 @@ export function checkTheme(t: Theme): ContrastCheck[] {
     ["ghost text on white", t.ui.ghostText, WHITE, 4.5],
     ["ink on cloud card", t.ui.ink, cloudCard, 4.5],
     ["body on cloud card", t.ui.body, cloudCard, 4.5],
+    // Card menu button, resize grip, "+ More" helper text sit on cards and dialogs.
+    ["muted on cloud card", t.ui.muted, cloudCard, 4.5],
+    ["accent on cloud card (links)", t.ui.accent, cloudCard, 4.5],
     ["white on accent (buttons)", "#ffffff", hexToRgb(t.ui.accent), 4.5],
     // Non-text UI component (WCAG 1.4.11): the scrollbar thumb against its track on glass.
     ["scrollbar thumb on track (UI)", thumb, track, 3],

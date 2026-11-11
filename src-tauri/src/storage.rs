@@ -327,18 +327,22 @@ impl Workspace {
     // ----- canvas -----
 
     fn read_canvas(dir: &Path) -> Result<Canvas> {
-        read_json_or_default(&dir.join("canvas.json"))
+        let mut c: Canvas = read_json_or_default(&dir.join("canvas.json"))?;
+        c.sanitize();
+        Ok(c)
     }
 
     pub fn save_canvas(&self, slug: &str, canvas: &Canvas) -> Result<()> {
         let dir = self.existing_project_dir(slug)?;
-        write_json(&dir.join("canvas.json"), canvas)
+        let mut canvas = canvas.clone();
+        canvas.sanitize();
+        write_json(&dir.join("canvas.json"), &canvas)
     }
 
     /// First free grid slot, so new cards never stack exactly on top of each other.
     fn next_free_pos(canvas: &Canvas) -> Pos {
         for k in 0usize.. {
-            let p = Pos { x: (k % 4) as f64 * GRID_DX, y: (k / 4) as f64 * GRID_DY };
+            let p = Pos::at((k % 4) as f64 * GRID_DX, (k / 4) as f64 * GRID_DY);
             let taken = canvas.cards.values().any(|q| (q.x - p.x).abs() < GRID_DX * 0.5 && (q.y - p.y).abs() < GRID_DY * 0.5);
             if !taken {
                 return p;
@@ -441,10 +445,12 @@ impl Workspace {
         };
         Self::write_card_file(&Self::card_path(&dir, &id)?, &card)?;
         let mut canvas = Self::read_canvas(&dir)?;
-        let pos = match (new.x, new.y) {
-            (Some(x), Some(y)) => Pos { x, y },
+        let mut pos = match (new.x, new.y) {
+            (Some(x), Some(y)) => Pos::at(x, y),
             _ => Self::next_free_pos(&canvas),
         };
+        // New cards (including Claude's ghosts) land on top of the stack.
+        pos.z = Some(canvas.max_z() + 1);
         canvas.cards.insert(id, pos);
         write_json(&dir.join("canvas.json"), &canvas)?;
         Ok(card)
@@ -870,7 +876,7 @@ mod tests {
         let pa = data.canvas.cards[&a.meta.id];
         let pb = data.canvas.cards[&b.meta.id];
         assert_ne!(pa, pb);
-        assert_eq!(data.canvas.cards[&c.meta.id], Pos { x: 900.0, y: -40.0 });
+        assert_eq!((data.canvas.cards[&c.meta.id].x, data.canvas.cards[&c.meta.id].y), (900.0, -40.0));
         assert_eq!(data.cards.len(), 3);
     }
 
@@ -914,10 +920,37 @@ mod tests {
         let back = ws.restore_card(INBOX_SLUG, &id).unwrap();
         assert_eq!(back.meta.title, "doomed");
         let data = ws.load_project(INBOX_SLUG).unwrap();
-        assert_eq!(data.canvas.cards[&id], Pos { x: 123.0, y: 456.0 });
+        assert_eq!((data.canvas.cards[&id].x, data.canvas.cards[&id].y), (123.0, 456.0));
         assert!(ws.list_trash(INBOX_SLUG).unwrap().is_empty());
         assert!(ws.restore_card(INBOX_SLUG, &id).is_err());
         assert!(matches!(ws.delete_card(INBOX_SLUG, "01NOPE"), Err(AppError::NotFound(_))));
+    }
+
+    #[test]
+    fn size_and_z_order_persist_through_save_trash_and_restore() {
+        let (_d, ws) = ws();
+        let a = ws.create_card(INBOX_SLUG, new_card("a")).unwrap();
+        let b = ws.create_card(INBOX_SLUG, new_card("b")).unwrap();
+        let mut canvas = ws.load_project(INBOX_SLUG).unwrap().canvas;
+        // New cards stack upward.
+        assert!(canvas.cards[&b.meta.id].z > canvas.cards[&a.meta.id].z);
+        // The UI resizes `a`, sends it to the back, and saves (bad values get sanitized).
+        let pa = canvas.cards.get_mut(&a.meta.id).unwrap();
+        pa.w = Some(420.0);
+        pa.h = Some(f64::NAN);
+        pa.z = Some(-5);
+        pa.back = true;
+        ws.save_canvas(INBOX_SLUG, &canvas).unwrap();
+        let saved = ws.load_project(INBOX_SLUG).unwrap().canvas.cards[&a.meta.id];
+        assert_eq!((saved.w, saved.h, saved.z, saved.back), (Some(420.0), None, Some(-5), true));
+        // Trash keeps the whole Pos; restore brings size and stacking back.
+        ws.delete_card(INBOX_SLUG, &a.meta.id).unwrap();
+        ws.restore_card(INBOX_SLUG, &a.meta.id).unwrap();
+        assert_eq!(ws.load_project(INBOX_SLUG).unwrap().canvas.cards[&a.meta.id], saved);
+        // A third card goes above everything again.
+        let c = ws.create_card(INBOX_SLUG, new_card("c")).unwrap();
+        let cv = ws.load_project(INBOX_SLUG).unwrap().canvas;
+        assert_eq!(cv.cards[&c.meta.id].z, Some(cv.cards[&b.meta.id].z.unwrap() + 1));
     }
 
     #[test]

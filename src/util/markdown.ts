@@ -3,7 +3,9 @@
  * Good enough for card notes; not a spec-complete parser (no CDN deps, keeps the bundle tiny).
  */
 export function renderMarkdown(src: string): string {
-  const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  // Quotes too: link URLs land inside an href="..." attribute, and an unescaped quote there
+  // would let a card's text inject attributes (card files can come from anywhere).
+  const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
   const inline = (s: string) =>
     esc(s)
       .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")

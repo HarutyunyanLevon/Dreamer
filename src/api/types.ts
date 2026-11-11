@@ -45,6 +45,13 @@ export interface Viewport {
 export interface Pos {
   x: number;
   y: number;
+  /** Present once the user has resized the card (absent = default width, auto height). */
+  w?: number;
+  h?: number;
+  /** Stacking order; higher is in front. */
+  z?: number;
+  /** The user explicitly sent this card to the back: never auto-raise it. */
+  back?: boolean;
 }
 export interface Canvas {
   version: number;

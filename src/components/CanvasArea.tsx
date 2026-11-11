@@ -1,5 +1,8 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
-import { api, type Card, type ProjectData } from "../api";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
+import { api, type Card, type Pos, type ProjectData } from "../api";
+import { renderMarkdown } from "../util/markdown";
+import { useEscClose } from "../util/useEscClose";
+import { CARD_H, CARD_W, HANDLES, cardRect, displayStack, resizeRect, type HandleDir, type Rect } from "./cardGeometry";
 import type { GhostLink, Workspace } from "../state/useWorkspace";
 import { useTheme } from "../theme/ThemeContext";
 import { STAGES, STAGE_LABEL, type StageId } from "../theme/types";
@@ -11,8 +14,6 @@ import { CardEditor } from "./CardEditor";
 import { IconCard, IconClip, IconFit, IconImage, IconLink, IconMinus, IconPlus, IconRedo, IconTrash as IconTrashCan, IconUndo } from "./Icons";
 import { TrashView } from "./TrashView";
 
-const CARD_W = 236;
-const CARD_H = 150;
 const MIN_ZOOM = 0.2;
 const MAX_ZOOM = 3;
 /** Floating panels over the canvas (sidebar left, chat right, incl. margins), to center focused cards in the free column. */
@@ -35,6 +36,32 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
   const sizeRef = useRef({ w: 1200, h: 800 });
   const [cameraAnim, setCameraAnim] = useState(false);
   const cameraAnimTimer = useRef<number | undefined>(undefined);
+  const [menu, setMenu] = useState<{ id: string; x: number; y: number } | null>(null);
+
+  // Rendered heights of auto-height cards (reported by each CardView), for culling, link
+  // endpoints and the "fully hidden" stacking rule. Batched into one re-render per frame.
+  const heights = useRef(new Map<string, number>());
+  const [measureTick, setMeasureTick] = useState(0);
+  const measureRaf = useRef(0);
+  const onMeasure = useCallback((id: string, h: number) => {
+    if (heights.current.get(id) === h) return;
+    heights.current.set(id, h);
+    if (!measureRaf.current) {
+      measureRaf.current = requestAnimationFrame(() => {
+        measureRaf.current = 0;
+        setMeasureTick((t) => t + 1);
+      });
+    }
+  }, []);
+  const rectOf = useCallback(
+    (id: string): Rect | undefined => {
+      const p = data?.canvas.cards[id];
+      return p ? cardRect(p, heights.current.get(id)) : undefined;
+    },
+    // measureTick: heights changed
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [data, measureTick],
+  );
 
   const toggle = (s: StageId) =>
     setFilter((prev) => {
@@ -60,11 +87,16 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
     const right = (w - vp.x + margin) / vp.zoom;
     const bottom = (h - vp.y + margin) / vp.zoom;
     return visible.filter((c) => {
-      const p = data.canvas.cards[c.id];
-      if (!p) return false;
-      return p.x + CARD_W >= left && p.x <= right && p.y + CARD_H >= top && p.y <= bottom;
+      const r = rectOf(c.id);
+      if (!r) return false;
+      return r.x + r.w >= left && r.x <= right && r.y + r.h >= top && r.y <= bottom;
     });
-  }, [visible, data, vp]);
+  }, [visible, data, vp, rectOf]);
+
+  const stack = useMemo(
+    () => displayStack(onScreen.map((c) => c.id), rectOf, (id) => data?.canvas.cards[id]),
+    [onScreen, rectOf, data],
+  );
 
   // ----- pan / zoom -----
 
@@ -176,11 +208,12 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
       return;
     }
     if (!filter.has(card.stage)) setFilter((prev) => new Set(prev).add(card.stage));
+    const r = cardRect(pos, heights.current.get(card.id));
     const { w, h } = sizeRef.current;
     const zoom = Math.min(MAX_ZOOM, Math.max(FOCUS_ZOOM, vp.zoom));
     const cx = w > LEFT_PANEL + RIGHT_PANEL + 200 ? (LEFT_PANEL + w - RIGHT_PANEL) / 2 : w / 2;
     setCameraAnim(true);
-    ws.setViewport({ x: cx - (pos.x + CARD_W / 2) * zoom, y: h / 2 - (pos.y + CARD_H / 2) * zoom, zoom });
+    ws.setViewport({ x: cx - (r.x + r.w / 2) * zoom, y: h / 2 - (r.y + Math.min(r.h, h / zoom - 80) / 2) * zoom, zoom });
     // Not an effect cleanup: the viewport change re-renders right away and must not cancel this.
     window.clearTimeout(cameraAnimTimer.current);
     cameraAnimTimer.current = window.setTimeout(() => setCameraAnim(false), 500);
@@ -191,18 +224,18 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
       if (data) ws.setViewport({ x: sizeRef.current.w / 2, y: sizeRef.current.h / 2, zoom: 1 });
       return;
     }
-    const pts = visible.map((c) => data.canvas.cards[c.id]).filter(Boolean) as { x: number; y: number }[];
+    const pts = visible.map((c) => rectOf(c.id)).filter(Boolean) as Rect[];
     if (pts.length === 0) return;
     const minX = Math.min(...pts.map((p) => p.x));
     const minY = Math.min(...pts.map((p) => p.y));
-    const maxX = Math.max(...pts.map((p) => p.x + CARD_W));
-    const maxY = Math.max(...pts.map((p) => p.y + CARD_H));
+    const maxX = Math.max(...pts.map((p) => p.x + p.w));
+    const maxY = Math.max(...pts.map((p) => p.y + p.h));
     const { w, h } = sizeRef.current;
     const pad = 80;
     const zoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, Math.min((w - pad * 2) / (maxX - minX), (h - pad * 2) / (maxY - minY)) || 1));
     ws.setViewport({ x: w / 2 - ((minX + maxX) / 2) * zoom, y: h / 2 - ((minY + maxY) / 2) * zoom, zoom });
-    ws.flushCanvas();
-  }, [data, visible, ws, onScreen.length]);
+    void ws.flushCanvas();
+  }, [data, visible, ws, onScreen.length, rectOf]);
 
   const createAt = useCallback(
     async (extra: Parameters<Workspace["createCard"]>[0] = {}) => {
@@ -231,6 +264,19 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
       ws.setContextCard(card.id);
     },
     [linkMode, linkFrom, ws],
+  );
+
+  const openMenu = useCallback((id: string, x: number, y: number) => setMenu({ id, x, y }), []);
+
+  // Stable props for CardView, so React.memo skips every card except the one that changed while
+  // panning/dragging (the `ws` object itself is new on every render).
+  const clickRef = useRef(onCardClick);
+  clickRef.current = onCardClick;
+  const onOpenCard = useCallback((c: Card) => clickRef.current(c), []);
+  const { moveCard, resizeCard, flushCanvas, bringToFront, updateCard, deleteCard } = ws;
+  const cardActions = useMemo(
+    () => ({ moveCard, resizeCard, flushCanvas, bringToFront, updateCard, deleteCard }),
+    [moveCard, resizeCard, flushCanvas, bringToFront, updateCard, deleteCard],
   );
 
   const onDropFile = useCallback(
@@ -265,21 +311,28 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
     >
       <div className="grid" />
       <div className="world">
-        {data && <LinkLayer cards={onScreen} canvas={data.canvas} ghosts={ws.ghostLinks} />}
-        {data && <GhostLinkControls cards={onScreen} canvas={data.canvas} ghosts={ws.ghostLinks} ws={ws} />}
-        {data &&
-          onScreen.map((c) => (
-            <CardView
-              key={c.id}
-              card={c}
-              pos={data.canvas.cards[c.id]}
-              ws={ws}
-              linking={linkMode}
-              isLinkSource={linkFrom === c.id}
-              selected={ws.contextCardId === c.id}
-              onOpen={() => onCardClick(c)}
-            />
-          ))}
+        {data && <LinkLayer cards={onScreen} rectOf={rectOf} ghosts={ws.ghostLinks} />}
+        {/* Cards get their own stacking context, so card z-order never covers ghost-link controls. */}
+        <div className="cards-layer">
+          {data &&
+            onScreen.map((c) => (
+              <CardView
+                key={c.id}
+                card={c}
+                pos={data.canvas.cards[c.id]}
+                z={stack.get(c.id) ?? 0}
+                active={ws.active}
+                actions={cardActions}
+                linking={linkMode}
+                isLinkSource={linkFrom === c.id}
+                selected={ws.contextCardId === c.id}
+                onOpen={onOpenCard}
+                onMenu={openMenu}
+                onMeasure={onMeasure}
+              />
+            ))}
+        </div>
+        {data && <GhostLinkControls cards={onScreen} rectOf={rectOf} ghosts={ws.ghostLinks} ws={ws} />}
       </div>
 
       {data && data.cards.length === 0 && (
@@ -380,6 +433,19 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
       </div>
 
       {clipPrompt && <WebClipPrompt onClose={() => setClipPrompt(false)} onCreate={(url, name) => createAt({ title: name || url, fields: { url, clip_title: name } })} />}
+      {menu && data?.canvas.cards[menu.id] && (
+        <CardMenu
+          x={menu.x}
+          y={menu.y}
+          onClose={() => setMenu(null)}
+          onOpen={() => {
+            const c = data.cards.find((x) => x.id === menu.id);
+            if (c) onCardClick(c);
+          }}
+          onFront={() => ws.bringToFront(menu.id)}
+          onBack={() => ws.sendToBack(menu.id)}
+        />
+      )}
       {editingCard && <CardEditor card={editingCard} ws={ws} onClose={() => setEditing(null)} />}
       {trashOpen && <TrashView ws={ws} onClose={() => setTrashOpen(false)} />}
     </main>
@@ -395,14 +461,16 @@ function Warnings({ data }: { data: ProjectData }) {
   );
 }
 
-const center = (p: { x: number; y: number }) => ({ x: p.x + CARD_W / 2, y: p.y + CARD_H / 2 });
+const center = (r: Rect) => ({ x: r.x + r.w / 2, y: r.y + r.h / 2 });
+
+type RectOf = (id: string) => Rect | undefined;
 
 /** Ghost links whose two cards are both on screen, with their endpoints. */
-function placedGhosts(cards: Card[], canvas: ProjectData["canvas"], ghosts: GhostLink[]) {
+function placedGhosts(cards: Card[], rectOf: RectOf, ghosts: GhostLink[]) {
   const ids = new Set(cards.map((c) => c.id));
   return ghosts.flatMap((g) => {
-    const a = canvas.cards[g.from];
-    const b = canvas.cards[g.to];
+    const a = rectOf(g.from);
+    const b = rectOf(g.to);
     if (!a || !b || !ids.has(g.from) || !ids.has(g.to)) return [];
     const p1 = center(a);
     const p2 = center(b);
@@ -411,10 +479,10 @@ function placedGhosts(cards: Card[], canvas: ProjectData["canvas"], ghosts: Ghos
 }
 
 /** Keep/Dismiss pill at the midpoint of each proposed (ghost) link. */
-function GhostLinkControls({ cards, canvas, ghosts, ws }: { cards: Card[]; canvas: ProjectData["canvas"]; ghosts: GhostLink[]; ws: Workspace }) {
+function GhostLinkControls({ cards, rectOf, ghosts, ws }: { cards: Card[]; rectOf: RectOf; ghosts: GhostLink[]; ws: Workspace }) {
   return (
     <>
-      {placedGhosts(cards, canvas, ghosts).map(({ g, x1, y1, x2, y2 }) => (
+      {placedGhosts(cards, rectOf, ghosts).map(({ g, x1, y1, x2, y2 }) => (
         <div
           key={g.key}
           className="ghost-link-ctl"
@@ -432,28 +500,23 @@ function GhostLinkControls({ cards, canvas, ghosts, ws }: { cards: Card[]; canva
   );
 }
 
-function LinkLayer({ cards, canvas, ghosts }: { cards: Card[]; canvas: ProjectData["canvas"]; ghosts: GhostLink[] }) {
+function LinkLayer({ cards, rectOf, ghosts }: { cards: Card[]; rectOf: RectOf; ghosts: GhostLink[] }) {
   const byId = useMemo(() => new Map(cards.map((c) => [c.id, c])), [cards]);
-  const ghostLines = placedGhosts(cards, canvas, ghosts);
+  const ghostLines = placedGhosts(cards, rectOf, ghosts);
   const lines: { x1: number; y1: number; x2: number; y2: number; label?: string; key: string }[] = [];
   for (const c of cards) {
-    const from = canvas.cards[c.id];
+    const from = rectOf(c.id);
     if (!from) continue;
     for (const l of c.links) {
-      const to = canvas.cards[l.to];
+      const to = rectOf(l.to);
       if (!to || !byId.has(l.to)) continue;
-      lines.push({
-        x1: from.x + CARD_W / 2,
-        y1: from.y + CARD_H / 2,
-        x2: to.x + CARD_W / 2,
-        y2: to.y + CARD_H / 2,
-        label: l.label,
-        key: `${c.id}-${l.to}`,
-      });
+      const a = center(from);
+      const b = center(to);
+      lines.push({ x1: a.x, y1: a.y, x2: b.x, y2: b.y, label: l.label, key: `${c.id}-${l.to}` });
     }
   }
   if (lines.length === 0 && ghostLines.length === 0) return null;
-  const pad = 2000;
+  const pad = 4000;
   return (
     <svg className="link-layer" width={pad * 2} height={pad * 2} style={{ left: -pad, top: -pad }}>
       <g transform={`translate(${pad},${pad})`}>
@@ -475,51 +538,82 @@ function LinkLayer({ cards, canvas, ghosts }: { cards: Card[]; canvas: ProjectDa
   );
 }
 
+type CardActions = Pick<Workspace, "moveCard" | "resizeCard" | "flushCanvas" | "bringToFront" | "updateCard" | "deleteCard">;
+
+const currentZoom = () => Number(getComputedStyle(document.documentElement.querySelector(".canvas") ?? document.documentElement).getPropertyValue("--zoom")) || 1;
+
 const CardView = memo(function CardView({
   card,
   pos,
-  ws,
+  z,
+  active,
+  actions: ws,
   linking,
   isLinkSource,
   selected,
   onOpen,
+  onMenu,
+  onMeasure,
 }: {
   card: Card;
-  pos?: { x: number; y: number };
-  ws: Workspace;
+  pos?: Pos;
+  z: number;
+  active: string | null;
+  actions: CardActions;
   linking: boolean;
   isLinkSource: boolean;
   selected: boolean;
-  onOpen: () => void;
+  onOpen: (card: Card) => void;
+  onMenu: (id: string, x: number, y: number) => void;
+  onMeasure: (id: string, h: number) => void;
 }) {
   const [imgUrl, setImgUrl] = useState<string | null>(null);
+  const elRef = useRef<HTMLElement | null>(null);
   const image = typeof card.fields.image === "string" ? card.fields.image : null;
   useEffect(() => {
-    if (!image || !ws.active) return;
+    if (!image || !active) return;
     let cancelled = false;
-    api.readMedia(ws.active, image).then((u) => !cancelled && setImgUrl(u)).catch(() => {});
+    api.readMedia(active, image).then((u) => !cancelled && setImgUrl(u)).catch(() => {});
     return () => {
       cancelled = true;
     };
-  }, [image, ws.active]);
+  }, [image, active]);
 
-  const dragState = useRef<{ x: number; y: number; ox: number; oy: number; moved: boolean; last: { x: number; y: number } } | null>(null);
+  // Report the rendered height (auto-height cards grow with their content).
+  useLayoutEffect(() => {
+    const el = elRef.current;
+    if (!el) return;
+    onMeasure(card.id, el.offsetHeight);
+    const ro = new ResizeObserver(() => onMeasure(card.id, el.offsetHeight));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [card.id, onMeasure]);
+
+  const bodyHtml = useMemo(() => (card.body ? renderMarkdown(card.body) : ""), [card.body]);
+
+  // ----- move -----
+  const dragState = useRef<{ x: number; y: number; ox: number; oy: number; zoom: number; moved: boolean; last: { x: number; y: number } } | null>(null);
   const onPointerDown = useCallback(
     (e: ReactPointerEvent) => {
       if (e.button !== 0 || linking) return;
+      const t = e.target as HTMLElement;
+      // Let the card body's own scrollbar be dragged.
+      if (t.classList.contains("scroll") && e.nativeEvent.offsetX >= t.clientWidth) return;
+      if (t.closest("button, a, input, textarea")) return;
       e.stopPropagation();
-      dragState.current = { x: e.clientX, y: e.clientY, ox: pos?.x ?? 0, oy: pos?.y ?? 0, moved: false, last: { x: pos?.x ?? 0, y: pos?.y ?? 0 } };
-      (e.target as Element).setPointerCapture(e.pointerId);
+      // The last card you touch comes to the front.
+      ws.bringToFront(card.id);
+      dragState.current = { x: e.clientX, y: e.clientY, ox: pos?.x ?? 0, oy: pos?.y ?? 0, zoom: currentZoom(), moved: false, last: { x: pos?.x ?? 0, y: pos?.y ?? 0 } };
+      (e.currentTarget as Element).setPointerCapture(e.pointerId);
     },
-    [pos, linking],
+    [pos, linking, ws, card.id],
   );
   const onPointerMove = useCallback(
     (e: ReactPointerEvent) => {
       const d = dragState.current;
       if (!d) return;
-      const zoom = Number(getComputedStyle(document.documentElement).getPropertyValue("--zoom")) || 1;
-      const dx = (e.clientX - d.x) / zoom;
-      const dy = (e.clientY - d.y) / zoom;
+      const dx = (e.clientX - d.x) / d.zoom;
+      const dy = (e.clientY - d.y) / d.zoom;
       if (Math.abs(dx) > 2 || Math.abs(dy) > 2) d.moved = true;
       if (d.moved) {
         d.last = { x: d.ox + dx, y: d.oy + dy };
@@ -531,32 +625,87 @@ const CardView = memo(function CardView({
   const onPointerUp = useCallback(() => {
     const d = dragState.current;
     dragState.current = null;
-    if (d?.moved) {
+    if (!d) return;
+    if (d.moved) {
       ws.moveCard(card.id, d.last, { undoable: true, from: { x: d.ox, y: d.oy } });
-      ws.flushCanvas();
-    } else onOpen();
-  }, [ws, onOpen, card.id]);
+      void ws.flushCanvas();
+    } else onOpen(card);
+  }, [ws, onOpen, card]);
+
+  // ----- resize (edge and corner handles) -----
+  const resizeState = useRef<{ dir: HandleDir; x: number; y: number; zoom: number; start: Rect; from: Pos; last: Rect | null } | null>(null);
+  const onHandleDown = (dir: HandleDir) => (e: ReactPointerEvent) => {
+    if (e.button !== 0 || !pos || !elRef.current) return;
+    e.stopPropagation();
+    e.preventDefault();
+    ws.bringToFront(card.id);
+    // Measure the real box: an auto-height card becomes fixed-height from here on.
+    const start = { x: pos.x, y: pos.y, w: pos.w ?? elRef.current.offsetWidth, h: pos.h ?? elRef.current.offsetHeight };
+    resizeState.current = { dir, x: e.clientX, y: e.clientY, zoom: currentZoom(), start, from: { ...pos }, last: null };
+    (e.currentTarget as Element).setPointerCapture(e.pointerId);
+  };
+  const onHandleMove = (e: ReactPointerEvent) => {
+    const r = resizeState.current;
+    if (!r) return;
+    e.stopPropagation();
+    r.last = resizeRect(r.start, r.dir, (e.clientX - r.x) / r.zoom, (e.clientY - r.y) / r.zoom);
+    ws.resizeCard(card.id, r.last);
+  };
+  const onHandleUp = (e: ReactPointerEvent) => {
+    const r = resizeState.current;
+    resizeState.current = null;
+    if (!r) return;
+    e.stopPropagation();
+    if (r.last) ws.resizeCard(card.id, r.last, { undoable: true, from: r.from });
+  };
 
   if (!pos) return null;
   const url = typeof card.fields.url === "string" ? card.fields.url : null;
+  const fixed = pos.h !== undefined;
+  const style: CSSProperties = { left: pos.x, top: pos.y, width: pos.w ?? CARD_W, height: pos.h, zIndex: z };
   return (
     <article
-      className={`card stage-${card.stage}` + (card.ghost ? " ghost" : "") + (isLinkSource ? " link-source" : "") + (linking ? " linkable" : "") + (selected ? " selected" : "")}
-      style={{ left: pos.x, top: pos.y }}
+      ref={elRef}
+      className={
+        `card stage-${card.stage}` +
+        (card.ghost ? " ghost" : "") +
+        (isLinkSource ? " link-source" : "") +
+        (linking ? " linkable" : "") +
+        (selected ? " selected" : "") +
+        (fixed ? " fixed-size" : "")
+      }
+      style={style}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        onMenu(card.id, e.clientX, e.clientY);
+      }}
     >
       {card.ghost && <div className="ghost-label">Claude suggests</div>}
       <div className="card-head">
         <span className={`dot dot-${card.stage}`} aria-hidden="true" />
         <span className="stage-name">{STAGE_LABEL[card.stage]}</span>
         {branchGroup(card) && <span className="fork-badge" title="Part of a fork — open the card to compare">⑂</span>}
+        <button
+          type="button"
+          className="card-menu-btn"
+          aria-label={`Card menu for ${card.title}`}
+          onClick={(e) => {
+            e.stopPropagation();
+            const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+            onMenu(card.id, r.left, r.bottom + 4);
+          }}
+        >
+          ⋯
+        </button>
       </div>
       <h3>{card.title}</h3>
       {imgUrl && <img className="card-image" src={imgUrl} alt="" />}
       {url && <a className="card-clip" href={url} target="_blank" rel="noreferrer" onClick={(e) => e.stopPropagation()}>{url}</a>}
-      {card.body && <p className="card-body">{card.body}</p>}
+      {bodyHtml && <ScrollArea className="card-body md" dangerouslySetInnerHTML={{ __html: bodyHtml }} />}
       {card.tags.length > 0 && <div className="tags">{card.tags.map((t) => <span key={t} className="tag">{t}</span>)}</div>}
       {card.ghost && (
         <div className="ghost-actions">
@@ -564,9 +713,65 @@ const CardView = memo(function CardView({
           <button type="button" className="btn" onClick={(e) => { e.stopPropagation(); void ws.deleteCard(card.id); }}>Dismiss</button>
         </div>
       )}
+      {!linking &&
+        HANDLES.map((d) => (
+          <div
+            key={d}
+            className={`rh rh-${d}`}
+            aria-hidden="true"
+            onPointerDown={onHandleDown(d)}
+            onPointerMove={onHandleMove}
+            onPointerUp={onHandleUp}
+            onPointerCancel={onHandleUp}
+          />
+        ))}
     </article>
   );
 });
+
+/** Right-click / ⋯ menu for a card: Open, Bring to front, Send to back. */
+function CardMenu({ x, y, onClose, onOpen, onFront, onBack }: { x: number; y: number; onClose: () => void; onOpen: () => void; onFront: () => void; onBack: () => void }) {
+  useEscClose(onClose);
+  const first = useRef<HTMLButtonElement | null>(null);
+  useEffect(() => first.current?.focus(), []);
+  const item = (label: string, fn: () => void, ref?: React.Ref<HTMLButtonElement>) => (
+    <button
+      type="button"
+      role="menuitem"
+      className="menu-item"
+      ref={ref}
+      onClick={() => {
+        fn();
+        onClose();
+      }}
+    >
+      {label}
+    </button>
+  );
+  // Keep the menu on screen.
+  const left = Math.min(x, window.innerWidth - 220);
+  const top = Math.min(y, window.innerHeight - 170);
+  return (
+    <div
+      className="menu-overlay"
+      data-wheel-boundary=""
+      onPointerDown={(e) => {
+        e.stopPropagation();
+        if (e.target === e.currentTarget) onClose();
+      }}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        onClose();
+      }}
+    >
+      <div className="card-menu glass" role="menu" style={{ left, top }}>
+        {item("Open", onOpen, first)}
+        {item("Bring to front", onFront)}
+        {item("Send to back", onBack)}
+      </div>
+    </div>
+  );
+}
 
 function WebClipPrompt({ onClose, onCreate }: { onClose: () => void; onCreate: (url: string, title: string) => void }) {
   const [url, setUrl] = useState("");

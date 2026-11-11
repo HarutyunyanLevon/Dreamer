@@ -156,3 +156,16 @@ Manual checklist (native window, `npm run tauri dev`). Not driven by me, because
 - [ ] Wheel over empty canvas pans, Ctrl+wheel zooms. Wheel over a short card pans too.
 - [ ] Theme switch: the scrollbar colors follow the theme.
 - [ ] Esc with Compare forks open over the card editor closes only Compare.
+
+## Fix pass 2: Cards checks
+Automated: `cargo test` gives 41 passing, with 2 new tests. `model::card_size_and_z_order_roundtrip_and_sanitize` checks that legacy positions round-trip without the new keys, that clamping and `max_z` work, and that `back: false` isn't written. `storage::size_and_z_order_persist_through_save_trash_and_restore` checks that new cards stack upward, that a NaN height is sanitized to auto on save, and that trash then restore keeps size, z and `back`. `cargo check`, `npm run build` and `npm run check:themes` (2 new rows) are all clean. The markdown escaping fix was checked with a throwaway tsx script: the attribute-injection string renders inert.
+
+Manual checklist (native window; not driven by me):
+- [ ] Hover a card: corner and edge handles appear. Drag each of the 8 and check that the opposite edge stays put, the card can't go below 160×90, and neighbours don't move. Ctrl+Z restores the size, and Ctrl+Shift+Z redoes it.
+- [ ] Reload the app (or look at `canvas.json`): the size persists as `w`/`h` on that card's entry.
+- [ ] A new card with a long body grows to about 18 lines, then its body scrolls with the wheel; at the end of the body, the wheel pans the canvas. After resizing it taller, it no longer auto-grows when you add text.
+- [ ] Click a card behind another: it comes to the front, and Ctrl+Z puts it back. Use ⋯ and right-click, then Send to back and Bring to front. Order survives a reload (`z`, `back` in `canvas.json`).
+- [ ] Drag a small card completely inside a bigger card that is in front: the small one shows on top. Send the small one to back: now it stays hidden behind the big one.
+- [ ] Card editor: the notes area is large. "+ More" is collapsed and shows custom fields and web clip URL with helper text. On a card with values, the count badge shows, and the toggle state is remembered when you reopen that card.
+- [ ] Drag a card, then Ctrl+Z, then reload: the card is still at the undone position (regression check for the flush fix).
+- [ ] `npm run dev` with `?stress=1`, Fit, then pan and drag: smooth. I didn't measure this here (no profiler on the native window).

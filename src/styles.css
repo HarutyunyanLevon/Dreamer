@@ -228,7 +228,8 @@ button:disabled { cursor: default; }
 .dot-pitch { background: var(--stage-pitch); box-shadow: 0 0 8px var(--stage-pitch-glow); }
 
 /* ---------- Cards ---------- */
-.card { position: absolute; width: 236px; padding: 14px 16px 16px; border-radius: 22px; color: var(--ink); }
+.card { position: absolute; width: 236px; padding: 14px 16px 16px; border-radius: 22px; color: var(--ink); display: flex; flex-direction: column; }
+.card > * { flex: none; }
 .card h3 { font-family: var(--font-title); font-weight: 600; font-size: 19px; line-height: 1.2; margin: 6px 0 4px; color: var(--ink); }
 .card p { margin: 0; color: var(--body); font-size: 14px; }
 .card-head { display: flex; align-items: center; gap: 7px; }
@@ -270,7 +271,41 @@ button:disabled { cursor: default; }
   border: 1.5px solid var(--accent); background: rgba(255, 255, 255, 0.85);
 }
 .name-input::placeholder { color: var(--muted); }
-.card-body { display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; white-space: pre-wrap; }
+/* Card body: markdown, the main content. Auto-height cards grow with it up to ~18 lines, then it
+   scrolls inside the card; a manually sized card gives the body all remaining space. */
+.card-body { font-size: 15px; line-height: 1.5; color: var(--body); margin: 4px -8px 0 0; padding-right: 2px; max-height: calc(1.5em * 18); overflow-wrap: anywhere; }
+.card.fixed-size .card-body { flex: 1 1 auto; min-height: 0; max-height: none; }
+.card-body p, .md-preview p { margin: 0 0 2px; }
+.card-body br { display: block; content: ""; margin-top: 6px; }
+.card-body h3, .card-body h4, .card-body h5 { font-size: 15px; margin: 6px 0 2px; color: var(--ink); }
+.card-body ul { margin: 2px 0; padding-left: 18px; }
+.card-body a { color: var(--accent); }
+.cards-layer { position: absolute; left: 0; top: 0; isolation: isolate; z-index: 1; }
+.card-menu-btn {
+  position: absolute; top: 2px; right: 2px; width: 44px; height: 44px; border: 0; border-radius: 50%;
+  background: transparent; color: var(--muted); font-size: 20px; line-height: 1; opacity: 0.75;
+}
+.card-menu-btn:hover, .card-menu-btn:focus-visible { background: rgba(255, 255, 255, 0.75); color: var(--ink); opacity: 1; }
+.card h3 { padding-right: 30px; }
+/* Resize handles: corners are 44px touch targets centred on the corner; edges are 14px strips
+   between them. Shown on hover, or on the selected card. */
+.rh { position: absolute; display: none; z-index: 3; touch-action: none; }
+.card:hover > .rh, .card.selected > .rh { display: block; }
+.rh-n, .rh-s { left: 22px; right: 22px; height: 14px; cursor: ns-resize; }
+.rh-n { top: -7px; } .rh-s { bottom: -7px; }
+.rh-e, .rh-w { top: 22px; bottom: 22px; width: 14px; cursor: ew-resize; }
+.rh-e { right: -7px; } .rh-w { left: -7px; }
+.rh-ne, .rh-nw, .rh-se, .rh-sw { width: 44px; height: 44px; }
+.rh-ne { top: -22px; right: -22px; cursor: nesw-resize; } .rh-sw { bottom: -22px; left: -22px; cursor: nesw-resize; }
+.rh-nw { top: -22px; left: -22px; cursor: nwse-resize; } .rh-se { bottom: -22px; right: -22px; cursor: nwse-resize; }
+.rh-se::after {
+  content: ""; position: absolute; left: 12px; top: 12px; width: 9px; height: 9px;
+  border-right: 2px solid var(--muted); border-bottom: 2px solid var(--muted); border-radius: 0 0 4px 0; opacity: 0.8;
+}
+.menu-overlay { position: fixed; inset: 0; z-index: 45; }
+.card-menu { position: fixed; min-width: 200px; padding: 6px; border-radius: 16px; display: flex; flex-direction: column; gap: 2px; }
+.menu-item { min-height: 44px; padding: 0 14px; border: 0; border-radius: 10px; background: transparent; text-align: left; color: var(--ink); font-weight: 600; }
+.menu-item:hover, .menu-item:focus-visible { background: rgba(255, 255, 255, 0.75); }
 .tags { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 8px; }
 .tag { font-size: 12px; font-weight: 600; padding: 2px 9px; border-radius: 10px; background: var(--accent-soft); color: var(--ink); }
 .empty {
@@ -289,7 +324,7 @@ button:disabled { cursor: default; }
 
 /* ---------- Step 4: canvas interactivity ---------- */
 .tool.on { background: var(--accent-soft); color: var(--accent); }
-.link-layer { position: absolute; pointer-events: none; overflow: visible; }
+.link-layer { position: absolute; pointer-events: none; overflow: visible; z-index: 0; }
 .link-line { stroke: var(--link); stroke-width: 2; opacity: 0.7; }
 .link-label {
   fill: var(--ink); font-size: 12px; font-weight: 700; paint-order: stroke;
@@ -438,7 +473,7 @@ button:disabled { cursor: default; }
 .card.selected { box-shadow: 0 0 0 3px var(--accent), 0 10px 30px rgba(0, 0, 0, 0.12); }
 .link-line.ghost-link { stroke-dasharray: 7 6; opacity: 0.9; stroke: var(--accent); }
 .ghost-link-ctl {
-  position: absolute; transform: translate(-50%, -50%); z-index: 2; display: flex; align-items: center; gap: 6px;
+  position: absolute; transform: translate(-50%, -50%); z-index: 3; display: flex; align-items: center; gap: 6px;
   padding: 5px 6px 5px 12px; border-radius: 999px; border: 1.5px dashed var(--accent);
   background: rgba(255, 255, 255, 0.85); backdrop-filter: blur(8px); white-space: nowrap; font-size: 13px; color: var(--ink);
 }
@@ -470,3 +505,12 @@ button:disabled { cursor: default; }
   .canvas.camera-anim .world { transition: none; }
 }
 .modal > * { flex-shrink: 0; }
+
+/* ---------- Fix pass 2: card editor ---------- */
+.card-editor .body-row { flex: 1 0 auto; }
+.card-editor .editor-body { flex: 1; min-height: max(42vh, 260px); font-size: 16px; line-height: 1.55; resize: none; }
+.card-editor .md-preview { min-height: max(42vh, 260px); max-height: 60vh; font-size: 16px; line-height: 1.55; }
+.helper { margin: -4px 8px 2px; font-size: 13px; color: var(--muted); }
+.more-toggle { align-self: flex-start; display: inline-flex; align-items: center; gap: 8px; }
+.more-count { min-width: 22px; height: 22px; padding: 0 6px; border-radius: 11px; background: var(--accent); color: #fff; font-size: 12px; display: inline-grid; place-items: center; }
+.more-section { display: flex; flex-direction: column; gap: 14px; }

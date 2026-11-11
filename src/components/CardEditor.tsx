@@ -10,6 +10,23 @@ import { ScrollArea } from "../ui/Scroll";
 
 const RESERVED_FIELDS = new Set(["image", "url", "clip_title"]);
 
+/** "+ More" open/closed is remembered per card (only meaningful once it holds values). */
+const moreKey = (id: string) => `dreamer.more.${id}`;
+function readMore(id: string): boolean {
+  try {
+    return localStorage.getItem(moreKey(id)) === "1";
+  } catch {
+    return false;
+  }
+}
+function writeMore(id: string, open: boolean) {
+  try {
+    localStorage.setItem(moreKey(id), open ? "1" : "0");
+  } catch {
+    /* storage unavailable: the toggle just isn't remembered */
+  }
+}
+
 export function CardEditor({ card, ws, onClose }: { card: Card; ws: Workspace; onClose: () => void }) {
   const [title, setTitle] = useState(card.title);
   const [stage, setStage] = useState<StageId>(card.stage);
@@ -24,6 +41,13 @@ export function CardEditor({ card, ws, onClose }: { card: Card; ws: Workspace; o
   const [imageUrl, setImageUrl] = useState<string | null>(null);
   const [comparing, setComparing] = useState(false);
   const [briefMsg, setBriefMsg] = useState<string | null>(null);
+  const hasExtras = fields.length > 0 || url.trim() !== "";
+  const [moreOpen, setMoreOpen] = useState(() => hasExtras && readMore(card.id));
+  const toggleMore = () => {
+    const next = !moreOpen;
+    setMoreOpen(next);
+    if (hasExtras || next) writeMore(card.id, next);
+  };
   const group = branchGroup(card);
 
   const exportBrief = async () => {
@@ -123,7 +147,7 @@ export function CardEditor({ card, ws, onClose }: { card: Card; ws: Workspace; o
           {preview ? (
             <ScrollArea className="md-preview" dangerouslySetInnerHTML={{ __html: renderMarkdown(body) }} />
           ) : (
-            <textarea className="editor-body scroll scroll-y" value={body} onChange={(e) => setBody(e.target.value)} placeholder="Paste an image, or write markdown notes…" rows={7} />
+            <textarea className="editor-body scroll scroll-y" value={body} onChange={(e) => setBody(e.target.value)} placeholder="Paste an image, or write markdown notes…" aria-label="Notes" />
           )}
         </div>
 
@@ -153,7 +177,17 @@ export function CardEditor({ card, ws, onClose }: { card: Card; ws: Workspace; o
         </div>
 
         <div className="editor-row">
+          <button type="button" className="chip more-toggle" aria-expanded={moreOpen} aria-controls="card-more" onClick={toggleMore}>
+            {moreOpen ? "− Less" : "+ More"}
+            {!moreOpen && hasExtras && <span className="more-count">{fields.length + (url.trim() ? 1 : 0)}</span>}
+          </button>
+        </div>
+
+        {moreOpen && (
+        <div id="card-more" className="more-section">
+        <div className="editor-row">
           <span className="side-label">Custom fields</span>
+          <p className="helper">Your own key/value pairs, such as “Mood: chaotic”.</p>
           {fields.map(([k, v], i) => (
             <div key={i} className="field-row">
               <input value={k} placeholder="key" onChange={(e) => setFields(fields.map((f, j) => (j === i ? [e.target.value, f[1]] : f)))} />
@@ -166,8 +200,11 @@ export function CardEditor({ card, ws, onClose }: { card: Card; ws: Workspace; o
 
         <div className="editor-row">
           <span className="side-label">Web clip URL</span>
-          <input className="name-input" value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://…" />
+          <p className="helper">A link to the web page this card is a clip of.</p>
+          <input className="name-input" value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://…" aria-label="Web clip URL" />
         </div>
+        </div>
+        )}
 
         {card.links.length > 0 && (
           <div className="editor-row">

@@ -67,13 +67,18 @@ export function useWorkspace() {
       const seq = ++loadSeq.current;
       try {
         const d = await api.loadProject(slug);
-        if (seq === loadSeq.current && activeRef.current === slug) setData(d);
+        if (seq === loadSeq.current && activeRef.current === slug) {
+          dataRef.current = d;
+          setData(d);
+        }
       } catch (e) {
         // The active project vanished (deleted on disk): fall back to the Inbox.
         if (list.some((p) => p.slug === INBOX) && slug !== INBOX) {
           activeRef.current = INBOX;
           setActive(INBOX);
-          setData(await api.loadProject(INBOX));
+          const d = await api.loadProject(INBOX);
+          dataRef.current = d;
+          setData(d);
         } else throw e;
       }
     } catch (e) {
@@ -85,6 +90,7 @@ export function useWorkspace() {
     async (slug: string) => {
       activeRef.current = slug;
       setActive(slug);
+      dataRef.current = null;
       setData(null);
       undoStack.current = [];
       redoStack.current = [];
@@ -110,7 +116,9 @@ export function useWorkspace() {
         activeRef.current = start;
         setActive(start);
         setProjects(list);
-        setData(await api.loadProject(start));
+        const d = await api.loadProject(start);
+        dataRef.current = d;
+        setData(d);
       } catch (e) {
         setError(message(e));
       } finally {
@@ -192,16 +200,22 @@ export function useWorkspace() {
 
   // ----- canvas: pan/zoom + drag, persisted with a short debounce -----
 
+  // dataRef is updated synchronously here (not only by the effect after render), so a
+  // flushCanvas() right after a patch saves the patched canvas, not the previous one.
   const patchCanvas = useCallback((fn: (c: Canvas) => Canvas) => {
-    setData((prev) => (prev ? { ...prev, canvas: fn(prev.canvas) } : prev));
+    const prev = dataRef.current;
+    if (!prev) return;
+    const next = { ...prev, canvas: fn(prev.canvas) };
+    dataRef.current = next;
+    setData(next);
   }, []);
 
-  const flushCanvas = useCallback(() => {
+  const flushCanvas = useCallback(async () => {
     clearTimeout(canvasSaveTimer.current);
     const slug = activeRef.current;
     const d = dataRef.current;
     if (!slug || !d) return;
-    api.saveCanvas(slug, d.canvas).catch((e) => setError(message(e)));
+    await api.saveCanvas(slug, d.canvas).catch((e) => setError(message(e)));
   }, []);
 
   const scheduleCanvasSave = useCallback(() => {
@@ -209,7 +223,7 @@ export function useWorkspace() {
     canvasSaveTimer.current = setTimeout(flushCanvas, CANVAS_SAVE_DEBOUNCE_MS);
   }, [flushCanvas]);
 
-  useEffect(() => () => flushCanvas(), [flushCanvas]);
+  useEffect(() => () => void flushCanvas(), [flushCanvas]);
 
   const setViewport = useCallback(
     (vp: { x: number; y: number; zoom: number }) => {
@@ -219,9 +233,33 @@ export function useWorkspace() {
     [patchCanvas, scheduleCanvasSave],
   );
 
+  /** Merge into a card's canvas entry (keeps size and z-order when only x/y change). */
+  const patchPos = useCallback(
+    (id: string, patch: Partial<Pos>) => patchCanvas((c) => (c.cards[id] ? { ...c, cards: { ...c.cards, [id]: { ...c.cards[id], ...patch } } } : c)),
+    [patchCanvas],
+  );
+
+  /** Pushes an undo entry that restores a card's whole canvas entry. */
+  const pushPosUndo = useCallback(
+    (label: string, id: string, before: Pos, after: Pos) => {
+      pushUndo({
+        label,
+        undo: async () => {
+          patchCanvas((c) => ({ ...c, cards: { ...c.cards, [id]: before } }));
+          await flushCanvas();
+        },
+        redo: async () => {
+          patchCanvas((c) => ({ ...c, cards: { ...c.cards, [id]: after } }));
+          await flushCanvas();
+        },
+      });
+    },
+    [patchCanvas, flushCanvas, pushUndo],
+  );
+
   const moveCard = useCallback(
     (id: string, pos: Pos, opts?: { undoable?: boolean; from?: Pos }) => {
-      patchCanvas((c) => ({ ...c, cards: { ...c.cards, [id]: pos } }));
+      patchPos(id, { x: pos.x, y: pos.y });
       scheduleCanvasSave();
       // `from` must be the position at drag-start, passed by the caller: by the time a drag ends,
       // `dataRef` already holds the dragged-to position (every intermediate move went through here
@@ -231,18 +269,57 @@ export function useWorkspace() {
         pushUndo({
           label: "move card",
           undo: async () => {
-            patchCanvas((c) => ({ ...c, cards: { ...c.cards, [id]: from } }));
-            flushCanvas();
+            patchPos(id, { x: from.x, y: from.y });
+            await flushCanvas();
           },
           redo: async () => {
-            patchCanvas((c) => ({ ...c, cards: { ...c.cards, [id]: pos } }));
-            flushCanvas();
+            patchPos(id, { x: pos.x, y: pos.y });
+            await flushCanvas();
           },
         });
       }
     },
-    [patchCanvas, scheduleCanvasSave, flushCanvas, pushUndo],
+    [patchPos, scheduleCanvasSave, flushCanvas, pushUndo],
   );
+
+  /**
+   * Resize: `rect` may move x/y too (dragging a top/left handle). Live calls during a drag just
+   * patch state; the final call passes `{ undoable, from }` (the Pos at drag start).
+   */
+  const resizeCard = useCallback(
+    (id: string, rect: { x: number; y: number; w: number; h: number }, opts?: { undoable?: boolean; from?: Pos }) => {
+      patchPos(id, rect);
+      if (opts?.undoable && opts.from) {
+        const before = opts.from;
+        const after = { ...before, ...rect };
+        void flushCanvas();
+        pushPosUndo("resize card", id, before, after);
+      } else scheduleCanvasSave();
+    },
+    [patchPos, scheduleCanvasSave, flushCanvas, pushPosUndo],
+  );
+
+  /** Bring to front / send to back. No-op (and no undo entry) when nothing would change. */
+  const setStacking = useCallback(
+    (id: string, where: "front" | "back") => {
+      const c = dataRef.current?.canvas;
+      const before = c?.cards[id];
+      if (!c || !before) return;
+      const others = Object.entries(c.cards).filter(([k]) => k !== id).map(([, p]) => p.z ?? 0);
+      const top = others.length ? Math.max(...others) : 0;
+      const bottom = others.length ? Math.min(...others) : 0;
+      const after: Pos =
+        where === "front" ? { ...before, z: top + 1, back: undefined } : { ...before, z: bottom - 1, back: true };
+      if (where === "front" && !before.back && (before.z ?? 0) > top) return;
+      if (where === "back" && before.back && (before.z ?? 0) < bottom) return;
+      patchCanvas((cv) => ({ ...cv, cards: { ...cv.cards, [id]: after } }));
+      void flushCanvas();
+      pushPosUndo(where === "front" ? "bring to front" : "send to back", id, before, after);
+    },
+    [patchCanvas, flushCanvas, pushPosUndo],
+  );
+  const bringToFront = useCallback((id: string) => setStacking(id, "front"), [setStacking]);
+  const sendToBack = useCallback((id: string) => setStacking(id, "back"), [setStacking]);
 
   // ----- cards -----
 
@@ -441,6 +518,9 @@ export function useWorkspace() {
     setLinkLabel,
     addImage,
     moveCard,
+    resizeCard,
+    bringToFront,
+    sendToBack,
     setViewport,
     flushCanvas,
     canUndo,

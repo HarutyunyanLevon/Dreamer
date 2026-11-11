@@ -123,10 +123,31 @@ impl Default for Viewport {
     }
 }
 
+/// A card's place on the canvas. `w`/`h` are only present once the user has resized the card
+/// (absent = default width, auto height). `z` is the stacking order (higher = in front); `back`
+/// remembers an explicit "Send to back" so the UI never auto-raises that card.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Default)]
 pub struct Pos {
     pub x: f64,
     pub y: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub w: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub h: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub z: Option<i64>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub back: bool,
+}
+
+pub const MIN_CARD_W: f64 = 160.0;
+pub const MIN_CARD_H: f64 = 90.0;
+pub const MAX_CARD_SIDE: f64 = 4000.0;
+
+impl Pos {
+    pub fn at(x: f64, y: f64) -> Pos {
+        Pos { x, y, ..Default::default() }
+    }
 }
 
 /// canvas.json: camera and card positions. Links live in each card's frontmatter.
@@ -141,6 +162,28 @@ pub struct Canvas {
 impl Default for Canvas {
     fn default() -> Self {
         Canvas { version: 1, viewport: Viewport::default(), cards: BTreeMap::new() }
+    }
+}
+
+impl Canvas {
+    /// The highest stacking order in use (0 when no card has one yet).
+    pub fn max_z(&self) -> i64 {
+        self.cards.values().filter_map(|p| p.z).max().unwrap_or(0)
+    }
+
+    /// Repairs values a hand edit (or a bug) could leave behind: non-finite coordinates are
+    /// reset, sizes are clamped to sane bounds, and a non-finite size falls back to "auto".
+    pub fn sanitize(&mut self) {
+        for p in self.cards.values_mut() {
+            if !p.x.is_finite() {
+                p.x = 0.0;
+            }
+            if !p.y.is_finite() {
+                p.y = 0.0;
+            }
+            p.w = p.w.filter(|v| v.is_finite()).map(|v| v.clamp(MIN_CARD_W, MAX_CARD_SIDE));
+            p.h = p.h.filter(|v| v.is_finite()).map(|v| v.clamp(MIN_CARD_H, MAX_CARD_SIDE));
+        }
     }
 }
 
@@ -263,7 +306,29 @@ mod tests {
         assert_eq!(p.ghost, Some(false));
         let c: Canvas = serde_json::from_value(json!({"version": 1, "viewport": {"x": 1, "y": 2, "zoom": 1}, "cards": {"a": {"x": 0, "y": 0}}})).unwrap();
         assert_eq!(c.cards.len(), 1);
+        // A legacy position has no size/z and serializes back without them.
+        assert_eq!(serde_json::to_value(c.cards["a"]).unwrap(), json!({"x": 0.0, "y": 0.0}));
         let sp: SettingsPatch = serde_json::from_value(json!({"last_project": ""})).unwrap();
         assert_eq!(sp.last_project.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn card_size_and_z_order_roundtrip_and_sanitize() {
+        let v = json!({"version": 1, "viewport": {"x": 0, "y": 0, "zoom": 1}, "cards": {
+            "a": {"x": 1, "y": 2, "w": 320, "h": 240, "z": 7},
+            "b": {"x": 3, "y": 4, "z": -2, "back": true},
+            "c": {"x": 5, "y": 6, "w": 10, "h": 99999},
+        }});
+        let mut c: Canvas = serde_json::from_value(v).unwrap();
+        assert_eq!(c.cards["a"], Pos { x: 1.0, y: 2.0, w: Some(320.0), h: Some(240.0), z: Some(7), back: false });
+        assert!(c.cards["b"].back);
+        assert_eq!(c.max_z(), 7);
+        c.sanitize();
+        assert_eq!((c.cards["c"].w, c.cards["c"].h), (Some(MIN_CARD_W), Some(MAX_CARD_SIDE)));
+        let back = serde_json::to_value(&c).unwrap();
+        assert_eq!(back["cards"]["a"]["w"], 320.0);
+        assert_eq!(back["cards"]["b"]["back"], true);
+        assert!(back["cards"]["a"].get("back").is_none(), "false is not written");
+        assert_eq!(Canvas::default().max_z(), 0);
     }
 }
