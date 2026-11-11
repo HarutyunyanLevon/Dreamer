@@ -8,7 +8,8 @@ import { ScrollArea, useDragScroll } from "./Scroll";
  * draggable), scrolls its content with the shared scroll system, and supports drag-to-scroll on
  * non-interactive content. Wheel input never reaches the canvas.
  *
- * `size`: "sm" prompts, "md" lists, "lg" editors (card editor, theme editor, compare).
+ * `size`: "sm" prompts, "md" lists, "lg" editors (card editor, theme editor, compare). Window-centred
+ * dialogs are min(90vw, preferred width) wide and never narrower than ~420px (see styles.css).
  * `align`: "center" (default) or "top" (the Ctrl+K search box).
  * `placement`: "window" (default) centres the dialog in the window; "canvas" keeps it inside the
  * free area between the project sidebar and the chat panel (card editor, fork compare), sized to

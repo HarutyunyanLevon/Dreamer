@@ -90,7 +90,7 @@ button:disabled { cursor: default; }
   border: 1px solid rgba(255, 255, 255, 0.95);
   border-radius: var(--radius);
   backdrop-filter: blur(18px) saturate(1.1);
-  -webkit-backdrop-filter: blur(18px) saturate(1.1);
+ 
   box-shadow: 0 10px 40px var(--ink-shadow);
 }
 
@@ -198,7 +198,7 @@ button:disabled { cursor: default; }
   display: flex; align-items: center; gap: 6px;
   padding: 4px 8px; border-radius: 30px; max-width: calc(100% - var(--inset-l) - var(--inset-r) - var(--gap));
   background: var(--glass); border: 1px solid rgba(255, 255, 255, 0.95);
-  backdrop-filter: blur(18px); -webkit-backdrop-filter: blur(18px);
+  backdrop-filter: blur(18px);
   box-shadow: 0 8px 28px var(--ink-shadow);
 }
 .title-pill { top: var(--gap); flex-wrap: wrap; justify-content: center; padding-left: 18px; }
@@ -242,7 +242,7 @@ button:disabled { cursor: default; }
 /* Cloud: puffy scalloped edge drawn by <CloudEdge> (SVG), gently wobbling when allowed. */
 .stage-cloud {
   background: rgba(255, 255, 255, 0.3); border: 0;
-  backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
 }
 .edge-cloud {
   position: absolute; left: -10px; top: -10px; width: calc(100% + 20px); height: calc(100% + 20px);
@@ -405,13 +405,18 @@ button:disabled { cursor: default; }
 .place-canvas > .modal-lg { width: min(960px, 100%); height: min(900px, 100%); max-width: 100%; }
 .modal-stage > * { pointer-events: auto; }
 .drag-scrolling, .drag-scrolling * { user-select: none !important; cursor: grabbing; }
-.modal { width: 100%; max-width: 520px; max-height: 86vh; padding: 22px 24px; display: flex; flex-direction: column; gap: 14px; user-select: text; }
-.clip-prompt { max-width: 380px; gap: 12px; }
+.modal { max-height: 86vh; padding: 22px 24px; display: flex; flex-direction: column; gap: 14px; user-select: text; }
+.clip-prompt { gap: 12px; }
 .clip-prompt h3 { font-family: var(--font-title); font-size: 20px; color: var(--ink); margin: 0; }
 .modal-head { display: flex; align-items: center; gap: 10px; }
-.modal-sm { max-width: 400px; }
-.modal-md { max-width: 560px; }
-.modal-lg { max-width: min(960px, calc(100vw - 48px)); height: min(86vh, 900px); }
+/* Window-centred dialogs (placement="window"): one sizing rule for all of them. Each size names a
+   preferred width; the dialog is never narrower than ~420px (unless the window is) and never wider
+   than 90% of the window. */
+.modal-sm { --modal-w: 460px; }
+.modal-md { --modal-w: 560px; }
+.modal-lg { --modal-w: 960px; }
+.place-window > .modal { width: min(90vw, var(--modal-w)); min-width: min(420px, 90vw); max-width: 90vw; }
+.place-window > .modal-lg { height: min(86vh, 900px); }
 .editor-title {
   flex: 1; font-family: var(--font-title); font-size: 22px; font-weight: 600; color: var(--ink);
   border: 0; background: transparent; padding: 6px 4px; user-select: text;
@@ -499,7 +504,7 @@ button:disabled { cursor: default; }
 .fork-chip svg { width: 14px; height: 14px; }
 .modal-head h3 { display: flex; align-items: center; gap: 8px; font-family: var(--font-title); font-size: 20px; color: var(--ink); margin: 0; flex: 1; }
 .modal-head h3 svg { width: 18px; height: 18px; }
-.compare-modal { max-width: 920px; }
+.compare-modal { --modal-w: 920px; }
 .compare-columns { display: flex; gap: 14px; padding-bottom: 6px; flex: none; }
 .compare-col { flex: 1; min-width: 220px; background: rgba(255, 255, 255, 0.5); border-radius: 16px; padding: 14px; display: flex; flex-direction: column; gap: 10px; }
 .compare-col h4 { font-family: var(--font-title); font-size: 16px; color: var(--ink); margin: 0; }
@@ -507,7 +512,7 @@ button:disabled { cursor: default; }
 .compare-body p { margin: 2px 0; }
 .diff-add { background: color-mix(in srgb, #4caf6a 22%, transparent); border-radius: 4px; padding: 0 4px; }
 .diff-del { background: color-mix(in srgb, #e05a5a 18%, transparent); text-decoration: line-through; border-radius: 4px; padding: 0 4px; opacity: 0.8; }
-.trash-modal { max-width: 480px; }
+.trash-modal { --modal-w: 480px; }
 .trash-list { display: flex; flex-direction: column; gap: 6px; max-height: 50vh; flex: none; }
 .trash-row { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 14px; background: rgba(255, 255, 255, 0.45); }
 .trash-row-info { flex: 1; min-width: 0; }
@@ -548,7 +553,7 @@ button:disabled { cursor: default; }
 .result-chip { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; }
 .result-chip.ghost { border-style: dashed; }
 .result-proj { font-size: 11px; opacity: 0.75; }
-.palette { width: min(640px, calc(100vw - 32px)); max-height: 70vh; display: flex; flex-direction: column; gap: 10px; }
+.palette { --modal-w: 640px; max-height: 70vh; display: flex; flex-direction: column; gap: 10px; }
 .palette-input-row { display: flex; gap: 10px; align-items: center; }
 .palette-input { flex: 1; margin: 0; }
 .palette-results { list-style: none; margin: 0; padding: 0; min-height: 0; display: flex; flex-direction: column; gap: 4px; }

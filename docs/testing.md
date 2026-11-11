@@ -254,3 +254,10 @@ Not covered: the subjective look of the wobble, and a real GPU under other load.
 Manual:
 - [ ] Inbox with one card per stage: puffy Cloud, dashed hand-drawn Sketch, thin Draft, thick crisp Pitch, dashed Ghost.
 - [ ] A 500-card project: pan and zoom stay smooth; at zoom < 50% or with many clouds visible, the clouds stop wobbling.
+
+### 5. Delete project dialog and other modals
+Driven (52/52 pass, at 1440x900 and at an emulated 1100x600): five dialogs were checked: delete project (opened with a real click on the Perf row's trash icon, then cancelled with Esc; Perf still exists), web clip, trash, new theme and Ctrl+K search. Each one renders in a layer that is a direct child of `<body>`, not inside a panel. Each is between 420px and 90vw wide (delete 460, web clip 460, trash 480, theme 960, search 640), horizontally centred to the pixel, and inside the window; all except search are vertically centred, and search is top-aligned by design. Before the blur fix, a screenshot showed cards crisp behind the dialog and the sidebar, which is how the production CSS bug was found. After the fix, the built CSS contains the unprefixed `backdrop-filter` again.
+
+Manual:
+- [ ] Sidebar › trash icon on a project: a 460px dialog in the middle of the window (not a small box in the sidebar) shows the full folder path. The path only appears after item 8; before that, opening this dialog froze the Rust core.
+- [ ] A packaged build (`npm run tauri build`): panels, pills and dialogs are frosted (blurred), not just translucent.
