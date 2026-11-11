@@ -268,3 +268,9 @@ Driven (51/51 pass): at 1100x600, 1280x800, 1440x900 and 1700x1000 (emulated vie
 Manual:
 - [ ] Hover each icon-only tool at 1100px: the tooltip names it.
 - [ ] The zoom buttons are comfortable to hit with a mouse at 32px.
+
+### 7. No screen dimming
+Driven (9/9 pass): for the card editor, the web clip dialog and the card menu: the scrim's background is `rgba(0, 0, 0, 0)` and no full-window element inside the layer has a tinted background, the popup has the 48px soft shadow, and a click on bare canvas outside still closes it. Item 1's checks were re-run after this change (all pass at 1440x900, and again at 1100x600 where the editor scrolls: drag-scroll moved it, max 106px).
+
+Manual:
+- [ ] Open a card, the trash, Ctrl+K and the card menu in each theme: no darkening, and the popup is still clearly separated from the canvas.

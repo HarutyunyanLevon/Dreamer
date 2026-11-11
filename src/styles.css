@@ -389,7 +389,10 @@ button:disabled { cursor: default; }
 /* Popup layer (src/ui/Layer.tsx): portal into <body>, a scrim that swallows input outside the popup,
    then the popup itself. Every dialog, menu and popover sits in one of these. */
 .layer { position: fixed; inset: 0; z-index: 40; }
-.layer-scrim { position: absolute; inset: 0; background: rgba(40, 20, 40, 0.28); }
+/* The scrim is invisible (no dimming): it only catches presses outside the popup. */
+.layer-scrim { position: absolute; inset: 0; background: transparent; }
+/* With nothing dimmed, a popup stands off the canvas by its own soft shadow. */
+.layer .glass { box-shadow: 0 18px 48px color-mix(in srgb, var(--ink) 22%, transparent), 0 2px 8px color-mix(in srgb, var(--ink) 10%, transparent); }
 .modal-stage {
   position: absolute; inset: 0; padding: 24px; pointer-events: none;
   display: flex; align-items: center; justify-content: center;
