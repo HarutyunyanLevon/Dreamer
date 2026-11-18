@@ -1595,7 +1595,28 @@ impl Workspace {
         }
         Self::write_trash(&dir, &TrashIndex::default())?;
         Self::sweep_media(&dir)?;
+        // An artifact's files go with its card, once the card is gone for good.
+        let cards = dir.join("cards");
+        crate::artifacts::sweep(&dir, &|id| cards.join(format!("{id}.md")).is_file());
         Ok(n)
+    }
+
+    /// project.json as stored (unknown keys included).
+    pub fn project_meta(&self, slug: &str) -> Result<ProjectMeta> {
+        let dir = self.existing_project_dir(slug)?;
+        read_json_or_default_meta(&dir.join("project.json"), slug)
+    }
+
+    /// Sets (or with None removes) one of project.json's extra keys (active_theme, spritecook_project).
+    pub fn set_project_extra(&self, slug: &str, key: &str, value: Option<Value>) -> Result<()> {
+        let dir = self.existing_project_dir(slug)?;
+        let path = dir.join("project.json");
+        let mut meta = read_json_or_default_meta(&path, slug)?;
+        match value {
+            Some(v) => meta.extra.insert(key.to_string(), v),
+            None => meta.extra.remove(key),
+        };
+        write_json(&path, &meta)
     }
 }
 

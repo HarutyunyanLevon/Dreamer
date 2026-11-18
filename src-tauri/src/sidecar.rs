@@ -397,6 +397,25 @@ fn handle_sidecar_message(app: &AppHandle, msg: Value) {
         let req_id = msg.get("reqId").and_then(Value::as_str).unwrap_or_default().to_string();
         let tool = msg.get("tool").and_then(Value::as_str).unwrap_or_default();
         let input = msg.get("input").cloned().unwrap_or(Value::Null);
+        // Artifact tools write into the artifact of the turn's thread (a download may take a while,
+        // so they run off the thread that reads the sidecar's output).
+        if tool.starts_with("artifact_") {
+            let (app, tool, input) = (app.clone(), tool.to_string(), input);
+            std::thread::spawn(move || {
+                let state = app.state::<AppState>();
+                let turn = input.get("turn").and_then(Value::as_str).unwrap_or_default();
+                let result = match state.claude.pending_ctx_of(turn) {
+                    Some((slug, thread)) if thread != "project" => crate::artifacts::run_tool(&state, &slug, &thread, &tool, &input),
+                    _ => Err(AppError::Invalid("this turn is not an artifact turn".into())),
+                };
+                let reply = match result {
+                    Ok(result) => json!({ "type": "tool_response", "reqId": req_id, "result": result }),
+                    Err(e) => json!({ "type": "tool_response", "reqId": req_id, "error": e.to_string() }),
+                };
+                write_line(&state, &reply);
+            });
+            return;
+        }
         let result = if tool.starts_with("handoff_") {
             crate::handoff::run_tool(app, &state, tool, input)
         } else if matches!(tool, "remember" | "forget") {
@@ -973,6 +992,15 @@ pub fn send_message(app: &AppHandle, state: &AppState, turn: Turn) -> Result<()>
         (b, f) => b.or(f),
     };
 
+    // An artifact turn starts with the artifact block (it changes every turn, so both texts carry it).
+    let mut turn = turn;
+    if let Some(a) = turn.artifact.clone() {
+        let block = {
+            let ws = state.ws.lock().map_err(|_| AppError::Invalid("workspace lock poisoned".into()))?;
+            crate::artifacts::context_block(&ws, &turn.slug, &a, settings.credit_cap, crate::credentials::spritecook_key().is_some())?
+        };
+        turn.text = format!("{block}\n\n---\n\n{}", turn.text);
+    }
     // Which tier, then which backend (router.rs). Local chat asks Ollama whether it's usable
     // (a cached check plus one version ping); Claude-only setups never touch it.
     let key = thread_key(&turn.slug, &turn.thread);

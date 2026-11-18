@@ -988,6 +988,20 @@ const ARTIFACT_SYSTEM_PARTS = [
     "iterate one visual artifact for the user's game project: a theme (style guide), a character design, a concept " +
     "art piece or an interactive HTML mockup. You do the thinking (briefs, prompts, design notes, HTML); SpriteCook " +
     "makes the images through its tools. Tone: formal, neutral and concise. No exclamation marks, no flattery, no emoji.",
+  "Every message starts with an [Artifact] block: the artifact, its versions and files (with SpriteCook asset ids), " +
+    "the theme it inherits (palette, fonts, mood, do/don't, art mode, style reference), the SpriteCook project and the " +
+    "credit cap. The user's request comes after the --- line.",
+  "Files: you have no file system. Every result goes through Dreamer's tools: start_version once per turn before " +
+    "anything is saved, save_image for each SpriteCook result you keep (url + asset_id), write_file for notes.md and " +
+    "HTML, copy_asset for project sprites. Never overwrite an older version: feedback and regenerations always start a " +
+    "new version (mode 'new'); only add-ons (a turnaround, an expression, an animation) use mode 'add'.",
+  "SpriteCook project: if the block says there is none yet, call create_project once (named after the Dreamer " +
+    "project) and set_spritecook_project with its id. Pass that project_id to every generation, and assign assets you " +
+    "keep with assign_assets_to_project when a tool did not do it. Generation tools may return a job: wait with " +
+    "check_job_status (wait_seconds up to 60) until it is done, then save_image with the result's sprite_url and asset id.",
+  "Without SpriteCook (the block says NOT configured, or its tools are missing): do every part that needs no image " +
+    "(notes, HTML, the theme spec), then say in one sentence that images need a SpriteCook key in Settings. Do not " +
+    "pretend an image exists.",
 ];
 const artifactSystem = () => ARTIFACT_SYSTEM_PARTS.join("\n\n");
 const makeArtifactServer = () => createSdkMcpServer({ name: "dreamer", version: "1.0.0", tools: artifactTools });
@@ -1006,6 +1020,99 @@ function artifactGate(s) {
     return { behavior: "allow", updatedInput: input };
   };
 }
+
+/** An artifact tool: asks Rust, which writes into the artifact of this turn's thread. */
+const artifactCall = (name, input, timeoutMs = 20000) => requestTool(`artifact_${name}`, { ...input, turn: currentId }, timeoutMs);
+const artifactTool = (name, description, schema, run) => {
+  const t = tool(name, description, schema, async (args) => {
+    {
+      const lim = hitLimit("any");
+      if (lim) return lim;
+    }
+    try {
+      return await run(args);
+    } catch (e) {
+      return fail(e);
+    }
+  });
+  artifactTools.push(t);
+  return t;
+};
+
+artifactTool(
+  "start_version",
+  "Start the version this turn writes into. mode 'new' (default): a new version v<N+1> whose parent is the current one " +
+    "(first generation, regenerate, any feedback/edit). mode 'add': add a part to the current version (an add-on such as " +
+    "a turnaround, an expression, an animation, next to what is there). Call it once, before saving anything. brief: " +
+    "what this version is; prompts: the exact prompts you send to SpriteCook (saved in brief.md).",
+  {
+    mode: z.enum(["new", "add"]).optional(),
+    brief: z.string(),
+    prompts: z.array(z.string()).optional(),
+  },
+  async (a) => {
+    const r = await artifactCall("start_version", a);
+    return text(`Writing into v${r.version} (${r.mode}).`);
+  },
+);
+
+artifactTool(
+  "save_image",
+  "Download a SpriteCook result into the working version: url = the asset's sprite_url (or spritesheet_url for an " +
+    "animation sheet) from the generate / check_job_status / get_asset_metadata result, asset_id = its SpriteCook asset " +
+    "id (kept for later edits and references). name: a short file name such as hero.png, turnaround.png, " +
+    "expression-angry.png, anim_idle.png, concept.png, key-art.png, or assets/<name>.png for mockup assets.",
+  {
+    url: z.string(),
+    asset_id: z.string().optional(),
+    name: z.string(),
+    role: z.string().optional().describe("hero, turnaround, expression, pose, animation, concept, key-art, ui-kit, sprite"),
+  },
+  async (a) => {
+    const r = await artifactCall("save_image", a, 150000);
+    return text(`Saved ${r.file} in v${r.version}.`);
+  },
+);
+
+artifactTool(
+  "write_file",
+  "Write a text file into the working version: notes.md (the design notes, always), index.html (a mockup or a theme's " +
+    "style-guide page), or .css / .js / .svg / .json files it uses. Writing the same name again replaces it within the version.",
+  {
+    name: z.string(),
+    content: z.string(),
+    role: z.string().optional().describe("notes, html, style, script"),
+  },
+  async (a) => {
+    const r = await artifactCall("write_file", a);
+    return text(`Wrote ${r.file} in v${r.version}.`);
+  },
+);
+
+artifactTool(
+  "copy_asset",
+  "Copy an image of another artifact in this project (a project sprite listed in the artifact block) into this " +
+    "mockup's working version as assets/<name>, so the HTML can use it.",
+  {
+    from_artifact: z.string(),
+    file: z.string(),
+    name: z.string().optional().describe("new file name, default the same"),
+  },
+  async (a) => {
+    const r = await artifactCall("copy_asset", a);
+    return text(`Copied to ${r.file} in v${r.version}. Reference it as "${r.file}".`);
+  },
+);
+
+artifactTool(
+  "set_spritecook_project",
+  "Record the SpriteCook project that mirrors this Dreamer project (after create_project, once per project).",
+  { project_id: z.string() },
+  async (a) => {
+    await artifactCall("set_spritecook_project", a);
+    return text("Recorded.");
+  },
+);
 
 /** Per-turn credit cap (see the credits section below). */
 let creditCheck = async () => ({ ok: true });

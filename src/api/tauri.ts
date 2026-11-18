@@ -14,6 +14,12 @@ function mimeFor(rel: string): string {
     case "ico": return "image/x-icon";
     case "avif": return "image/avif";
     case "md": return "text/markdown";
+    case "html": return "text/html";
+    case "css": return "text/css";
+    case "js": return "text/javascript";
+    case "json": return "application/json";
+    case "mp4": return "video/mp4";
+    case "webm": return "video/webm";
     default: return "application/octet-stream";
   }
 }
@@ -78,6 +84,16 @@ export const tauriApi: Api = {
   memoryUndo: (slug, ats, card, lines) => invoke("memory_undo", { slug, ats, card: card ?? null, lines: lines ?? null }),
   memorySeed: (slug) => invoke("memory_seed", { slug }),
   onMemoryEvent: (cb) => listen<MemoryEvent>("memory-event", (e) => cb(e.payload)),
+  artifactCreate: (slug, artifact) => invoke("artifact_create", { slug, artifact }),
+  artifactGet: (slug, id) => invoke("artifact_get", { slug, id }),
+  artifactUpdate: (slug, id, patch) => invoke("artifact_update", { slug, id, patch }),
+  artifactFile: async (slug, id, version, file) => {
+    const b64 = await invoke<string>("artifact_file", { slug, id, version, file });
+    return `data:${mimeFor(file)};base64,${b64}`;
+  },
+  artifactVersionInfo: (slug, id, version) => invoke("artifact_version_info", { slug, id, version }),
+  artifactSetActiveTheme: (slug, id) => invoke("artifact_set_active_theme", { slug, id }),
+  artifactThemes: (slug) => invoke("artifact_themes", { slug }),
   spritecookKeyStatus: () => invoke("spritecook_key_status"),
   spritecookSetKey: (key) => invoke("spritecook_set_key", { key }),
   quitApp: () => invoke("quit_app"),

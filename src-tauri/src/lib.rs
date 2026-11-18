@@ -1,3 +1,4 @@
+mod artifacts;
 mod claude_setup;
 mod clip;
 mod commands;
@@ -281,6 +282,13 @@ pub fn run() {
             commands::hide_to_tray,
             commands::autostart_enabled,
             commands::set_autostart,
+            commands::artifact_create,
+            commands::artifact_get,
+            commands::artifact_update,
+            commands::artifact_file,
+            commands::artifact_version_info,
+            commands::artifact_set_active_theme,
+            commands::artifact_themes,
             commands::spritecook_key_status,
             commands::spritecook_set_key,
         ])

@@ -58,6 +58,8 @@ pub enum CardKind {
     Checklist,
     Image,
     Clip,
+    /// A visual artifact (theme, character, concept, mockup); its files live in artifacts/<id>/.
+    Artifact,
 }
 
 impl<'de> Deserialize<'de> for CardKind {
@@ -69,6 +71,7 @@ impl<'de> Deserialize<'de> for CardKind {
             "checklist" => CardKind::Checklist,
             "image" => CardKind::Image,
             "clip" => CardKind::Clip,
+            "artifact" => CardKind::Artifact,
             _ => CardKind::Card,
         })
     }

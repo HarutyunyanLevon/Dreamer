@@ -10,7 +10,7 @@ export const SWATCH_LABEL: Record<Swatch, string> = { butter: "Butter", peach: "
 export const swatchOf = (c: string | undefined, fallback: Swatch | null = "butter"): Swatch | null =>
   (SWATCHES as readonly string[]).includes(c ?? "") ? (c as Swatch) : fallback;
 
-export const KIND_LABEL: Record<CardKind, string> = { card: "Card", sticky: "Sticky", label: "Label", checklist: "Checklist", image: "Image", clip: "Clip" };
+export const KIND_LABEL: Record<CardKind, string> = { card: "Card", sticky: "Sticky", label: "Label", checklist: "Checklist", image: "Image", clip: "Clip", artifact: "Artifact" };
 /** Kinds "Convert to" moves between (title, body and attachments carry over). */
 export const CONVERTIBLE: CardKind[] = ["card", "sticky", "checklist"];
 /** Stage filter, stage visuals and the Mist shader apply only to these. */

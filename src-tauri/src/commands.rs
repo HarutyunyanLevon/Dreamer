@@ -606,3 +606,51 @@ pub fn spritecook_set_key(state: State<AppState>, key: String) -> Result<serde_j
     crate::sidecar::shutdown(&state);
     spritecook_key_status(state)
 }
+
+// ---------- artifacts (artifacts.rs) ----------
+
+#[tauri::command(async)]
+pub fn artifact_create(state: State<AppState>, slug: String, artifact: crate::artifacts::NewArtifact) -> Result<Card> {
+    let card = with_ws(&state, |ws| crate::artifacts::create(ws, &slug, artifact))?;
+    if let Ok(mut idx) = state.search.lock() {
+        idx.mark_dirty(Some(&slug));
+    }
+    Ok(card)
+}
+
+#[tauri::command(async)]
+pub fn artifact_get(state: State<AppState>, slug: String, id: String) -> Result<Value> {
+    with_ws(&state, |ws| crate::artifacts::view(ws, &slug, &id))
+}
+
+#[tauri::command(async)]
+pub fn artifact_update(state: State<AppState>, slug: String, id: String, patch: crate::artifacts::ArtifactPatch) -> Result<Value> {
+    with_ws(&state, |ws| {
+        crate::artifacts::update(ws, &slug, &id, patch)?;
+        crate::artifacts::view(ws, &slug, &id)
+    })
+}
+
+/// One file of a version, base64 (previews and the full-size view).
+#[tauri::command(async)]
+pub fn artifact_file(state: State<AppState>, slug: String, id: String, version: u32, file: String) -> Result<String> {
+    use base64::Engine;
+    with_ws(&state, |ws| crate::artifacts::read_file(ws, &slug, &id, version, &file)).map(|b| base64::engine::general_purpose::STANDARD.encode(b))
+}
+
+/// brief.md, meta.json and notes.md of a version.
+#[tauri::command(async)]
+pub fn artifact_version_info(state: State<AppState>, slug: String, id: String, version: u32) -> Result<Value> {
+    with_ws(&state, |ws| crate::artifacts::version_info(ws, &slug, &id, version))
+}
+
+/// `id: null` clears the active theme.
+#[tauri::command(async)]
+pub fn artifact_set_active_theme(state: State<AppState>, slug: String, id: Option<String>) -> Result<()> {
+    with_ws(&state, |ws| crate::artifacts::set_active_theme(ws, &slug, id.as_deref()))
+}
+
+#[tauri::command(async)]
+pub fn artifact_themes(state: State<AppState>, slug: String) -> Result<Vec<Value>> {
+    with_ws(&state, |ws| Ok(crate::artifacts::themes(ws, &slug)))
+}

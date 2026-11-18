@@ -35,6 +35,10 @@ pub fn classify(root: &Path, path: &Path) -> Option<ChangeEvent> {
     if parts.get(chats_at).is_some_and(|p| p == "chats" || p == "design") && parts.len() > chats_at + 1 {
         return None;
     }
+    // artifacts/<id>/...: the artifact views reload that artifact; the canvas doesn't need to.
+    if parts.get(chats_at).is_some_and(|p| p == "artifacts") && parts.len() > chats_at + 1 {
+        return Some(ChangeEvent { scope: "artifact".into(), project: Some(if first == "inbox" { "inbox".into() } else { parts.get(1)?.clone() }) });
+    }
     // memory.md and its log: only the Memory modal cares, not the canvas.
     if parts.len() == chats_at + 1 && parts.last().is_some_and(|f| f == "memory.md" || f == "memory.log.jsonl") {
         return Some(ChangeEvent { scope: "memory".into(), project: Some(if first == "inbox" { "inbox".into() } else { parts.get(1)?.clone() }) });
@@ -104,6 +108,8 @@ mod tests {
         assert_eq!(ev("/w/inbox/chats/01A.json"), None);
         assert_eq!(ev("/w/projects/fish/memory.md"), Some(ChangeEvent { scope: "memory".into(), project: Some("fish".into()) }));
         assert_eq!(ev("/w/projects/fish/memory.log.jsonl").unwrap().scope, "memory");
+        assert_eq!(ev("/w/projects/fish/artifacts/01ABC/v1/hero.png"), Some(ChangeEvent { scope: "artifact".into(), project: Some("fish".into()) }));
+        assert_eq!(ev("/w/inbox/artifacts/01ABC/artifact.json").unwrap().scope, "artifact");
         assert_eq!(ev("/w/projects/fish/chats/project.json"), None);
         assert_eq!(ev("/w/projects/fish/design/v1/01-gdd.md"), None);
         // A project whose slug is "chats" is still a real change.

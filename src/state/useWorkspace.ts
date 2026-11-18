@@ -504,7 +504,7 @@ export function useWorkspace() {
       .onChange((events) => {
         // Echo of our own canvas.json write: nothing to reload.
         // memory.md and its log have their own listeners (the Memory modal); the canvas ignores them.
-        if (events.every((e) => e.scope === "memory")) return;
+        if (events.every((e) => e.scope === "memory" || e.scope === "artifact")) return;
         if (performance.now() < selfWriteUntil.current && events.every((e) => e.scope === "project" && e.project === activeRef.current)) return;
         clearTimeout(timer);
         timer = setTimeout(() => void refresh(), 120);

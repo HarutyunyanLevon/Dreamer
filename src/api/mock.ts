@@ -1,4 +1,4 @@
-import { DESIGN_DOCS, GAP_CHECKLIST, type Api, type Attachment, type Canvas, type Card, type CardRole, type ChangeEvent, type ChatThreadFile, type ChecklistItem, type DesignVersion, type Folder, type HandoffEvent, type HandoffEventBody, type MemoryEvent, type MemoryLogEntry, type MemoryView, type NewCard, type ProjectData, type ProjectSummary, type SearchHit, type Settings, type TrashItem } from "./types";
+import { DESIGN_DOCS, GAP_CHECKLIST, type Api, type ArtifactView, type Attachment, type Canvas, type Card, type CardRole, type ChangeEvent, type ChatThreadFile, type ChecklistItem, type DesignVersion, type Folder, type HandoffEvent, type HandoffEventBody, type MemoryEvent, type MemoryLogEntry, type MemoryView, type NewCard, type ProjectData, type ProjectSummary, type SearchHit, type Settings, type TrashItem } from "./types";
 
 /** Same rules as the Rust core: media paths stay under media/, clips need a url. */
 function checkAttachment(a: Attachment) {
@@ -139,6 +139,23 @@ const mockRender = (s: [string, string[]][]) => s.map(([n, items]) => `## ${n}\n
 export function createMockApi(): Api {
   const settings: Settings = { version: 1, theme: "pearl-glow", hotkey: "Ctrl+Shift+Space", last_project: null, show_projects: true, show_chat: true, tray_notice_shown: false, start_with_windows: true, start_hidden: true, model_chat: "sonnet", model_router: true, model_fast: "haiku", model_deep: "opus", model_export: "opus", model_memory: "haiku", compact_tokens: 50000, memory_cap: 600, local_chat: true, local_model: "qwen3.5:35b-a3b", spritecook_url: "https://api.spritecook.ai/mcp/", credit_cap: 4 };
   let mockKey = "";
+  /** Artifacts by "<slug>/<id>" (browser dev only: no versions are ever generated here). */
+  const artifacts = new Map<string, ArtifactView>();
+  const activeThemes = new Map<string, string>();
+  const artView = (slug: string, id: string): ArtifactView => {
+    const a = artifacts.get(`${slug}/${id}`);
+    if (!a) throw new Error(`not found: artifact ${id}`);
+    const tid = a.themeId || activeThemes.get(slug);
+    const t = tid && tid !== id ? artifacts.get(`${slug}/${tid}`) : undefined;
+    const spec = t?.versions.find((v) => v.n === (t.approvedVersion ?? t.currentVersion))?.theme;
+    return structuredClone({
+      ...a,
+      inherited: t ? { id: t.id, title: t.title, version: t.currentVersion, spec: spec ?? { palette: [], fonts: { heading: "", body: "" }, mood: [], dos: [], donts: [] } } : null,
+      effectiveArtMode: a.artMode ?? spec?.artMode ?? null,
+      isActiveTheme: activeThemes.get(slug) === id,
+      activeTheme: activeThemes.get(slug) ?? null,
+    });
+  };
   const projects = new Map<string, MockProject>();
   const customThemes = new Map<string, unknown>();
   const chats = new Map<string, ChatThreadFile>();
@@ -611,6 +628,36 @@ export function createMockApi(): Api {
     memorySeed: async (slug) => {
       setTimeout(() => memoryListeners.forEach((l) => l({ type: "seed", slug, text: mockRender(mockParse("## Pitch\n- A calm cooperative sea-farming game\n## Decisions\n- Solo and co-op only, no PvP")) })), 600);
     },
+    artifactCreate: async (slug, a) => {
+      const p = need(slug);
+      const n = p.cards.size;
+      const title = a.title?.trim() || { theme: "Theme", character: "Character", concept: "Concept art", mockup: "Mockup" }[a.type];
+      const card = add(p, { title, body: a.brief, kind: "artifact", fields: { artifactType: a.type }, ghost: !!a.ghost, source: a.ghost ? "claude" : "user", links: a.sourceCard ? [{ to: a.sourceCard, label: "visualizes" }] : [] }, a.x ?? (n % 4) * 264, a.y ?? Math.floor(n / 4) * 196);
+      artifacts.set(`${slug}/${card.id}`, { id: card.id, type: a.type, title, themeId: a.themeId, currentVersion: 0, versions: [], suggestions: [], sourceCard: a.sourceCard, brief: a.brief, inherited: null, effectiveArtMode: null, isActiveTheme: false, activeTheme: null });
+      emit(slug);
+      return card;
+    },
+    artifactGet: async (slug, id) => artView(slug, id),
+    artifactUpdate: async (slug, id, patch) => {
+      const a = artifacts.get(`${slug}/${id}`);
+      if (!a) throw new Error(`not found: artifact ${id}`);
+      if (patch.themeId !== undefined) a.themeId = patch.themeId || undefined;
+      if (patch.artMode !== undefined) a.artMode = patch.artMode ?? undefined;
+      if (patch.currentVersion !== undefined) a.currentVersion = patch.currentVersion;
+      if (patch.approvedVersion !== undefined) a.approvedVersion = patch.approvedVersion || undefined;
+      listeners.forEach((l) => l([{ scope: "artifact", project: slug }]));
+      return artView(slug, id);
+    },
+    artifactFile: async (_slug, _id, version, file) =>
+      `data:image/svg+xml;utf8,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="320" height="240"><rect width="100%" height="100%" fill="#f5c3d8"/><text x="50%" y="50%" text-anchor="middle" font-family="sans-serif" fill="#472a4b">v${version} · ${file}</text></svg>`)}`,
+    artifactVersionInfo: async () => ({ brief: "", notes: "", meta: null }),
+    artifactSetActiveTheme: async (slug, id) => {
+      if (id) activeThemes.set(slug, id);
+      else activeThemes.delete(slug);
+      listeners.forEach((l) => l([{ scope: "artifact", project: slug }]));
+    },
+    artifactThemes: async (slug) =>
+      [...artifacts.values()].filter((a) => a.type === "theme" && artifacts.get(`${slug}/${a.id}`) === a).map((a) => ({ id: a.id, title: a.title, active: activeThemes.get(slug) === a.id, versions: a.versions.length, spec: null })),
     spritecookKeyStatus: async () => ({ hasKey: !!mockKey, masked: mockKey ? `••••${mockKey.slice(-4)}` : null, url: settings.spritecook_url }),
     spritecookSetKey: async (key) => {
       mockKey = key.trim();

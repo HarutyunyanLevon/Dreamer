@@ -6,7 +6,92 @@ export interface Link {
   label?: string;
 }
 
-export type CardKind = "card" | "sticky" | "label" | "checklist" | "image" | "clip";
+export type CardKind = "card" | "sticky" | "label" | "checklist" | "image" | "clip" | "artifact";
+
+export type ArtifactType = "theme" | "character" | "concept" | "mockup";
+/** "pixel" (with a pixel size) or "hd". */
+export interface ArtMode {
+  mode: "pixel" | "hd";
+  pixelSize?: number;
+}
+export interface ThemeSpec {
+  palette: { name: string; hex: string }[];
+  fonts: { heading: string; body: string };
+  mood: string[];
+  dos: string[];
+  donts: string[];
+  artMode?: ArtMode;
+  /** The key art file in the theme's version. */
+  keyArt?: string;
+  keyArtAssetId?: string;
+  presetId?: string;
+}
+export interface ArtifactFile {
+  file: string;
+  assetId?: string;
+  role?: string;
+}
+export interface ArtifactVersion {
+  n: number;
+  parent?: number;
+  created: string;
+  files: ArtifactFile[];
+  theme?: ThemeSpec;
+  credits: number;
+}
+export interface ArtifactSuggestion {
+  label: string;
+  prompt: string;
+  estCredits?: number;
+}
+/** artifact.json plus what it inherits (artifact_get). */
+export interface ArtifactView {
+  id: string;
+  type: ArtifactType;
+  title: string;
+  themeId?: string;
+  artMode?: ArtMode;
+  currentVersion: number;
+  approvedVersion?: number;
+  versions: ArtifactVersion[];
+  suggestions: ArtifactSuggestion[];
+  sourceCard?: string;
+  brief: string;
+  inherited: { id: string; title: string; version: number; spec: ThemeSpec } | null;
+  effectiveArtMode: ArtMode | null;
+  isActiveTheme: boolean;
+  activeTheme: string | null;
+}
+export interface NewArtifact {
+  type: ArtifactType;
+  title?: string;
+  brief: string;
+  sourceCard?: string;
+  themeId?: string;
+  ghost?: boolean;
+  x?: number;
+  y?: number;
+  folder?: string | null;
+}
+/** `themeId: ""` / `artMode: null` clear the override; `approvedVersion: 0` clears the approval. */
+export interface ArtifactPatch {
+  themeId?: string;
+  artMode?: ArtMode | null;
+  currentVersion?: number;
+  approvedVersion?: number;
+}
+export interface ArtifactThemeRef {
+  id: string;
+  title: string;
+  active: boolean;
+  versions: number;
+  spec: ThemeSpec | null;
+}
+export interface ArtifactVersionInfo {
+  brief: string;
+  notes: string;
+  meta: { parent?: number | null; model?: string | null; credits?: number; jobs?: string[]; created?: string } | null;
+}
 /** "tech" = the project's Tech & constraints card; "decisions" = the Project decisions card the
  *  handoff gap interview writes into. At most one live card per role per project. */
 export type CardRole = "tech" | "decisions" | "cc-questions";
@@ -370,7 +455,7 @@ export interface WorkspaceInfo {
 }
 
 export interface ChangeEvent {
-  scope: "project" | "settings" | "themes" | "memory";
+  scope: "project" | "settings" | "themes" | "memory" | "artifact" | "questions";
   project: string | null;
 }
 
@@ -569,6 +654,15 @@ export interface Api {
   /** Starts the one-time seed query (needs >= 3 kept cards and no memory.md); the draft arrives via onMemoryEvent. */
   memorySeed(slug: string): Promise<void>;
   onMemoryEvent(cb: (e: MemoryEvent) => void): Promise<() => void>;
+  artifactCreate(slug: string, artifact: NewArtifact): Promise<Card>;
+  artifactGet(slug: string, id: string): Promise<ArtifactView>;
+  artifactUpdate(slug: string, id: string, patch: ArtifactPatch): Promise<ArtifactView>;
+  /** One file of a version as a data: URL. */
+  artifactFile(slug: string, id: string, version: number, file: string): Promise<string>;
+  artifactVersionInfo(slug: string, id: string, version: number): Promise<ArtifactVersionInfo>;
+  /** null clears the active theme. */
+  artifactSetActiveTheme(slug: string, id: string | null): Promise<void>;
+  artifactThemes(slug: string): Promise<ArtifactThemeRef[]>;
   spritecookKeyStatus(): Promise<SpritecookKeyStatus>;
   /** Stores the SpriteCook API key in the OS credential store; "" removes it. */
   spritecookSetKey(key: string): Promise<SpritecookKeyStatus>;

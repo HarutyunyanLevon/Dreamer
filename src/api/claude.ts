@@ -1,7 +1,4 @@
-import type { OrganizePlanData } from "./types";
-
-/** The four artifact kinds (fields.artifactType of a kind "artifact" card). */
-export type ArtifactType = "theme" | "character" | "concept" | "mockup";
+import type { ArtifactType, OrganizePlanData } from "./types";
 
 export type SetupJob = "install" | "login";
 
