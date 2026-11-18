@@ -2,7 +2,12 @@ node_modules/
 dist/
 src-tauri/target/
 src-tauri/gen/
+src-tauri/sidecar-dist/
 *.log
 .DS_Store
 Thumbs.db
 .env
+tsconfig.tsbuildinfo
+tsconfig.node.tsbuildinfo
+vite.config.js
+vite.config.d.ts
