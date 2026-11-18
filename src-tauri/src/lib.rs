@@ -262,6 +262,7 @@ pub fn run() {
             commands::load_chat,
             commands::save_chat,
             commands::reset_chat,
+            commands::list_chats,
             commands::list_custom_themes,
             commands::save_custom_theme,
             commands::delete_custom_theme,

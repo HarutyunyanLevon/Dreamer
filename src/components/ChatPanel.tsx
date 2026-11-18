@@ -2,9 +2,8 @@ import { Fragment, useCallback, useEffect, useLayoutEffect, useRef, useState } f
 import { api, TECH_GAP_ITEM, type Card, type NewCard } from "../api";
 import { useClaudeChat, type ChatMessage } from "../state/useClaudeChat";
 import type { Workspace } from "../state/useWorkspace";
-import { STAGE_LABEL } from "../theme/types";
 import { ClaudeSetup, needsSetup } from "./ClaudeSetup";
-import { IconClip as IconGlobe, IconPin, IconSend } from "./Icons";
+import { IconBulb, IconClip as IconGlobe, IconPlus, IconSend } from "./Icons";
 import type { usePanels } from "../state/usePanels";
 import { ScrollArea } from "../ui/Scroll";
 import { Modal } from "../ui/Modal";
@@ -12,7 +11,11 @@ import { DECISIONS_TITLE, TECH_TEMPLATE, TECH_TITLE } from "./kinds";
 import { ActivitySummary, LiveActivity, Tokens, fmtTokens, modelLabel } from "./Activity";
 import type { LocalStatus, ModelTier } from "../api/claude";
 import { claudeApi } from "../api/claudeIndex";
-import { LocalSetup, localChipLabel } from "./LocalSetup";
+import { LocalSetup } from "./LocalSetup";
+import { ThreadMenu } from "./chat/ThreadMenu";
+import { PanelMenu } from "./chat/PanelMenu";
+import { ModelChip } from "./chat/ModelChip";
+import { ActionMenu, filterActions, type ChatAction } from "./chat/ActionMenu";
 import { OrganizePlanCard, reviseText } from "./OrganizePlan";
 import type { OrganizeReq } from "../state/useClaudeChat";
 import { folderName } from "../state/useWorkspace";
@@ -27,11 +30,6 @@ function parseOrganize(text: string): OrganizeReq | null {
   return { scope: whole ? "project" : "folder", instruction: rest };
 }
 
-const CHIPS = ["/grill-me", "/related", "Summarize", "Give me 3 takes"];
-/** Chips that open something instead of sending a message. */
-const SUMMARIZE = "Summarize";
-/** Chips that only make sense about a specific card. */
-const NEEDS_CARD = new Set(["/related"]);
 /** Fixed chip / menu commands: the memory pass skips these turns (an answer to a grill-me question is not one). */
 const NO_MEMORY = /^(\/expand|\/critique|\/describe|\/merge|\/related|\/grill-me|Give me 3 takes|Merge \d+ cards)/;
 
@@ -116,15 +114,27 @@ export function ChatPanel({ ws, panels }: { ws: Workspace; panels: Pick<ReturnTy
   const panelRef = useRef<HTMLElement | null>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
 
-  // Auto-grow the message box with its text, up to half the panel's height, then scroll inside.
+  // Auto-grow the message box with its text, 1 to 8 lines, then scroll inside.
   // Runs on every text change, so clearing after send also shrinks it back.
   useLayoutEffect(() => {
     const el = inputRef.current;
     if (!el) return;
     el.style.height = "auto";
-    const max = Math.max(48, Math.floor((panelRef.current?.clientHeight ?? 600) / 2));
+    const cs = getComputedStyle(el);
+    const line = parseFloat(cs.lineHeight) || 21;
+    const pad = parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom) + (el.offsetHeight - el.clientHeight);
     const needed = el.scrollHeight + (el.offsetHeight - el.clientHeight);
-    el.style.height = `${Math.min(needed, max)}px`;
+    el.style.height = `${Math.min(needed, Math.ceil(line * 8 + pad))}px`;
+  }, [text]);
+  /** The action menu: "+" (focus inside it) or "/" typed first (focus stays in the textarea). */
+  const [plusOpen, setPlusOpen] = useState(false);
+  const [slashDismissed, setSlashDismissed] = useState<string | null>(null);
+  const [activeAction, setActiveAction] = useState(0);
+  const [actionNotice, setActionNotice] = useState<string | null>(null);
+  const plusRef = useRef<HTMLButtonElement | null>(null);
+  useEffect(() => {
+    setActiveAction(0);
+    setActionNotice(null);
   }, [text]);
   const bodyRef = useRef<HTMLElement | null>(null);
   const handledReq = useRef(0);
@@ -246,101 +256,92 @@ export function ChatPanel({ ws, panels }: { ws: Workspace; panels: Pick<ReturnTy
     send(choice, { answering: true, question: m.question!.question });
   };
 
+  const canAct = !chat.busy && !!ws.active;
+  const group = contextCard ? "card" : "project";
+  const needCard = contextCard ? undefined : { short: "Open a card first", long: "Select a card on the canvas (or a recent one in the thread menu) to open its own thread, then run this." };
+  const summarize = () => ws.openHandoff(contextCard ? { kind: "card", id: contextCard.id } : { kind: "project" });
+  const actions: ChatAction[] = [
+    { id: "grill", label: "/grill-me", desc: "Question this card or the project until it's solid", group, command: "/grill-me", run: () => send("/grill-me") },
+    { id: "related", label: "/related", desc: "Find and link cards related to this one", group, command: "/related", disabled: needCard, run: () => send("/related") },
+    { id: "takes", label: "Give me 3 takes", desc: "Three different directions for this card", group, run: () => send("Give me 3 takes") },
+    ...(contextCard
+      ? ([
+          { id: "expand", label: "/expand", desc: "Develop this card further", group: "card", command: "/expand", run: () => send("/expand") },
+          { id: "critique", label: "/critique", desc: "Find weak spots in this card", group: "card", command: "/critique", run: () => send("/critique") },
+          { id: "describe", label: "/describe", desc: "Describe the images on this card", group: "card", command: "/describe", run: () => send("/describe") },
+        ] satisfies ChatAction[])
+      : []),
+    { id: "summarize", label: "Summarize", desc: "Turn the project into design docs for Claude Code", group: "project", run: summarize },
+    ...(ws.folder
+      ? ([{ id: "org-folder", label: "Organize this folder", desc: "Claude proposes a tidy-up plan you review", group: "project", command: "/organize", run: () => runOrganize({ scope: "folder", instruction: "" }) }] satisfies ChatAction[])
+      : []),
+    { id: "org-project", label: "Organize the project", desc: "Claude proposes a tidy-up plan you review", group: "project", command: "/organize project", run: () => runOrganize({ scope: "project", instruction: "" }) },
+  ];
+  const byId = (id: string) => actions.find((a) => a.id === id)!;
+  const suggestions = (contextCard ? ["grill", "related", "takes"] : ws.folder ? ["org-folder", "summarize", "grill"] : ["summarize", "org-project", "grill"]).map(byId);
+
+  // "/" typed first opens the menu filtered by what follows (until Esc, or no item matches).
+  const slashQuery = text.startsWith("/") && !text.includes("\n") && text !== slashDismissed ? text.slice(1) : null;
+  const slashItems = slashQuery !== null && canAct ? filterActions(actions, slashQuery) : [];
+  const slashOpen = !plusOpen && slashItems.length > 0;
+  const menuItems = plusOpen ? actions : slashItems;
+
+  const pickAction = (a: ChatAction) => {
+    if (a.disabled) {
+      setActionNotice(a.disabled.long);
+      return;
+    }
+    if (!canAct) return;
+    setPlusOpen(false);
+    setActionNotice(null);
+    if (slashOpen) setText("");
+    a.run();
+    inputRef.current?.focus();
+  };
+  const closeActions = () => {
+    setPlusOpen(false);
+    setActionNotice(null);
+    if (slashOpen) setSlashDismissed(text);
+  };
+
+  const ctxTip = chat.context && chat.context.tokens > 0 ? contextTip(chat.context.tokens, chat.context.window, compactTokens) : null;
+  const autoHelp = localOn
+    ? `Auto: the local model (${localModel}) for chat; Claude for Think, web and Retry with Claude.`
+    : tierModels.router
+      ? "Auto: a small model for simple actions, the chat model otherwise."
+      : "Auto (router off): the chat model.";
+
   return (
     <aside id="chat-panel" className="glass chat" aria-label="Claude chat" data-wheel-boundary="" ref={panelRef}>
       <div className="panel-resize" role="separator" aria-orientation="vertical" aria-label="Resize chat panel" title="Drag to resize, double-click to reset" {...panels.resize.right} />
       <header className="chat-head">
-        <div className="orb" aria-hidden="true" />
-        <div>
-          <div className="chat-title">Claude</div>
-          <div className="chat-sub">{contextCard ? `About "${contextCard.title}" · ${STAGE_LABEL[contextCard.stage]}` : "Project chat"}</div>
-          <div className="thread-row">
-            <span className={"thread-pill" + (pinned ? " pinned" : "")} title={pinned ? "Pinned thread" : "Following the selected card"}>
-              {pinned && <IconPin />}
-              {contextCard ? (
-                <>
-                  <span className={`dot dot-${contextCard.stage}`} aria-hidden="true" />
-                  <span className="thread-name">{contextCard.title || "Untitled"}</span>
-                </>
-              ) : (
-                <span className="thread-name">Project</span>
-              )}
-            </span>
-            {contextCard && (
-              <button
-                type="button"
-                className="chip"
-                title="Switch to the project thread"
-                onClick={() => (pinned && ws.active ? panels.setPin(ws.active, "project") : ws.setContextCard(null))}
-              >
-                Project
-              </button>
-            )}
-            <button
-              type="button"
-              className={"chip pin-toggle" + (pinned ? " on" : "")}
-              aria-pressed={!!pinned}
-              title={pinned ? "Unpin: follow the selected card" : "Pin this thread while you select other cards"}
-              disabled={!ws.active}
-              onClick={() => ws.active && panels.setPin(ws.active, pinned ? null : thread)}
-            >
-              <IconPin />
-            </button>
+        <div className="orb small" aria-hidden="true" />
+        <span className="chat-title">Claude</span>
+        <ThreadMenu
+          slug={ws.active}
+          cards={ws.data?.cards ?? []}
+          card={contextCard}
+          pinned={!!pinned}
+          onProject={() => (pinned && ws.active ? panels.setPin(ws.active, "project") : ws.setContextCard(null))}
+          onCard={(id) => {
+            if (pinned && ws.active) panels.setPin(ws.active, id);
+            ws.setContextCard(id);
+          }}
+          onTogglePin={() => ws.active && panels.setPin(ws.active, pinned ? null : thread)}
+        />
+        <PanelMenu
+          onMemory={ws.active && ws.active !== "inbox" ? () => ws.setMemoryOpen(true) : null}
+          onModels={() => setShowModels(true)}
+          onReset={() => setConfirmReset(true)}
+          resetDisabled={chat.busy || chat.messages.length === 0}
+          resetTitle={contextCard ? `Clear the chat about "${contextCard.title}"` : "Clear the project chat"}
+          info={chat.context && chat.context.tokens > 0 ? <ContextMeter tokens={chat.context.tokens} window={chat.context.window} compactTokens={compactTokens} /> : undefined}
+        />
+        {ctxTip && chat.context && (
+          <div className={"ctx-line" + (ctxTip.warn ? " warn" : "")} title={ctxTip.tip} aria-hidden="true">
+            <span style={{ width: `${ctxTip.pct}%` }} />
           </div>
-          {chat.context && chat.context.tokens > 0 && <ContextMeter tokens={chat.context.tokens} window={chat.context.window} compactTokens={compactTokens} />}
-        </div>
-        <div className="chat-head-actions">
-          <button
-            type="button"
-            className="chip"
-            disabled={chat.busy || !ws.active}
-            title={ws.folder ? "Let Claude propose how to organize this folder (you review it first). /organize project for everything" : "Let Claude propose how to organize the project (you review it first)"}
-            onClick={() => runOrganize({ scope: ws.folder ? "folder" : "project", instruction: "" })}
-          >
-            Organize
-          </button>
-          {ws.active && ws.active !== "inbox" && (
-            <button type="button" className="chip" title="What Dreamer remembers about this project" onClick={() => ws.setMemoryOpen(true)}>
-              Memory
-            </button>
-          )}
-          <button
-            type="button"
-            className={"chip model-chip" + (modelPin ? " on" : "")}
-            title={
-              modelPin
-                ? `Pinned to ${tierName(modelPin)}. Click to change.`
-                : localOn
-                  ? `Auto: the local model (${localModel}) for chat; Claude for Think, web and Retry with Claude. Click to pin a model.`
-                  : tierModels.router
-                    ? "Auto: a small model for simple actions, the chat model otherwise. Click to pin a model."
-                    : "Auto (router off): the chat model. Click to pin a model."
-            }
-            onClick={() => setModelPin((p) => (p === null ? "fast" : p === "fast" ? "main" : p === "main" ? "deep" : null))}
-          >
-            {modelPin ? tierName(modelPin) : "Auto"}
-          </button>
-          <button
-            type="button"
-            className={"chip local-chip" + (localOn && localStatus && !localStatus.ready ? " warn" : "")}
-            title={!localOn ? "Local chat is off (Settings): every turn uses Claude" : localStatus?.ready ? `Chat runs on ${localStatus.model} through Ollama` : localStatus?.error ?? "Checking Ollama…"}
-            onClick={() => setShowLocal(true)}
-          >
-            {localChipLabel(localStatus, localOn)}
-          </button>
-          <button type="button" className="chip" title="Which Claude models Dreamer uses" onClick={() => setShowModels(true)}>
-            Models
-          </button>
-          <button
-            type="button"
-            className="chip"
-            disabled={chat.busy || chat.messages.length === 0}
-            title={contextCard ? `Clear the chat about "${contextCard.title}"` : "Clear the project chat"}
-            onClick={() => setConfirmReset(true)}
-          >
-            Reset chat
-          </button>
-        </div>
+        )}
       </header>
       {showLocal && <LocalSetup onClose={() => setShowLocal(false)} onStatus={setLocalStatus} />}
       {showModels && (
@@ -379,11 +380,18 @@ export function ChatPanel({ ws, panels }: { ws: Workspace; panels: Pick<ReturnTy
 
       <ScrollArea boundary className="chat-body" ref={bodyRef}>
         {chat.messages.length === 0 && (
-          <div className="msg claude">
-            {contextCard
-              ? `This is the chat for "${contextCard.title}". Ask a question, or use /grill-me, /related or Give me 3 takes.`
-              : "This is the project chat. Select a card to open its own thread."}
-          </div>
+          <>
+            <div className="msg claude">
+              {contextCard ? `Chat about "${contextCard.title || "Untitled"}". Type / for actions.` : "Project chat. Select a card for its own thread, or type / for actions."}
+            </div>
+            <div className="suggestions">
+              {suggestions.map((a) => (
+                <button key={a.id} type="button" className="suggest" disabled={!canAct} title={a.desc} onClick={() => pickAction(a)}>
+                  {a.label}
+                </button>
+              ))}
+            </div>
+          </>
         )}
         {chat.messages.map((m) => (
           <Fragment key={m.id}>
@@ -429,60 +437,63 @@ export function ChatPanel({ ws, panels }: { ws: Workspace; panels: Pick<ReturnTy
         ))}
       </ScrollArea>
 
-      <div className="chips">
-        {CHIPS.map((c) => (
-          <button
-            key={c}
-            type="button"
-            className="chip"
-            disabled={chat.busy || !ws.active || (NEEDS_CARD.has(c) && !contextCard)}
-            title={NEEDS_CARD.has(c) && !contextCard ? "Open a card first" : c === SUMMARIZE ? "Turn the project into design docs for Claude Code (handoff pack)" : undefined}
-            onClick={() => (c === SUMMARIZE ? ws.openHandoff(contextCard ? { kind: "card", id: contextCard.id } : { kind: "project" }) : send(c))}
-          >
-            {c}
-          </button>
-        ))}
-      </div>
-
       <form
-        className="chat-input"
+        className="composer"
         onSubmit={(e) => {
           e.preventDefault();
           send(text);
         }}
       >
-        <button
-          type="button"
-          className={"web-toggle" + (web ? " on" : "")}
-          aria-pressed={web}
-          aria-label="Web access for this message"
-          title={web ? `Web on for this message: Claude may search and fetch pages${localOn ? " (this message goes to Claude, not the local model)" : ""}` : "Let Claude search the web for this message"}
-          disabled={chat.busy || !ws.active}
-          onClick={() => setWeb((w) => !w)}
-        >
-          <IconGlobe />
-        </button>
-        <button
-          type="button"
-          className={"web-toggle think-toggle" + (think ? " on" : "")}
-          aria-pressed={think}
-          aria-label="Think harder for this message"
-          title={think ? `Think on for this message: ${modelLabel(tierModels.deep)} with extended thinking` : `Think harder for this message (${modelLabel(tierModels.deep)}, thinking on)`}
-          disabled={chat.busy || !ws.active}
-          onClick={() => setThink((v) => !v)}
-        >
-          Think
-        </button>
+        {(plusOpen || slashOpen) && (
+          <ActionMenu
+            actions={menuItems}
+            anchor={plusOpen ? plusRef : inputRef}
+            fromSlash={!plusOpen}
+            active={activeAction}
+            setActive={setActiveAction}
+            notice={actionNotice}
+            onPick={pickAction}
+            onClose={closeActions}
+          />
+        )}
         <textarea
           ref={inputRef}
           className="scroll scroll-y"
           rows={1}
           aria-label="Message Claude"
+          aria-activedescendant={slashOpen && slashItems[activeAction] ? `chat-action-${slashItems[activeAction].id}` : undefined}
           value={text}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={(e) => {
+            if (e.nativeEvent.isComposing) return;
+            if (slashOpen) {
+              const n = slashItems.length;
+              const cur = slashItems[Math.min(activeAction, n - 1)];
+              if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+                e.preventDefault();
+                setActiveAction((i) => (i + (e.key === "ArrowDown" ? 1 : -1) + n) % n);
+                return;
+              }
+              if (e.key === "Escape") {
+                e.preventDefault();
+                e.stopPropagation();
+                closeActions();
+                return;
+              }
+              if (e.key === "Tab" && !e.shiftKey) {
+                e.preventDefault();
+                if (cur.command && !cur.disabled) setText(`${cur.command} `);
+                else pickAction(cur);
+                return;
+              }
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                pickAction(cur);
+                return;
+              }
+            }
             // Enter sends; Shift+Enter is a newline; never send mid-IME-composition.
-            if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+            if (e.key === "Enter" && !e.shiftKey) {
               e.preventDefault();
               send(text);
             }
@@ -490,15 +501,69 @@ export function ChatPanel({ ws, panels }: { ws: Workspace; panels: Pick<ReturnTy
           placeholder={contextCard ? "Message Claude about this card…" : "Message Claude about this project…"}
           disabled={chat.busy || !ws.active}
         />
-        {chat.busy ? (
-          <button type="button" className="send" aria-label="Stop" onClick={() => chat.interrupt()}>
-            ■
+        <div className="composer-row">
+          <button
+            ref={plusRef}
+            type="button"
+            className="comp-btn"
+            aria-label="Actions"
+            aria-haspopup="menu"
+            aria-expanded={plusOpen}
+            title="Actions (or type /)"
+            disabled={!canAct}
+            onClick={() => {
+              setActionNotice(null);
+              setPlusOpen((o) => !o);
+            }}
+          >
+            <IconPlus />
           </button>
-        ) : (
-          <button type="submit" className="send" aria-label="Send" disabled={!text.trim() || !ws.active}>
-            <IconSend />
+          <button
+            type="button"
+            className={"comp-btn comp-tog" + (web ? " on" : "")}
+            aria-pressed={web}
+            aria-label="Web access for this message"
+            title={web ? `Web on for this message: Claude may search and fetch pages${localOn ? " (this message goes to Claude, not the local model)" : ""}` : "Let Claude search the web for this message"}
+            disabled={!canAct}
+            onClick={() => setWeb((w) => !w)}
+          >
+            <IconGlobe />
+            {web && <span className="tog-label">Web</span>}
           </button>
-        )}
+          <button
+            type="button"
+            className={"comp-btn comp-tog" + (think ? " on" : "")}
+            aria-pressed={think}
+            aria-label="Think harder for this message"
+            title={think ? `Think on for this message: ${modelLabel(tierModels.deep)} with extended thinking` : `Think harder for this message (${modelLabel(tierModels.deep)}, thinking on)`}
+            disabled={!canAct}
+            onClick={() => setThink((v) => !v)}
+          >
+            <IconBulb />
+            {think && <span className="tog-label">Think</span>}
+          </button>
+          <span className="composer-spacer" />
+          <ModelChip
+            pin={modelPin}
+            onPin={setModelPin}
+            tierName={tierName}
+            autoHelp={autoHelp}
+            localOn={localOn}
+            localStatus={localStatus}
+            localModel={localModel}
+            onLocalSetup={() => setShowLocal(true)}
+            onModels={() => setShowModels(true)}
+          />
+          {chat.busy ? (
+            <button type="button" className="send" aria-label="Stop" title="Stop" onClick={() => chat.interrupt()}>
+              ■
+            </button>
+          ) : (
+            <button type="submit" className="send" aria-label="Send" title="Send (Enter)" disabled={!text.trim() || !ws.active}>
+              <IconSend />
+            </button>
+          )}
+        </div>
       </form>
     </aside>
   );
@@ -768,8 +833,8 @@ function ModelBadge({ message: m }: { message: ChatMessage }) {
   );
 }
 
-/** "34k / 200k" with a thin bar; amber from 80% of the auto-summary threshold. */
-function ContextMeter({ tokens, window, compactTokens }: { tokens: number; window: number; compactTokens: number }) {
+/** The context meter's numbers and explanation (header line and the ⋯ menu). */
+function contextTip(tokens: number, window: number, compactTokens: number) {
   const warn = compactTokens > 0 && tokens >= compactTokens * 0.8;
   const pct = Math.min(100, (tokens / Math.max(1, window)) * 100);
   const tip =
@@ -777,6 +842,12 @@ function ContextMeter({ tokens, window, compactTokens }: { tokens: number; windo
     (compactTokens > 0
       ? ` When a turn's input passes ${compactTokens.toLocaleString()} tokens, Dreamer summarizes the earlier messages and continues in a fresh session (Settings › “Summarize a thread after”).`
       : " Automatic summarizing is off (Settings › “Summarize a thread after” is 0).");
+  return { warn, pct, tip };
+}
+
+/** "34k / 200k" with a thin bar; amber from 80% of the auto-summary threshold. */
+function ContextMeter({ tokens, window, compactTokens }: { tokens: number; window: number; compactTokens: number }) {
+  const { warn, pct, tip } = contextTip(tokens, window, compactTokens);
   return (
     <div className={"ctx-meter" + (warn ? " warn" : "")} title={tip} aria-label={tip}>
       <span className="ctx-meter-text">

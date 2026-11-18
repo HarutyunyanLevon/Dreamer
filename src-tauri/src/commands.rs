@@ -506,6 +506,12 @@ pub fn save_chat(state: State<AppState>, slug: String, thread: String, data: Val
     with_ws(&state, |ws| ws.save_chat(&slug, &thread, &data))
 }
 
+/// Card thread ids with a saved file, newest first.
+#[tauri::command(async)]
+pub fn list_chats(state: State<AppState>, slug: String) -> Result<Vec<String>> {
+    with_ws(&state, |ws| ws.list_chats(&slug))
+}
+
 /// Clears one chat thread's file and tells the sidecar to drop that thread's Claude session, so
 /// the next message starts a fresh one.
 #[tauri::command(async)]

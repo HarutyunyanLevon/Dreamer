@@ -537,6 +537,26 @@ impl Workspace {
         (crate::memory::has_bullets(t)).then(|| t.to_string())
     }
 
+    /// Card threads that have a file, most recently written first (the project thread excluded).
+    pub fn list_chats(&self, slug: &str) -> Result<Vec<String>> {
+        let dir = self.existing_project_dir(slug)?.join("chats");
+        let Ok(rd) = fs::read_dir(&dir) else { return Ok(vec![]) };
+        let mut out: Vec<(std::time::SystemTime, String)> = rd
+            .flatten()
+            .filter_map(|e| {
+                let name = e.file_name().to_string_lossy().into_owned();
+                let id = name.strip_suffix(".json")?.to_string();
+                if id == "project" || check_id(&id).is_err() {
+                    return None;
+                }
+                let t = e.metadata().and_then(|m| m.modified()).unwrap_or(std::time::UNIX_EPOCH);
+                Some((t, id))
+            })
+            .collect();
+        out.sort_by(|a, b| b.0.cmp(&a.0));
+        Ok(out.into_iter().map(|(_, id)| id).collect())
+    }
+
     /// "Reset chat": clears one thread (and only that one). A user action with confirmation.
     pub fn reset_chat(&self, slug: &str, thread: &str) -> Result<()> {
         let path = self.chat_path(slug, thread)?;

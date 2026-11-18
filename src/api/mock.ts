@@ -567,11 +567,17 @@ export function createMockApi(): Api {
     },
     loadChat: async (slug, thread) => structuredClone(chats.get(`${slug}/${thread}`) ?? { version: 1, messages: [] }),
     saveChat: async (slug, thread, data) => {
+      chats.delete(`${slug}/${thread}`);
       chats.set(`${slug}/${thread}`, structuredClone(data));
     },
     resetChat: async (slug, thread) => {
       chats.delete(`${slug}/${thread}`);
     },
+    listChats: async (slug) =>
+      [...chats.keys()]
+        .filter((k) => k.startsWith(`${slug}/`) && k !== `${slug}/project`)
+        .map((k) => k.slice(slug.length + 1))
+        .reverse(),
     listCustomThemes: async () => [...customThemes.values()],
     saveCustomTheme: async (id, theme) => {
       customThemes.set(id, theme);

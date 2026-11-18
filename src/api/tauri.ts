@@ -67,6 +67,7 @@ export const tauriApi: Api = {
   loadChat: (slug, thread) => invoke("load_chat", { slug, thread }),
   saveChat: (slug, thread, data) => invoke("save_chat", { slug, thread, data }),
   resetChat: (slug, thread) => invoke("reset_chat", { slug, thread }),
+  listChats: (slug) => invoke("list_chats", { slug }),
   listCustomThemes: () => invoke("list_custom_themes"),
   saveCustomTheme: (id, theme) => invoke("save_custom_theme", { id, theme }),
   deleteCustomTheme: (id) => invoke("delete_custom_theme", { id }),

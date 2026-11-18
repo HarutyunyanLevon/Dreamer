@@ -538,6 +538,8 @@ export interface Api {
   saveChat(slug: string, thread: string, data: ChatThreadFile): Promise<void>;
   /** Clears one thread's file and its Claude session. */
   resetChat(slug: string, thread: string): Promise<void>;
+  /** Card thread ids with a saved file, most recently written first. */
+  listChats(slug: string): Promise<string[]>;
   listCustomThemes(): Promise<unknown[]>;
   saveCustomTheme(id: string, theme: unknown): Promise<void>;
   deleteCustomTheme(id: string): Promise<void>;
