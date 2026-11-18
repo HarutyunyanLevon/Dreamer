@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- Dreamer app icon: a glowing pearl orb on a pastel tile (Pearl glow palette). -->
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#f8bcd5"/>
+      <stop offset="0.5" stop-color="#f9c9b4"/>
+      <stop offset="1" stop-color="#c7b1f0"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0.55" stop-color="#ffffff" stop-opacity="0.85"/>
+      <stop offset="0.75" stop-color="#fdebf1" stop-opacity="0.35"/>
+      <stop offset="1" stop-color="#fdebf1" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="pearl" cx="0.5" cy="0.5" r="0.5" fx="0.38" fy="0.32">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="0.28" stop-color="#fdebf1"/>
+      <stop offset="0.55" stop-color="#f5c3d8"/>
+      <stop offset="0.78" stop-color="#fbd3ae"/>
+      <stop offset="1" stop-color="#b79cec"/>
+    </radialGradient>
+    <radialGradient id="shine" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.95"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+    </radialGradient>
+    <clipPath id="clip"><rect width="1024" height="1024" rx="232"/></clipPath>
+  </defs>
+  <g clip-path="url(#clip)">
+    <rect width="1024" height="1024" fill="url(#tile)"/>
+    <circle cx="512" cy="512" r="470" fill="url(#glow)"/>
+    <ellipse cx="530" cy="830" rx="250" ry="46" fill="#7b63c9" opacity="0.22"/>
+    <circle cx="512" cy="500" r="300" fill="url(#pearl)"/>
+    <circle cx="512" cy="500" r="296" fill="none" stroke="#a8447c" stroke-opacity="0.38" stroke-width="12"/>
+    <ellipse cx="420" cy="388" rx="110" ry="78" transform="rotate(-30 420 388)" fill="url(#shine)"/>
+    <circle cx="640" cy="640" r="34" fill="#ffffff" opacity="0.55"/>
+  </g>
+</svg>
