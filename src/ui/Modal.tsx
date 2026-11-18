@@ -37,7 +37,7 @@ export function Modal({
   const panel = useRef<HTMLElement | null>(null);
   useDragScroll(panel);
   return (
-    <Layer onClose={onClose}>
+    <Layer onClose={onClose} scope={placement === "canvas" ? "canvas" : "window"}>
       <div className={`modal-stage align-${align} place-${placement}`}>
         <ScrollArea
           ref={panel}

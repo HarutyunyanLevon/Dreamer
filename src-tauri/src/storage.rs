@@ -6,6 +6,7 @@ use crate::model::*;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -83,7 +84,7 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
-fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+pub(crate) fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     let mut s = serde_json::to_string_pretty(value)
         .map_err(|e| AppError::Parse { context: path.display().to_string(), message: e.to_string() })?;
     s.push('\n');
@@ -166,6 +167,7 @@ pub fn parse_card(text: &str, fallback_id: &str) -> Result<Card> {
     };
     // The file name is the authority for the id (copying a file must not create duplicate ids).
     meta.id = fallback_id.to_string();
+    meta.migrate_legacy_fields();
     if meta.title.trim().is_empty() {
         meta.title = body
             .lines()
@@ -226,7 +228,8 @@ impl Workspace {
     }
 
     fn ensure_subdirs(dir: &Path) -> Result<()> {
-        for sub in ["cards", "media", "briefs", "trash"] {
+        // (Older projects also have an unused `briefs/` folder from the removed brief export.)
+        for sub in ["cards", "media", "trash"] {
             let d = dir.join(sub);
             fs::create_dir_all(&d).map_err(|e| AppError::io(format!("create {}", d.display()), e))?;
         }
@@ -235,7 +238,7 @@ impl Workspace {
 
     fn init_project_dir(&self, dir: &Path, name: &str) -> Result<()> {
         Self::ensure_subdirs(dir)?;
-        write_json(&dir.join("project.json"), &ProjectMeta { name: name.into(), theme: None, created: now() })?;
+        write_json(&dir.join("project.json"), &ProjectMeta::named(name))?;
         let canvas = Canvas { viewport: Viewport { x: 300.0, y: 110.0, zoom: 1.0 }, ..Canvas::default() };
         write_json(&dir.join("canvas.json"), &canvas)?;
         write_json(&dir.join("trash").join("trash.json"), &TrashIndex::default())?;
@@ -247,7 +250,7 @@ impl Workspace {
         Ok(if slug == INBOX_SLUG { self.root.join(INBOX_SLUG) } else { self.root.join("projects").join(slug) })
     }
 
-    fn existing_project_dir(&self, slug: &str) -> Result<PathBuf> {
+    pub(crate) fn existing_project_dir(&self, slug: &str) -> Result<PathBuf> {
         let dir = self.project_dir(slug)?;
         if dir.is_dir() { Ok(dir) } else { Err(AppError::NotFound(format!("project {slug}"))) }
     }
@@ -281,8 +284,61 @@ impl Workspace {
         if let Some(v) = patch.show_chat {
             s.show_chat = v;
         }
+        if let Some(v) = patch.side_w {
+            s.side_w = v.clamp(crate::model::SIDE_W.0, crate::model::SIDE_W.2);
+        }
+        if let Some(v) = patch.chat_w {
+            s.chat_w = v.clamp(crate::model::CHAT_W.0, crate::model::CHAT_W.2);
+        }
         if let Some(v) = patch.tray_notice_shown {
             s.tray_notice_shown = v;
+        }
+        if let Some(v) = patch.start_with_windows {
+            s.start_with_windows = v;
+        }
+        if let Some(v) = patch.start_hidden {
+            s.start_hidden = v;
+        }
+        let model = |m: String, default: &str| -> Result<String> {
+            let m = m.trim();
+            if m.len() > 100 || m.chars().any(|c| c.is_whitespace() || c.is_control()) {
+                return Err(AppError::Invalid(format!("{m:?} is not a model name")));
+            }
+            Ok(if m.is_empty() { default.into() } else { m.into() })
+        };
+        if let Some(m) = patch.model_chat {
+            s.model_chat = model(m, crate::model::DEFAULT_MODEL_CHAT)?;
+        }
+        if let Some(v) = patch.model_router {
+            s.model_router = v;
+        }
+        if let Some(m) = patch.model_fast {
+            s.model_fast = model(m, crate::model::DEFAULT_MODEL_FAST)?;
+        }
+        if let Some(m) = patch.model_deep {
+            s.model_deep = model(m, crate::model::DEFAULT_MODEL_DEEP)?;
+        }
+        if let Some(m) = patch.model_export {
+            s.model_export = model(m, crate::model::DEFAULT_MODEL_EXPORT)?;
+        }
+        if let Some(m) = patch.model_memory {
+            s.model_memory = model(m, crate::model::DEFAULT_MODEL_MEMORY)?;
+        }
+        if let Some(n) = patch.compact_tokens {
+            s.compact_tokens = if n == 0 { crate::model::DEFAULT_COMPACT_TOKENS } else { n };
+        }
+        if let Some(n) = patch.memory_cap {
+            s.memory_cap = if n == 0 { crate::memory::DEFAULT_CAP } else { n };
+        }
+        if let Some(v) = patch.local_chat {
+            s.local_chat = v;
+        }
+        if let Some(m) = patch.local_model {
+            let m = m.trim();
+            if !m.is_empty() && !crate::ollama::valid_model_name(m) {
+                return Err(AppError::Invalid(format!("{m:?} is not an Ollama model name")));
+            }
+            s.local_model = if m.is_empty() { crate::model::DEFAULT_LOCAL_MODEL.into() } else { m.into() };
         }
         write_json(&self.root.join("workspace.json"), &s)?;
         Ok(s)
@@ -306,6 +362,8 @@ impl Workspace {
                 theme: meta.theme,
                 card_count: Self::card_count(dir),
                 is_inbox: slug == INBOX_SLUG,
+                design_versions: crate::handoff::read_index(dir).versions.len(),
+                open_questions: meta.handoff_target.as_deref().map(|t| crate::questions::open_count(Path::new(t))).unwrap_or(0),
             },
             created,
         ))
@@ -439,12 +497,44 @@ impl Workspace {
         }
     }
 
+    /// The UI saves `sessionId` and `messages`; the keys in `RUST_OWNED_CHAT_KEYS` (context snapshot,
+    /// usage, summary) belong to Rust and survive a UI save untouched.
     pub fn save_chat(&self, slug: &str, thread: &str, data: &Value) -> Result<()> {
         let path = self.chat_path(slug, thread)?;
+        let mut data = data.clone();
+        if let (Some(out), Ok(old)) = (data.as_object_mut(), self.load_chat(slug, thread)) {
+            for k in crate::ctx::RUST_OWNED_CHAT_KEYS {
+                if let Some(v) = old.get(*k) {
+                    out.insert((*k).into(), v.clone());
+                }
+            }
+        }
+        self.write_chat(&path, &data)
+    }
+
+    fn write_chat(&self, path: &Path, data: &Value) -> Result<()> {
         if let Some(dir) = path.parent() {
             fs::create_dir_all(dir).map_err(|e| AppError::io("create chats folder", e))?;
         }
-        write_json(&path, data)
+        write_json(path, data)
+    }
+
+    /// Read-modify-write of a thread file for Rust-owned fields (ctx, usage, summary).
+    pub fn update_chat(&self, slug: &str, thread: &str, f: impl FnOnce(&mut serde_json::Map<String, Value>)) -> Result<()> {
+        let path = self.chat_path(slug, thread)?;
+        let mut data = self.load_chat(slug, thread)?;
+        if !data.is_object() {
+            data = serde_json::json!({ "version": 1, "messages": [] });
+        }
+        f(data.as_object_mut().expect("object"));
+        self.write_chat(&path, &data)
+    }
+
+    /// The project's memory file (`memory.md`), trimmed; None when absent or blank.
+    pub fn read_memory(&self, slug: &str) -> Option<String> {
+        let t = fs::read_to_string(self.existing_project_dir(slug).ok()?.join("memory.md")).ok()?;
+        let t = t.trim();
+        (crate::memory::has_bullets(t)).then(|| t.to_string())
     }
 
     /// "Reset chat": clears one thread (and only that one). A user action with confirmation.
@@ -472,35 +562,183 @@ impl Workspace {
         if let Some(t) = patch.theme {
             meta.theme = if t.is_empty() { None } else { Some(t) };
         }
+        if let Some(t) = patch.handoff_target {
+            let t = t.trim();
+            if t.is_empty() {
+                meta.handoff_target = None;
+                meta.handoff_target_confirmed = None;
+            } else {
+                let p = Path::new(t);
+                if !p.is_absolute() || !p.is_dir() {
+                    return Err(AppError::Invalid(format!("the handoff folder must be an existing folder: {t}")));
+                }
+                if meta.handoff_target.as_deref() != Some(t) {
+                    meta.handoff_target_confirmed = None;
+                }
+                meta.handoff_target = Some(t.to_string());
+            }
+        }
+        if let Some(c) = patch.handoff_target_confirmed {
+            if meta.handoff_target.as_deref() != Some(c.trim()) {
+                return Err(AppError::Invalid("only the current handoff folder can be confirmed".into()));
+            }
+            meta.handoff_target_confirmed = Some(c.trim().to_string());
+        }
+        // The root canvas's "Tidy this folder?" hint, dismissed for good.
+        if let Some(off) = patch.nudge_off {
+            if off {
+                meta.extra.insert("nudge_off".into(), Value::Bool(true));
+            } else {
+                meta.extra.remove("nudge_off");
+            }
+        }
         write_json(&dir.join("project.json"), &meta)?;
         Ok(self.summary(slug, &dir)?.0)
     }
 
-    // ----- canvas -----
+    // ----- canvas (canvas.json = the root; canvases/<folder>.json = a folder's) -----
 
-    fn read_canvas(dir: &Path) -> Result<Canvas> {
-        let mut c: Canvas = read_json_or_default(&dir.join("canvas.json"))?;
+    fn canvas_path(dir: &Path, folder: Option<&str>) -> Result<PathBuf> {
+        match folder {
+            None => Ok(dir.join("canvas.json")),
+            Some(f) => {
+                check_id(f)?;
+                Ok(dir.join("canvases").join(format!("{f}.json")))
+            }
+        }
+    }
+
+    fn read_canvas_at(dir: &Path, folder: Option<&str>) -> Result<Canvas> {
+        let mut c: Canvas = read_json_or_default(&Self::canvas_path(dir, folder)?)?;
         c.sanitize();
         Ok(c)
     }
 
-    pub fn save_canvas(&self, slug: &str, canvas: &Canvas) -> Result<()> {
+    fn read_canvas(dir: &Path) -> Result<Canvas> {
+        Self::read_canvas_at(dir, None)
+    }
+
+    fn write_canvas(dir: &Path, folder: Option<&str>, canvas: &Canvas) -> Result<()> {
+        write_json(&Self::canvas_path(dir, folder)?, canvas)
+    }
+
+    fn read_folders(dir: &Path) -> Result<Vec<Folder>> {
+        Ok(read_json_or_default::<FolderIndex>(&dir.join("folders.json"))?.folders)
+    }
+
+    fn write_folders(dir: &Path, folders: &[Folder]) -> Result<()> {
+        write_json(&dir.join("folders.json"), &FolderIndex { folders: folders.to_vec() })
+    }
+
+    /// The canvas a card sits on: `Some(None)` = the root, `Some(Some(f))` = folder f, `None` = nowhere.
+    fn locate_card(dir: &Path, id: &str) -> Result<Option<Option<String>>> {
+        if Self::read_canvas(dir)?.cards.contains_key(id) {
+            return Ok(Some(None));
+        }
+        for f in Self::read_folders(dir)? {
+            if Self::read_canvas_at(dir, Some(&f.id)).is_ok_and(|c| c.cards.contains_key(id)) {
+                return Ok(Some(Some(f.id)));
+            }
+        }
+        Ok(None)
+    }
+
+    pub fn save_canvas(&self, slug: &str, folder: Option<&str>, canvas: &Canvas) -> Result<()> {
         let dir = self.existing_project_dir(slug)?;
+        if let Some(f) = folder {
+            if !Self::read_folders(&dir)?.iter().any(|x| x.id == f) {
+                return Err(AppError::NotFound(format!("folder {f}")));
+            }
+        }
         let mut canvas = canvas.clone();
         canvas.sanitize();
-        write_json(&dir.join("canvas.json"), &canvas)
+        Self::write_canvas(&dir, folder, &canvas)
+    }
+
+    /// Several canvases (key "" = the root) and optionally the whole folder list in one call, so a
+    /// move between canvases is one write. Folders that left the list lose their canvas file.
+    pub fn save_layout(&self, slug: &str, layout: LayoutWrite) -> Result<()> {
+        let dir = self.existing_project_dir(slug)?;
+        if let Some(list) = &layout.folders {
+            for f in list {
+                check_id(&f.id)?;
+            }
+        }
+        let known: std::collections::HashSet<String> = match &layout.folders {
+            Some(list) => list.iter().map(|f| f.id.clone()).collect(),
+            None => Self::read_folders(&dir)?.into_iter().map(|f| f.id).collect(),
+        };
+        for k in layout.canvases.keys() {
+            if !k.is_empty() && !known.contains(k) {
+                return Err(AppError::NotFound(format!("folder {k}")));
+            }
+        }
+        for (k, c) in &layout.canvases {
+            let mut c = c.clone();
+            c.sanitize();
+            Self::write_canvas(&dir, (!k.is_empty()).then_some(k.as_str()), &c)?;
+        }
+        if let Some(list) = &layout.folders {
+            let gone: Vec<String> = Self::read_folders(&dir)?.into_iter().map(|f| f.id).filter(|id| !known.contains(id)).collect();
+            Self::write_folders(&dir, list)?;
+            for id in gone {
+                let _ = fs::remove_file(Self::canvas_path(&dir, Some(&id))?);
+            }
+        }
+        Ok(())
     }
 
     /// First free grid slot, so new cards never stack exactly on top of each other.
     fn next_free_pos(canvas: &Canvas) -> Pos {
         for k in 0usize.. {
             let p = Pos::at((k % 4) as f64 * GRID_DX, (k / 4) as f64 * GRID_DY);
-            let taken = canvas.cards.values().any(|q| (q.x - p.x).abs() < GRID_DX * 0.5 && (q.y - p.y).abs() < GRID_DY * 0.5);
+            let taken = canvas.cards.values().chain(canvas.folders.values()).any(|q| (q.x - p.x).abs() < GRID_DX * 0.5 && (q.y - p.y).abs() < GRID_DY * 0.5);
             if !taken {
                 return p;
             }
         }
         unreachable!()
+    }
+
+    /// Folders with their parents repaired: a duplicate or invalid id is dropped; a missing parent,
+    /// or a parent chain that loops, puts the folder at the root.
+    fn clean_folders(mut folders: Vec<Folder>) -> (Vec<Folder>, bool) {
+        let mut changed = false;
+        let mut seen = std::collections::HashSet::new();
+        let before = folders.len();
+        folders.retain(|f| check_id(&f.id).is_ok() && seen.insert(f.id.clone()));
+        changed |= folders.len() != before;
+        let parents: BTreeMap<String, Option<String>> = folders.iter().map(|f| (f.id.clone(), f.parent.clone())).collect();
+        for f in &mut folders {
+            let mut cur = f.parent.clone();
+            let mut steps = 0;
+            let mut ok = true;
+            while let Some(c) = cur {
+                if c == f.id || steps > parents.len() || !parents.contains_key(&c) {
+                    ok = false;
+                    break;
+                }
+                cur = parents[&c].clone();
+                steps += 1;
+            }
+            if !ok {
+                f.parent = None;
+                changed = true;
+            }
+        }
+        (folders, changed)
+    }
+
+    /// The ids of `id` and every folder below it.
+    fn subtree(folders: &[Folder], id: &str) -> Vec<String> {
+        let mut out = vec![id.to_string()];
+        let mut i = 0;
+        while i < out.len() {
+            let cur = out[i].clone();
+            out.extend(folders.iter().filter(|f| f.parent.as_deref() == Some(cur.as_str())).map(|f| f.id.clone()));
+            i += 1;
+        }
+        out
     }
 
     // ----- cards -----
@@ -547,33 +785,241 @@ impl Workspace {
         (cards, warnings)
     }
 
-    /// Load everything the canvas needs. Cards created outside the app get a position here.
+    /// Load everything the canvas needs. Cards created outside the app get a position on the root
+    /// canvas; a card on two canvases keeps the first (root, then folders in order).
     pub fn load_project(&self, slug: &str) -> Result<ProjectData> {
         let dir = self.existing_project_dir(slug)?;
         let meta = read_json_or_default_meta(&dir.join("project.json"), slug)?;
+        let (folders, folders_changed) = Self::clean_folders(Self::read_folders(&dir)?);
         let mut canvas = Self::read_canvas(&dir)?;
+        let mut canvases: BTreeMap<String, Canvas> = BTreeMap::new();
+        for f in &folders {
+            canvases.insert(f.id.clone(), Self::read_canvas_at(&dir, Some(&f.id))?);
+        }
         let (cards, warnings) = Self::list_cards_in(&dir);
+        let before_root = canvas.clone();
+        let before: BTreeMap<String, Canvas> = canvases.clone();
 
-        let mut changed = false;
-        let live: std::collections::HashSet<&str> = cards.iter().map(|c| c.meta.id.as_str()).collect();
-        let before = canvas.cards.len();
-        canvas.cards.retain(|id, _| live.contains(id.as_str()));
-        changed |= canvas.cards.len() != before;
-        for c in &cards {
-            if !canvas.cards.contains_key(&c.meta.id) {
-                let p = Self::next_free_pos(&canvas);
-                canvas.cards.insert(c.meta.id.clone(), p);
-                changed = true;
+        // Child folders appear exactly on their parent's canvas.
+        let parent_of: BTreeMap<String, Option<String>> = folders.iter().map(|f| (f.id.clone(), f.parent.clone())).collect();
+        canvas.folders.retain(|id, _| parent_of.get(id) == Some(&None));
+        for (key, c) in canvases.iter_mut() {
+            c.folders.retain(|id, _| parent_of.get(id).is_some_and(|p| p.as_deref() == Some(key.as_str())));
+        }
+        for f in &folders {
+            let target = match &f.parent {
+                None => &mut canvas,
+                Some(p) => canvases.get_mut(p).expect("clean_folders keeps parents real"),
+            };
+            if !target.folders.contains_key(&f.id) {
+                let p = Self::next_free_pos(target);
+                target.folders.insert(f.id.clone(), p);
             }
         }
-        if changed {
-            write_json(&dir.join("canvas.json"), &canvas)?;
+
+        let live: std::collections::HashSet<&str> = cards.iter().map(|c| c.meta.id.as_str()).collect();
+        let mut placed: std::collections::HashSet<String> = std::collections::HashSet::new();
+        canvas.cards.retain(|id, _| live.contains(id.as_str()) && placed.insert(id.clone()));
+        for f in &folders {
+            if let Some(c) = canvases.get_mut(&f.id) {
+                c.cards.retain(|id, _| live.contains(id.as_str()) && placed.insert(id.clone()));
+            }
         }
-        Ok(ProjectData { slug: slug.into(), is_inbox: slug == INBOX_SLUG, meta, canvas, cards, warnings })
+        for c in &cards {
+            if !placed.contains(&c.meta.id) {
+                let p = Self::next_free_pos(&canvas);
+                canvas.cards.insert(c.meta.id.clone(), p);
+            }
+        }
+        if canvas != before_root {
+            Self::write_canvas(&dir, None, &canvas)?;
+        }
+        for (k, c) in &canvases {
+            if before.get(k) != Some(c) {
+                Self::write_canvas(&dir, Some(k), c)?;
+            }
+        }
+        if folders_changed {
+            Self::write_folders(&dir, &folders)?;
+        }
+        let proposals = Self::read_proposals(&dir, &live);
+        Ok(ProjectData { slug: slug.into(), is_inbox: slug == INBOX_SLUG, meta, canvas, folders, canvases, cards, proposals, warnings })
+    }
+
+    /// "Parent / Child" path of every folder by id.
+    pub fn folder_paths(folders: &[Folder]) -> BTreeMap<String, String> {
+        let by_id: BTreeMap<&str, &Folder> = folders.iter().map(|f| (f.id.as_str(), f)).collect();
+        let name = |f: &Folder| if f.title.trim().is_empty() { "Untitled folder".to_string() } else { f.title.trim().to_string() };
+        folders
+            .iter()
+            .map(|f| {
+                let mut parts = vec![name(f)];
+                let mut cur = f.parent.as_deref();
+                let mut guard = 0;
+                while let Some(p) = cur.and_then(|p| by_id.get(p)) {
+                    parts.push(name(p));
+                    cur = p.parent.as_deref();
+                    guard += 1;
+                    if guard > folders.len() {
+                        break;
+                    }
+                }
+                parts.reverse();
+                (f.id.clone(), parts.join(" / "))
+            })
+            .collect()
+    }
+
+    /// Card id -> id of the folder it sits in (cards on the root canvas are left out).
+    pub fn card_folders(&self, slug: &str) -> Result<std::collections::HashMap<String, String>> {
+        let dir = self.existing_project_dir(slug)?;
+        let mut out = std::collections::HashMap::new();
+        for f in Self::read_folders(&dir)? {
+            for id in Self::read_canvas_at(&dir, Some(&f.id))?.cards.into_keys() {
+                out.entry(id).or_insert_with(|| f.id.clone());
+            }
+        }
+        Ok(out)
+    }
+
+    /// Card id -> "Folder / Subfolder" for every card inside a folder.
+    pub fn card_folder_paths(&self, slug: &str) -> Result<std::collections::HashMap<String, String>> {
+        let paths = Self::folder_paths(&self.folders(slug)?);
+        Ok(self.card_folders(slug)?.into_iter().filter_map(|(c, f)| paths.get(&f).map(|p| (c, p.clone()))).collect())
+    }
+
+    /// Fills `folder_path` on search hits.
+    pub fn annotate_hits(&self, hits: &mut [crate::search::SearchHit]) {
+        let mut cache: std::collections::HashMap<String, std::collections::HashMap<String, String>> = std::collections::HashMap::new();
+        for h in hits {
+            let m = cache.entry(h.project.clone()).or_insert_with(|| self.card_folder_paths(&h.project).unwrap_or_default());
+            h.folder_path = m.get(&h.id).cloned();
+        }
+    }
+
+    /// The project's folders (as stored).
+    pub fn folders(&self, slug: &str) -> Result<Vec<Folder>> {
+        Self::read_folders(&self.existing_project_dir(slug)?)
+    }
+
+    // ----- Claude edit proposals (cards/<id>.proposal.json, never inside the card file) -----
+
+    fn proposal_path(dir: &Path, id: &str) -> Result<PathBuf> {
+        check_id(id)?;
+        Ok(dir.join("cards").join(format!("{id}.proposal.json")))
+    }
+
+    fn read_proposals(dir: &Path, live: &std::collections::HashSet<&str>) -> BTreeMap<String, Value> {
+        let mut out = BTreeMap::new();
+        let Ok(rd) = fs::read_dir(dir.join("cards")) else { return out };
+        for entry in rd.filter_map(|e| e.ok()) {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let Some(id) = name.strip_suffix(".proposal.json") else { continue };
+            if !live.contains(id) {
+                continue;
+            }
+            if let Some(v) = fs::read_to_string(entry.path()).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()) {
+                out.insert(id.to_string(), v);
+            }
+        }
+        out
+    }
+
+    /// One pending proposal per card: a new one replaces the old.
+    pub fn write_proposal(&self, slug: &str, id: &str, proposal: &Value) -> Result<()> {
+        let dir = self.existing_project_dir(slug)?;
+        if !Self::card_path(&dir, id)?.is_file() {
+            return Err(AppError::NotFound(format!("card {id}")));
+        }
+        write_json(&Self::proposal_path(&dir, id)?, proposal)
+    }
+
+    /// The card's pending proposal, if any.
+    pub fn read_proposal(&self, slug: &str, id: &str) -> Option<Value> {
+        let dir = self.existing_project_dir(slug).ok()?;
+        serde_json::from_str(&fs::read_to_string(Self::proposal_path(&dir, id).ok()?).ok()?).ok()
+    }
+
+    /// Kept (after the UI applied it) or dismissed: either way the file goes. Missing is fine.
+    pub fn delete_proposal(&self, slug: &str, id: &str) -> Result<()> {
+        let dir = self.existing_project_dir(slug)?;
+        match fs::remove_file(Self::proposal_path(&dir, id)?) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(AppError::io(format!("remove the proposal for card {id}"), e)),
+        }
+    }
+
+    /// The title of the frame each card is in (its centre inside the frame; topmost frame wins).
+    /// Cards with no position or no frame are left out.
+    pub fn card_frames(&self, slug: &str) -> Result<std::collections::HashMap<String, String>> {
+        let dir = self.existing_project_dir(slug)?;
+        let mut all = vec![Self::read_canvas(&dir)?];
+        for f in Self::read_folders(&dir)? {
+            all.push(Self::read_canvas_at(&dir, Some(&f.id))?);
+        }
+        let mut out = std::collections::HashMap::new();
+        for canvas in &all {
+            let mut frames: Vec<&crate::model::Frame> = canvas.frames.values().collect();
+            frames.sort_by(|a, b| b.z.cmp(&a.z));
+            for (id, p) in &canvas.cards {
+                // Defaults mirror CARD_W / CARD_H in src/components/cardGeometry.ts.
+                let (cx, cy) = (p.x + p.w.unwrap_or(236.0) / 2.0, p.y + p.h.unwrap_or(150.0) / 2.0);
+                if let Some(f) = frames.iter().find(|f| cx >= f.x && cx <= f.x + f.w && cy >= f.y && cy <= f.y + f.h) {
+                    let title = if f.title.trim().is_empty() { "Untitled frame".to_string() } else { f.title.trim().to_string() };
+                    out.insert(id.clone(), title);
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// `None`/empty = no role. Known roles are "tech" and "decisions"; only one live card per
+    /// project may hold each.
+    fn check_role(dir: &Path, role: Option<String>, except: Option<&str>) -> Result<Option<String>> {
+        let Some(role) = role.map(|r| r.trim().to_lowercase()).filter(|r| !r.is_empty()) else { return Ok(None) };
+        if !ROLES.contains(&role.as_str()) {
+            return Err(AppError::Invalid(format!("unknown card role {role:?}")));
+        }
+        if let Some(other) = Self::role_card(dir, &role, except) {
+            let what = if role == ROLE_TECH { "a Tech & constraints card" } else if role == ROLE_DECISIONS { "a Project decisions card" } else { "a From Claude Code card" };
+            return Err(AppError::Invalid(format!("this project already has {what} ({other})")));
+        }
+        Ok(Some(role))
+    }
+
+    /// The id of the live card holding `role`, other than `except`.
+    fn role_card(dir: &Path, role: &str, except: Option<&str>) -> Option<String> {
+        Self::list_cards_in(dir).0.into_iter().find(|c| c.meta.role.as_deref() == Some(role) && Some(c.meta.id.as_str()) != except).map(|c| c.meta.id)
+    }
+
+    fn check_attachments(list: Vec<Attachment>) -> Result<Vec<Attachment>> {
+        for a in &list {
+            a.validate().map_err(AppError::Invalid)?;
+        }
+        Ok(merge_attachments([list.as_slice()]))
+    }
+
+    /// Checklist items get an id when they lack one (or share one).
+    fn check_items(mut items: Vec<ChecklistItem>) -> Vec<ChecklistItem> {
+        let mut seen = std::collections::HashSet::new();
+        for it in &mut items {
+            if it.id.trim().is_empty() || !seen.insert(it.id.clone()) {
+                it.id = ulid::Ulid::generate().to_string();
+                seen.insert(it.id.clone());
+            }
+        }
+        items
+    }
+
+    fn clean_color(c: Option<String>) -> Option<String> {
+        c.map(|c| c.trim().to_string()).filter(|c| !c.is_empty())
     }
 
     pub fn create_card(&self, slug: &str, new: NewCard) -> Result<Card> {
         let dir = self.existing_project_dir(slug)?;
+        let role = Self::check_role(&dir, new.role, None)?;
+        let attachments = Self::check_attachments(new.attachments.unwrap_or_default())?;
         let id = ulid::Ulid::generate().to_string();
         let stamp = now();
         let title = new.title.map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).unwrap_or_else(|| "Untitled".into());
@@ -581,6 +1027,11 @@ impl Workspace {
             meta: Frontmatter {
                 id: id.clone(),
                 title,
+                kind: new.kind.unwrap_or_default(),
+                role,
+                color: Self::clean_color(new.color),
+                items: Self::check_items(new.items.unwrap_or_default()),
+                attachments,
                 stage: new.stage.unwrap_or_default(),
                 tags: new.tags.unwrap_or_default(),
                 fields: new.fields.unwrap_or_default(),
@@ -591,12 +1042,18 @@ impl Workspace {
                 ghost: new.ghost.unwrap_or(false),
                 links: new.links.unwrap_or_default(),
                 branch: new.branch,
-                extra: Default::default(),
+                extra: new.merged_from.map(|ids| [("merged_from".to_string(), serde_json::json!(ids))].into_iter().collect()).unwrap_or_default(),
             },
             body: norm_body(&new.body.unwrap_or_default()),
         };
+        let folder = new.folder.filter(|f| !f.is_empty());
+        if let Some(f) = &folder {
+            if !Self::read_folders(&dir)?.iter().any(|x| &x.id == f) {
+                return Err(AppError::NotFound(format!("folder {f}")));
+            }
+        }
         Self::write_card_file(&Self::card_path(&dir, &id)?, &card)?;
-        let mut canvas = Self::read_canvas(&dir)?;
+        let mut canvas = Self::read_canvas_at(&dir, folder.as_deref())?;
         let mut pos = match (new.x, new.y) {
             (Some(x), Some(y)) => Pos::at(x, y),
             _ => Self::next_free_pos(&canvas),
@@ -604,7 +1061,7 @@ impl Workspace {
         // New cards (including Claude's ghosts) land on top of the stack.
         pos.z = Some(canvas.max_z() + 1);
         canvas.cards.insert(id, pos);
-        write_json(&dir.join("canvas.json"), &canvas)?;
+        Self::write_canvas(&dir, folder.as_deref(), &canvas)?;
         Ok(card)
     }
 
@@ -639,46 +1096,92 @@ impl Workspace {
         if let Some(g) = patch.ghost {
             card.meta.ghost = g;
         }
+        if let Some(k) = patch.kind {
+            card.meta.kind = k;
+        }
+        if let Some(r) = patch.role {
+            card.meta.role = Self::check_role(&dir, Some(r), Some(id))?;
+        }
+        if let Some(c) = patch.color {
+            card.meta.color = Self::clean_color(Some(c));
+        }
+        if let Some(i) = patch.items {
+            card.meta.items = Self::check_items(i);
+        }
+        if let Some(a) = patch.attachments {
+            card.meta.attachments = Self::check_attachments(a)?;
+        }
+        card.meta.updated = now();
+        Self::write_card_file(&path, &card)?;
+        if card.meta.role.as_deref() == Some(crate::model::ROLE_CC_QUESTIONS) {
+            crate::questions::write_back(self, slug, &card.meta.items);
+        }
+        Ok(card)
+    }
+
+    /// Read, change and write back one card (bumping `updated`).
+    fn edit_card(&self, slug: &str, id: &str, f: impl FnOnce(&mut Card) -> Result<()>) -> Result<Card> {
+        let dir = self.existing_project_dir(slug)?;
+        let path = Self::card_path(&dir, id)?;
+        let mut card = Self::read_card_file(&path, id)?;
+        f(&mut card)?;
         card.meta.updated = now();
         Self::write_card_file(&path, &card)?;
         Ok(card)
     }
 
-    // ----- brief export -----
+    // ----- attachments -----
 
-    /// Writes a Markdown design brief to `briefs/<id>.md`. Only cards that have reached Pitch can
-    /// be exported — enforced here, not just in the UI, since this is reachable from any client.
-    pub fn export_brief(&self, slug: &str, id: &str) -> Result<String> {
-        let dir = self.existing_project_dir(slug)?;
-        let card = Self::read_card_file(&Self::card_path(&dir, id)?, id)?;
-        if card.meta.stage != Stage::Pitch {
-            return Err(AppError::Invalid("brief export unlocks when the card reaches Pitch".into()));
-        }
-        let mut out = format!("# {}\n\n", card.meta.title);
-        if !card.meta.tags.is_empty() {
-            out.push_str(&format!("**Tags:** {}\n\n", card.meta.tags.join(", ")));
-        }
-        out.push_str(card.body.trim_end_matches('\n'));
-        out.push('\n');
-        if !card.meta.links.is_empty() {
-            out.push_str("\n## Linked ideas\n\n");
-            for l in &card.meta.links {
-                out.push_str(&format!("- {}{}\n", l.to, l.label.as_deref().map(|s| format!(" — {s}")).unwrap_or_default()));
+    /// Appends an attachment (a fresh id when it has none or a taken one). Returns the card.
+    pub fn add_attachment(&self, slug: &str, id: &str, att: Attachment) -> Result<Card> {
+        att.validate().map_err(AppError::Invalid)?;
+        self.edit_card(slug, id, |c| {
+            let mut att = att;
+            if att.id().trim().is_empty() || c.meta.attachments.iter().any(|a| a.id() == att.id()) {
+                att.set_id(ulid::Ulid::generate().to_string());
             }
-        }
-        if !card.meta.fields.is_empty() {
-            out.push_str("\n## Fields\n\n");
-            for (k, v) in &card.meta.fields {
-                let plain = match v {
-                    Value::String(s) => s.clone(),
-                    other => other.to_string(),
-                };
-                out.push_str(&format!("- **{k}:** {plain}\n"));
+            c.meta.attachments.push(att);
+            Ok(())
+        })
+    }
+
+    pub fn update_attachment(&self, slug: &str, id: &str, att_id: &str, patch: &Value) -> Result<Card> {
+        self.edit_card(slug, id, |c| {
+            let a = c.meta.attachments.iter_mut().find(|a| a.id() == att_id).ok_or_else(|| AppError::NotFound(format!("attachment {att_id}")))?;
+            *a = patch_attachment(a, patch).map_err(AppError::Invalid)?;
+            Ok(())
+        })
+    }
+
+    /// Drops the record only; the media file stays (so undo works) until the Trash is emptied.
+    pub fn remove_attachment(&self, slug: &str, id: &str, att_id: &str) -> Result<Card> {
+        self.edit_card(slug, id, |c| {
+            let before = c.meta.attachments.len();
+            c.meta.attachments.retain(|a| a.id() != att_id);
+            if c.meta.attachments.len() == before {
+                return Err(AppError::NotFound(format!("attachment {att_id}")));
             }
-        }
-        let path = dir.join("briefs").join(format!("{id}.md"));
-        atomic_write(&path, out.as_bytes())?;
-        Ok(format!("briefs/{id}.md"))
+            Ok(())
+        })
+    }
+
+    /// Listed ids first, in that order; any attachment not listed keeps its relative order after them.
+    pub fn reorder_attachments(&self, slug: &str, id: &str, ids: &[String]) -> Result<Card> {
+        self.edit_card(slug, id, |c| {
+            if let Some(bad) = ids.iter().find(|i| !c.meta.attachments.iter().any(|a| a.id() == i.as_str())) {
+                return Err(AppError::NotFound(format!("attachment {bad}")));
+            }
+            let mut rest = std::mem::take(&mut c.meta.attachments);
+            let mut out = Vec::with_capacity(rest.len());
+            for i in ids {
+                if let Some(p) = rest.iter().position(|a| a.id() == i.as_str()) {
+                    out.push(rest.remove(p));
+                }
+            }
+            out.append(&mut rest);
+            c.meta.attachments = out;
+            Ok(())
+        })
     }
 
     // ----- custom themes -----
@@ -733,6 +1236,81 @@ impl Workspace {
         Ok(format!("media/{fname}"))
     }
 
+    /// Writes a fetched clip's files under `media/` (favicon, og:image, `media/clips/<att_id>.md`)
+    /// and returns the clip attachment. Re-running with the same id overwrites the excerpt.
+    pub fn store_clip(&self, slug: &str, att_id: &str, url: &str, f: crate::clip::Fetched) -> Result<Attachment> {
+        check_id(att_id)?;
+        let dir = self.existing_project_dir(slug)?;
+        let favicon = f.favicon.map(|(b, ext)| self.save_media(slug, &format!("favicon.{ext}"), &b)).transpose()?;
+        let thumb = f.image.map(|(b, ext)| self.save_media(slug, &format!("thumb.{ext}"), &b)).transpose()?;
+        let excerpt = match &f.excerpt {
+            Some(text) => {
+                let rel = format!("media/clips/{att_id}.md");
+                let title = f.title.as_deref().map(|t| format!("# {t}
+
+")).unwrap_or_default();
+                atomic_write(&dir.join(&rel), format!("<{url}>
+
+{title}{text}
+").as_bytes())?;
+                Some(rel)
+            }
+            None => None,
+        };
+        Ok(Attachment::Clip {
+            id: att_id.to_string(),
+            url: url.trim().to_string(),
+            title: f.title,
+            description: f.description,
+            site: f.site,
+            favicon,
+            thumb,
+            excerpt,
+            caption: None,
+            fetched_at: Some(now()),
+            fetch_error: f.error,
+        })
+    }
+
+    /// Several files at once; returns their paths in the same order.
+    pub fn save_media_many(&self, slug: &str, files: &[MediaUpload]) -> Result<Vec<String>> {
+        files.iter().map(|f| self.save_media(slug, &f.name_hint, &f.bytes)).collect()
+    }
+
+    /// Deletes files under `media/` that no live card (or variant) mentions. Run only when the
+    /// Trash is emptied, so removed attachments and trashed cards stay restorable until then.
+    fn sweep_media(dir: &Path) -> Result<()> {
+        fn walk(d: &Path, out: &mut Vec<PathBuf>) {
+            if let Ok(rd) = fs::read_dir(d) {
+                for e in rd.filter_map(|e| e.ok()) {
+                    let p = e.path();
+                    if p.is_dir() {
+                        walk(&p, out);
+                    } else {
+                        out.push(p);
+                    }
+                }
+            }
+        }
+        let mut media = Vec::new();
+        walk(&dir.join("media"), &mut media);
+        if media.is_empty() {
+            return Ok(());
+        }
+        let mut card_files = Vec::new();
+        walk(&dir.join("cards"), &mut card_files);
+        // Raw text, not parsed attachments: a path in a body, a custom field or a variant counts too.
+        let text: String = card_files.iter().filter(|p| p.extension().is_some_and(|x| x == "md")).filter_map(|p| fs::read_to_string(p).ok()).collect::<Vec<_>>().join("\n");
+        for p in media {
+            let Ok(rel) = p.strip_prefix(dir) else { continue };
+            let rel = rel.to_string_lossy().replace('\\', "/");
+            if !text.contains(&rel) {
+                retry_io(|| fs::remove_file(&p)).map_err(|e| AppError::io(format!("remove {}", p.display()), e))?;
+            }
+        }
+        Ok(())
+    }
+
     /// Read a file back from inside a project (media, briefs...) as bytes, for the UI to show as a data URL.
     /// `rel` must stay inside the project dir.
     pub fn read_project_file(&self, slug: &str, rel: &str) -> Result<Vec<u8>> {
@@ -770,7 +1348,8 @@ impl Workspace {
         let dir = self.existing_project_dir(slug)?;
         let src = Self::card_path(&dir, id)?;
         let card = Self::read_card_file(&src, id)?;
-        let mut canvas = Self::read_canvas(&dir)?;
+        let folder = Self::locate_card(&dir, id)?.flatten();
+        let mut canvas = Self::read_canvas_at(&dir, folder.as_deref())?;
         let item = TrashItem {
             id: id.to_string(),
             title: card.meta.title.clone(),
@@ -778,6 +1357,9 @@ impl Workspace {
             reason: reason.to_string(),
             deleted_at: now(),
             pos: canvas.cards.get(id).copied(),
+            kind: None,
+            folder: folder.clone(),
+            count: None,
         };
         let tdir = Self::trash_dir(&dir);
         fs::create_dir_all(&tdir).map_err(|e| AppError::io("create trash", e))?;
@@ -786,14 +1368,122 @@ impl Workspace {
         if variants.is_dir() {
             fs::rename(&variants, tdir.join(format!("{id}.variants"))).map_err(|e| AppError::io("move variants to trash", e))?;
         }
+        let _ = fs::remove_file(Self::proposal_path(&dir, id)?);
         let mut idx = Self::read_trash(&dir)?;
         idx.items.retain(|i| i.id != id);
         idx.items.push(item.clone());
         Self::write_trash(&dir, &idx)?;
         if canvas.cards.remove(id).is_some() {
-            write_json(&dir.join("canvas.json"), &canvas)?;
+            Self::write_canvas(&dir, folder.as_deref(), &canvas)?;
         }
         Ok(item)
+    }
+
+    fn folder_bundle_path(dir: &Path, id: &str) -> Result<PathBuf> {
+        check_id(id)?;
+        Ok(Self::trash_dir(dir).join(format!("{id}.folder.json")))
+    }
+
+    /// A folder and its whole subtree (sub-folders, their canvases, every card on them) go to the
+    /// Trash as one item. Restoring puts it all back where it was.
+    pub fn trash_folder(&self, slug: &str, id: &str) -> Result<TrashItem> {
+        let dir = self.existing_project_dir(slug)?;
+        let mut folders = Self::read_folders(&dir)?;
+        let folder = folders.iter().find(|f| f.id == id).cloned().ok_or_else(|| AppError::NotFound(format!("folder {id}")))?;
+        let ids = Self::subtree(&folders, id);
+        let mut canvases = BTreeMap::new();
+        let mut cards: Vec<String> = Vec::new();
+        for f in &ids {
+            let c = Self::read_canvas_at(&dir, Some(f))?;
+            cards.extend(c.cards.keys().cloned());
+            canvases.insert(f.clone(), c);
+        }
+        let parent = folder.parent.clone();
+        let mut parent_canvas = Self::read_canvas_at(&dir, parent.as_deref())?;
+        let pos = parent_canvas.folders.get(id).copied();
+        let tdir = Self::trash_dir(&dir);
+        fs::create_dir_all(&tdir).map_err(|e| AppError::io("create trash", e))?;
+        let subtree: Vec<Folder> = folders.iter().filter(|f| ids.contains(&f.id)).cloned().collect();
+        write_json(&Self::folder_bundle_path(&dir, id)?, &serde_json::json!({ "folders": subtree, "canvases": canvases, "cards": cards }))?;
+        let mut moved = 0;
+        for c in &cards {
+            let src = Self::card_path(&dir, c)?;
+            if !src.is_file() {
+                continue;
+            }
+            fs::rename(&src, tdir.join(format!("{c}.md"))).map_err(|e| AppError::io(format!("move card {c} to trash"), e))?;
+            let variants = dir.join("cards").join(format!("{c}.variants"));
+            if variants.is_dir() {
+                let _ = fs::rename(&variants, tdir.join(format!("{c}.variants")));
+            }
+            let _ = fs::remove_file(Self::proposal_path(&dir, c)?);
+            moved += 1;
+        }
+        let item = TrashItem {
+            id: id.to_string(),
+            title: if folder.title.trim().is_empty() { "Untitled folder".into() } else { folder.title.clone() },
+            stage: Stage::default(),
+            reason: "deleted".into(),
+            deleted_at: now(),
+            pos,
+            kind: Some("folder".into()),
+            folder: parent.clone(),
+            count: Some(moved),
+        };
+        let mut idx = Self::read_trash(&dir)?;
+        idx.items.retain(|i| i.id != id);
+        idx.items.push(item.clone());
+        Self::write_trash(&dir, &idx)?;
+        parent_canvas.folders.remove(id);
+        Self::write_canvas(&dir, parent.as_deref(), &parent_canvas)?;
+        folders.retain(|f| !ids.contains(&f.id));
+        Self::write_folders(&dir, &folders)?;
+        for f in &ids {
+            let _ = fs::remove_file(Self::canvas_path(&dir, Some(f))?);
+        }
+        Ok(item)
+    }
+
+    fn restore_folder(&self, dir: &Path, idx: &mut TrashIndex, at: usize) -> Result<()> {
+        let item = idx.items[at].clone();
+        let text = fs::read_to_string(Self::folder_bundle_path(dir, &item.id)?).map_err(|e| AppError::io("read the trashed folder", e))?;
+        let bundle: Value = serde_json::from_str(&text).map_err(|e| AppError::Parse { context: "trashed folder".into(), message: e.to_string() })?;
+        let mut subtree: Vec<Folder> = serde_json::from_value(bundle["folders"].clone()).unwrap_or_default();
+        let canvases: BTreeMap<String, Canvas> = serde_json::from_value(bundle["canvases"].clone()).unwrap_or_default();
+        let cards: Vec<String> = serde_json::from_value(bundle["cards"].clone()).unwrap_or_default();
+        let mut folders = Self::read_folders(dir)?;
+        if folders.iter().any(|f| subtree.iter().any(|s| s.id == f.id)) {
+            return Err(AppError::Invalid(format!("folder {} already exists", item.id)));
+        }
+        // Its old parent may be gone meanwhile: then it comes back at the root.
+        let parent = item.folder.clone().filter(|p| folders.iter().any(|f| &f.id == p));
+        if let Some(top) = subtree.iter_mut().find(|f| f.id == item.id) {
+            top.parent = parent.clone();
+        }
+        let tdir = Self::trash_dir(dir);
+        for c in &cards {
+            let src = tdir.join(format!("{c}.md"));
+            let dest = Self::card_path(dir, c)?;
+            if src.is_file() && !dest.exists() {
+                fs::rename(&src, &dest).map_err(|e| AppError::io(format!("restore card {c}"), e))?;
+                let tv = tdir.join(format!("{c}.variants"));
+                if tv.is_dir() {
+                    let _ = fs::rename(&tv, dir.join("cards").join(format!("{c}.variants")));
+                }
+            }
+        }
+        for (k, c) in &canvases {
+            Self::write_canvas(dir, Some(k), c)?;
+        }
+        folders.extend(subtree);
+        Self::write_folders(dir, &folders)?;
+        let mut pc = Self::read_canvas_at(dir, parent.as_deref())?;
+        let pos = if parent == item.folder { item.pos } else { None }.unwrap_or_else(|| Self::next_free_pos(&pc));
+        pc.folders.insert(item.id.clone(), pos);
+        Self::write_canvas(dir, parent.as_deref(), &pc)?;
+        let _ = fs::remove_file(Self::folder_bundle_path(dir, &item.id)?);
+        idx.items.remove(at);
+        Self::write_trash(dir, idx)
     }
 
     pub fn list_trash(&self, slug: &str) -> Result<Vec<TrashItem>> {
@@ -802,6 +1492,21 @@ impl Workspace {
     }
 
     /// Restore an ordinary deleted card to its old position.
+    /// Restores a trashed card or folder; returns the card, or `{"folder": id}`.
+    pub fn restore_item(&self, slug: &str, id: &str) -> Result<Value> {
+        let dir = self.existing_project_dir(slug)?;
+        check_id(id)?;
+        let mut idx = Self::read_trash(&dir)?;
+        let Some(at) = idx.items.iter().position(|i| i.id == id) else {
+            return Err(AppError::NotFound(format!("trash item {id}")));
+        };
+        if idx.items[at].kind.as_deref() == Some("folder") {
+            self.restore_folder(&dir, &mut idx, at)?;
+            return Ok(serde_json::json!({ "folder": id }));
+        }
+        serde_json::to_value(self.restore_card(slug, id)?).map_err(|e| AppError::Parse { context: "card".into(), message: e.to_string() })
+    }
+
     pub fn restore_card(&self, slug: &str, id: &str) -> Result<Card> {
         let dir = self.existing_project_dir(slug)?;
         check_id(id)?;
@@ -810,6 +1515,9 @@ impl Workspace {
             return Err(AppError::NotFound(format!("trash item {id}")));
         };
         let item = idx.items[pos_in_idx].clone();
+        if item.kind.as_deref() == Some("folder") {
+            return Err(AppError::Invalid(format!("{id} is a folder")));
+        }
         let tdir = Self::trash_dir(&dir);
         let dest = Self::card_path(&dir, id)?;
         if dest.exists() {
@@ -820,13 +1528,21 @@ impl Workspace {
         if tv.is_dir() {
             fs::rename(&tv, dir.join("cards").join(format!("{id}.variants"))).map_err(|e| AppError::io("restore variants", e))?;
         }
-        let mut canvas = Self::read_canvas(&dir)?;
-        let pos = item.pos.unwrap_or_else(|| Self::next_free_pos(&canvas));
+        // Back onto the canvas it was on (the root when that folder is gone).
+        let folder = item.folder.clone().filter(|f| Self::read_folders(&dir).is_ok_and(|l| l.iter().any(|x| &x.id == f)));
+        let mut canvas = Self::read_canvas_at(&dir, folder.as_deref())?;
+        let pos = if folder == item.folder { item.pos } else { None }.unwrap_or_else(|| Self::next_free_pos(&canvas));
         canvas.cards.insert(id.to_string(), pos);
-        write_json(&dir.join("canvas.json"), &canvas)?;
+        Self::write_canvas(&dir, folder.as_deref(), &canvas)?;
         idx.items.remove(pos_in_idx);
         Self::write_trash(&dir, &idx)?;
-        Self::read_card_file(&dest, id)
+        let mut card = Self::read_card_file(&dest, id)?;
+        // A restored role card yields its role if another card took it meanwhile.
+        if card.meta.role.as_deref().is_some_and(|r| Self::role_card(&dir, r, Some(id)).is_some()) {
+            card.meta.role = None;
+            Self::write_card_file(&dest, &card)?;
+        }
+        Ok(card)
     }
 
     /// Permanently remove everything in the Trash. Callers must have confirmed with the user.
@@ -848,6 +1564,7 @@ impl Workspace {
             }
         }
         Self::write_trash(&dir, &TrashIndex::default())?;
+        Self::sweep_media(&dir)?;
         Ok(n)
     }
 }
@@ -857,7 +1574,7 @@ fn read_json_or_default_meta(path: &Path, slug: &str) -> Result<ProjectMeta> {
         Ok(t) => serde_json::from_str(t.trim_start_matches('\u{feff}')).ok(),
         Err(_) => None,
     };
-    Ok(meta.unwrap_or(ProjectMeta { name: slug.to_string(), theme: None, created: String::new() }))
+    Ok(meta.unwrap_or_else(|| ProjectMeta { created: String::new(), ..ProjectMeta::named(slug) }))
 }
 
 #[cfg(test)]
@@ -882,7 +1599,7 @@ mod tests {
         assert!(ws.root.join("workspace.json").is_file());
         assert!(ws.root.join("projects").is_dir());
         assert!(ws.root.join("themes").is_dir());
-        for sub in ["cards", "media", "briefs", "trash"] {
+        for sub in ["cards", "media", "trash"] {
             assert!(ws.root.join("inbox").join(sub).is_dir(), "{sub}");
         }
         assert!(ws.root.join("inbox/project.json").is_file());
@@ -960,7 +1677,7 @@ mod tests {
         let list = ws.list_projects().unwrap();
         assert!(list[0].is_inbox);
         assert_eq!(list.len(), 4);
-        let u = ws.update_project(&a.slug, ProjectPatch { name: Some("Renamed".into()), theme: Some("iridescent".into()) }).unwrap();
+        let u = ws.update_project(&a.slug, ProjectPatch { name: Some("Renamed".into()), theme: Some("iridescent".into()), ..Default::default() }).unwrap();
         assert_eq!((u.name.as_str(), u.theme.as_deref()), ("Renamed", Some("iridescent")));
         let u = ws.update_project(&a.slug, ProjectPatch { theme: Some(String::new()), ..Default::default() }).unwrap();
         assert_eq!(u.theme, None);
@@ -990,7 +1707,7 @@ mod tests {
                 NewCard {
                     title: Some("Harpoon rod".into()),
                     body: Some("# Notes\n\nTwo moods.\n\n---\n\nA rule above.".into()),
-                    stage: Some(Stage::Draft),
+                    stage: Some(Stage::Lucid),
                     tags: Some(vec!["weapon".into(), "core".into()]),
                     links: Some(vec![Link { to: "01OTHER".into(), label: Some("feeds".into()) }, Link { to: "01X".into(), label: None }]),
                     source: Some(Source::Claude),
@@ -1001,7 +1718,7 @@ mod tests {
             .unwrap();
         let text = fs::read_to_string(ws.root.join(format!("inbox/cards/{}.md", c.meta.id))).unwrap();
         assert!(text.starts_with("---\nid: "), "{text}");
-        assert!(text.contains("stage: draft"));
+        assert!(text.contains("stage: lucid"));
         assert!(text.contains("source: claude"));
         assert!(text.contains("ghost: true"));
         assert!(text.contains("- to: 01OTHER\n  label: feeds"));
@@ -1015,22 +1732,22 @@ mod tests {
 
     #[test]
     fn parser_is_tolerant_of_crlf_bom_missing_fields_and_unknown_keys() {
-        let crlf = "\u{feff}---\r\nid: WRONG\r\ntitle: From Windows\r\nstage: Sketch\r\nnotes: keep me\r\n---\r\n\r\nBody line\r\n";
+        let crlf = "\u{feff}---\r\nid: WRONG\r\ntitle: From Windows\r\nstage: Reverie\r\nnotes: keep me\r\n---\r\n\r\nBody line\r\n";
         let c = parse_card(crlf, "01ABC").unwrap();
         assert_eq!(c.meta.id, "01ABC", "file name is the id authority");
         assert_eq!(c.meta.title, "From Windows");
-        assert_eq!(c.meta.stage, Stage::Sketch);
+        assert_eq!(c.meta.stage, Stage::Reverie);
         assert_eq!(c.body, "Body line");
         assert_eq!(c.meta.extra.get("notes").and_then(|v| v.as_str()), Some("keep me"));
         assert!(serialize_card(&c).unwrap().contains("notes: keep me"), "unknown keys survive a rewrite");
 
         let plain = parse_card("# Just a note\n\nhello", "01Z").unwrap();
         assert_eq!(plain.meta.title, "Just a note");
-        assert_eq!(plain.meta.stage, Stage::Cloud);
+        assert_eq!(plain.meta.stage, Stage::Mist);
         assert_eq!(parse_card("", "01E").unwrap().meta.title, "Untitled");
 
         let weird = parse_card("---\nstage: banana\n---\nx", "01W").unwrap();
-        assert_eq!(weird.meta.stage, Stage::Cloud);
+        assert_eq!(weird.meta.stage, Stage::Mist);
         let empty_fm = parse_card("---\n---\nbody", "01F").unwrap();
         assert_eq!(empty_fm.body, "body");
         let no_body = parse_card("---\ntitle: T\n---", "01G").unwrap();
@@ -1042,9 +1759,9 @@ mod tests {
     fn update_card_patches_and_preserves_the_rest() {
         let (_d, ws) = ws();
         let c = ws.create_card(INBOX_SLUG, NewCard { title: Some("A".into()), body: Some("body".into()), tags: Some(vec!["t".into()]), ..Default::default() }).unwrap();
-        let u = ws.update_card(INBOX_SLUG, &c.meta.id, CardPatch { stage: Some(Stage::Pitch), title: Some("  B ".into()), ..Default::default() }).unwrap();
+        let u = ws.update_card(INBOX_SLUG, &c.meta.id, CardPatch { stage: Some(Stage::Dream), title: Some("  B ".into()), ..Default::default() }).unwrap();
         assert_eq!(u.meta.title, "B");
-        assert_eq!(u.meta.stage, Stage::Pitch);
+        assert_eq!(u.meta.stage, Stage::Dream);
         assert_eq!(u.body, "body");
         assert_eq!(u.meta.tags, vec!["t"]);
         assert_eq!(u.meta.created, c.meta.created);
@@ -1071,7 +1788,7 @@ mod tests {
         let (_d, ws) = ws();
         let a = ws.create_card(INBOX_SLUG, new_card("a")).unwrap();
         // a card dropped in by Claude Code / git, and a corrupt one
-        fs::write(ws.root.join("inbox/cards/01EXTERNAL.md"), "---\ntitle: External\nstage: sketch\n---\nhi\n").unwrap();
+        fs::write(ws.root.join("inbox/cards/01EXTERNAL.md"), "---\ntitle: External\nstage: reverie\n---\nhi\n").unwrap();
         fs::write(ws.root.join("inbox/cards/01BROKEN.md"), "---\ntitle: [oops\n---\n").unwrap();
         fs::write(ws.root.join("inbox/cards/notes.txt"), "ignored").unwrap();
         let data = ws.load_project(INBOX_SLUG).unwrap();
@@ -1166,7 +1883,7 @@ mod tests {
         let root = ws.root.canonicalize().unwrap();
         let ws = Workspace::open(&root).unwrap();
         let (tx, rx) = std::sync::mpsc::channel();
-        let _w = crate::watcher::start(root.clone(), move |e| {
+        let _w = crate::watcher::start(root.clone(), Vec::new(), move |e| {
             let _ = tx.send(e);
         })
         .unwrap();
@@ -1300,6 +2017,18 @@ mod tests {
         ws.reset_chat(INBOX_SLUG, &a.meta.id).unwrap(); // idempotent
         assert!(ws.load_chat(INBOX_SLUG, "../workspace").is_err());
         assert!(ws.save_chat(INBOX_SLUG, "a/b", &serde_json::json!({})).is_err());
+        // Rust-owned fields (context snapshot, usage, summary) survive UI saves; reset clears them.
+        ws.update_chat(INBOX_SLUG, &a.meta.id, |f| {
+            f.insert("ctx".into(), serde_json::json!({"memoryHash": "h", "cards": {}}));
+            f.insert("last_input_tokens".into(), serde_json::json!(123));
+            f.insert("summary".into(), serde_json::json!("s"));
+        })
+        .unwrap();
+        ws.save_chat(INBOX_SLUG, &a.meta.id, &serde_json::json!({"version": 1, "sessionId": "x", "messages": [2]})).unwrap();
+        let kept = ws.load_chat(INBOX_SLUG, &a.meta.id).unwrap();
+        assert_eq!((kept["ctx"]["memoryHash"].as_str(), kept["last_input_tokens"].as_u64(), kept["summary"].as_str(), kept["messages"][0].as_i64()), (Some("h"), Some(123), Some("s"), Some(2)));
+        ws.reset_chat(INBOX_SLUG, &a.meta.id).unwrap();
+        assert!(ws.load_chat(INBOX_SLUG, &a.meta.id).unwrap().get("summary").is_none());
     }
 
     #[test]
@@ -1316,7 +2045,7 @@ mod tests {
         pa.h = Some(f64::NAN);
         pa.z = Some(-5);
         pa.back = true;
-        ws.save_canvas(INBOX_SLUG, &canvas).unwrap();
+        ws.save_canvas(INBOX_SLUG, None, &canvas).unwrap();
         let saved = ws.load_project(INBOX_SLUG).unwrap().canvas.cards[&a.meta.id];
         assert_eq!((saved.w, saved.h, saved.z, saved.back), (Some(420.0), None, Some(-5), true));
         // Trash keeps the whole Pos; restore brings size and stacking back.
@@ -1361,7 +2090,7 @@ mod tests {
         let p = ws.create_project("P").unwrap();
         let mut data = ws.load_project(&p.slug).unwrap();
         data.canvas.viewport = Viewport { x: -50.0, y: 20.0, zoom: 0.5 };
-        ws.save_canvas(&p.slug, &data.canvas).unwrap();
+        ws.save_canvas(&p.slug, None, &data.canvas).unwrap();
         assert_eq!(ws.load_project(&p.slug).unwrap().canvas.viewport, Viewport { x: -50.0, y: 20.0, zoom: 0.5 });
     }
 
@@ -1373,20 +2102,6 @@ mod tests {
         assert_eq!(ws.read_project_file(INBOX_SLUG, &rel).unwrap(), b"\x89PNG-ish");
         assert!(ws.read_project_file(INBOX_SLUG, "../../etc/passwd").is_err());
         assert!(ws.read_project_file(INBOX_SLUG, "media/nope.png").is_err());
-    }
-
-    #[test]
-    fn brief_export_is_locked_until_pitch() {
-        let (_d, ws) = ws();
-        let c = ws.create_card(INBOX_SLUG, NewCard { title: Some("Fish-punk".into()), body: Some("Doom energy at a calm pace.".into()), tags: Some(vec!["core".into()]), ..Default::default() }).unwrap();
-        assert!(ws.export_brief(INBOX_SLUG, &c.meta.id).is_err(), "cloud card cannot export yet");
-        ws.update_card(INBOX_SLUG, &c.meta.id, CardPatch { stage: Some(Stage::Pitch), ..Default::default() }).unwrap();
-        let rel = ws.export_brief(INBOX_SLUG, &c.meta.id).unwrap();
-        assert_eq!(rel, format!("briefs/{}.md", c.meta.id));
-        let text = fs::read_to_string(ws.root.join("inbox").join(&rel)).unwrap();
-        assert!(text.starts_with("# Fish-punk"));
-        assert!(text.contains("Doom energy"));
-        assert!(text.contains("core"));
     }
 
     #[test]
@@ -1407,5 +2122,313 @@ mod tests {
         assert_eq!(slugify("  Hello,   World!! "), "hello-world");
         assert_eq!(slugify("***"), "project");
         assert_eq!(slugify("Ünï Cödé 2"), "n-c-d-2");
+    }
+
+    fn img(id: &str, path: &str) -> Attachment {
+        Attachment::Image { id: id.into(), path: path.into(), caption: None }
+    }
+    fn clip(id: &str, url: &str) -> Attachment {
+        serde_json::from_value(json!({"type": "clip", "id": id, "url": url})).unwrap()
+    }
+
+    #[test]
+    fn new_card_kinds_roundtrip_through_the_file() {
+        let (_d, ws) = ws();
+        let c = ws
+            .create_card(
+                INBOX_SLUG,
+                NewCard {
+                    kind: Some(CardKind::Checklist),
+                    color: Some(" #ffcc00 ".into()),
+                    items: Some(vec![
+                        ChecklistItem { text: "a".into(), ..Default::default() },
+                        ChecklistItem { id: "q".into(), text: "why?".into(), question: true, answer: Some("because".into()), ..Default::default() },
+                    ]),
+                    attachments: Some(vec![img("", "media/a.png"), clip("x", "https://e.com")]),
+                    ..new_card("list")
+                },
+            )
+            .unwrap();
+        assert_eq!(c.meta.color.as_deref(), Some("#ffcc00"));
+        assert!(!c.meta.items[0].id.is_empty(), "missing item ids are filled");
+        assert!(!c.meta.attachments[0].id().is_empty(), "missing attachment ids are filled");
+        let back = ws.read_card(INBOX_SLUG, &c.meta.id).unwrap();
+        assert_eq!(back, c);
+        let text = fs::read_to_string(ws.root.join(format!("inbox/cards/{}.md", c.meta.id))).unwrap();
+        assert!(text.contains("kind: checklist") && text.contains("type: clip"), "{text}");
+
+        // A plain card file without the new keys reads as kind "card" with no attachments.
+        let plain = parse_card("---\ntitle: T\nkind: weird\n---\n", "01P").unwrap();
+        assert_eq!((plain.meta.kind, plain.meta.attachments.len()), (CardKind::Card, 0));
+        // A malformed attachment entry is skipped, not fatal.
+        let bad = parse_card("---\nattachments:\n  - type: video\n  - {type: image, id: i, path: media/x.png}\n---\n", "01Q").unwrap();
+        assert_eq!(bad.meta.attachments, vec![img("i", "media/x.png")]);
+
+        // Escaping paths are refused.
+        let err = ws.create_card(INBOX_SLUG, NewCard { attachments: Some(vec![img("", "../x.png")]), ..new_card("x") });
+        assert!(matches!(err, Err(AppError::Invalid(_))));
+        let u = ws.update_card(INBOX_SLUG, &c.meta.id, CardPatch { kind: Some(CardKind::Sticky), color: Some(String::new()), ..Default::default() }).unwrap();
+        assert_eq!((u.meta.kind, u.meta.color.clone()), (CardKind::Sticky, None));
+        assert_eq!(u.meta.attachments.len(), 2, "untouched by a patch without attachments");
+    }
+
+    #[test]
+    fn legacy_image_and_clip_fields_become_attachments_and_leave_on_write() {
+        let (_d, ws) = ws();
+        let id = "01LEGACY0000000000000000000";
+        let path = ws.root.join(format!("inbox/cards/{id}.md"));
+        fs::write(&path, "---\ntitle: Old\nfields:\n  image: media/old.png\n  url: https://ex.com\n  clip_title: Ex\n  mood: calm\nattachments:\n  - {type: image, id: a1, path: media/more.png}\nnotes: keep\n---\nbody\n").unwrap();
+        let c = ws.read_card(INBOX_SLUG, id).unwrap();
+        let ids: Vec<_> = c.meta.attachments.iter().map(|a| a.id().to_string()).collect();
+        assert_eq!(ids, ["legacy-image", "legacy-clip", "a1"], "image first, then clip, then the rest");
+        assert!(matches!(&c.meta.attachments[1], Attachment::Clip { title: Some(t), .. } if t == "Ex"));
+        assert_eq!(c.meta.fields.keys().collect::<Vec<_>>(), ["mood"]);
+        assert_eq!(ws.read_card(INBOX_SLUG, id).unwrap(), c, "stable ids across reads");
+        // Any write drops the legacy keys; unknown keys still pass through.
+        ws.update_attachment(INBOX_SLUG, id, "legacy-image", &json!({"caption": "cover"})).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("clip_title") && !text.contains("  image:") && text.contains("notes: keep") && text.contains("mood: calm"), "{text}");
+        let again = ws.read_card(INBOX_SLUG, id).unwrap();
+        assert_eq!(again.meta.attachments.len(), 3);
+        assert!(matches!(&again.meta.attachments[0], Attachment::Image { caption: Some(c), .. } if c == "cover"));
+    }
+
+    #[test]
+    fn attachment_commands_add_update_reorder_remove() {
+        let (_d, ws) = ws();
+        let c = ws.create_card(INBOX_SLUG, new_card("a")).unwrap();
+        let id = c.meta.id.as_str();
+        let rels = ws.save_media_many(INBOX_SLUG, &[MediaUpload { name_hint: "a.png".into(), bytes: b"1".to_vec() }, MediaUpload { name_hint: "b.jpg".into(), bytes: b"2".to_vec() }]).unwrap();
+        assert_eq!(rels.len(), 2);
+        assert!(rels[1].ends_with(".jpg"));
+        ws.add_attachment(INBOX_SLUG, id, img("i1", &rels[0])).unwrap();
+        ws.add_attachment(INBOX_SLUG, id, img("i1", &rels[1])).unwrap(); // taken id → fresh one
+        let c = ws.add_attachment(INBOX_SLUG, id, clip("", "https://a.b")).unwrap();
+        assert_eq!(c.meta.attachments.len(), 3);
+        let i2 = c.meta.attachments[1].id().to_string();
+        let cl = c.meta.attachments[2].id().to_string();
+        assert_ne!(i2, "i1");
+        assert!(ws.add_attachment(INBOX_SLUG, id, img("", "C:/x.png")).is_err());
+
+        let c = ws.update_attachment(INBOX_SLUG, id, &cl, &json!({"title": "A", "fetch_error": "timeout", "id": "hijack", "type": "image"})).unwrap();
+        assert!(matches!(&c.meta.attachments[2], Attachment::Clip { id, title: Some(t), fetch_error: Some(_), .. } if id == &cl && t == "A"));
+        let c = ws.update_attachment(INBOX_SLUG, id, &cl, &json!({"fetch_error": null})).unwrap();
+        assert!(matches!(&c.meta.attachments[2], Attachment::Clip { fetch_error: None, .. }));
+        assert!(ws.update_attachment(INBOX_SLUG, id, &cl, &json!({"thumb": "../t.png"})).is_err());
+        assert!(matches!(ws.update_attachment(INBOX_SLUG, id, "nope", &json!({})), Err(AppError::NotFound(_))));
+
+        let c = ws.reorder_attachments(INBOX_SLUG, id, &[cl.clone(), i2.clone()]).unwrap();
+        let order: Vec<_> = c.meta.attachments.iter().map(|a| a.id().to_string()).collect();
+        assert_eq!(order, [cl.clone(), i2.clone(), "i1".into()], "unlisted ones keep their order at the end");
+        assert!(ws.reorder_attachments(INBOX_SLUG, id, &["nope".into()]).is_err());
+
+        let c = ws.remove_attachment(INBOX_SLUG, id, "i1").unwrap();
+        assert_eq!(c.meta.attachments.len(), 2);
+        assert!(ws.root.join("inbox").join(&rels[0]).is_file(), "media stays until the Trash is emptied");
+        assert!(ws.remove_attachment(INBOX_SLUG, id, "i1").is_err());
+    }
+
+    #[test]
+    fn empty_trash_sweeps_only_unreferenced_media() {
+        let (_d, ws) = ws();
+        let keep = ws.create_card(INBOX_SLUG, new_card("keep")).unwrap();
+        let gone = ws.create_card(INBOX_SLUG, new_card("gone")).unwrap();
+        let r = ws.save_media_many(INBOX_SLUG, &["a.png", "b.png", "c.png", "d.png"].map(|n| MediaUpload { name_hint: n.into(), bytes: vec![1] })).unwrap();
+        ws.add_attachment(INBOX_SLUG, &keep.meta.id, img("", &r[0])).unwrap();
+        ws.add_attachment(INBOX_SLUG, &keep.meta.id, img("x", &r[1])).unwrap();
+        ws.remove_attachment(INBOX_SLUG, &keep.meta.id, "x").unwrap();
+        ws.update_card(INBOX_SLUG, &keep.meta.id, CardPatch { body: Some(format!("![]({})", r[3])), ..Default::default() }).unwrap();
+        ws.add_attachment(INBOX_SLUG, &gone.meta.id, img("", &r[2])).unwrap();
+        ws.delete_card(INBOX_SLUG, &gone.meta.id).unwrap();
+        // Trash keeps attachments: restore brings them back intact.
+        let back = ws.restore_card(INBOX_SLUG, &gone.meta.id).unwrap();
+        assert_eq!(back.meta.attachments.len(), 1);
+        ws.delete_card(INBOX_SLUG, &gone.meta.id).unwrap();
+        let media = |rel: &str| ws.root.join("inbox").join(rel).is_file();
+        assert!(media(&r[1]) && media(&r[2]), "nothing is swept before the Trash is emptied");
+        ws.empty_trash(INBOX_SLUG).unwrap();
+        assert!(media(&r[0]), "attached to a live card");
+        assert!(media(&r[3]), "mentioned in a live body");
+        assert!(!media(&r[1]), "removed attachment");
+        assert!(!media(&r[2]), "only used by a card that was in the Trash");
+    }
+
+    #[test]
+    fn design_questions_import_answer_and_write_back() {
+        use crate::model::ROLE_CC_QUESTIONS;
+        let (d, ws) = ws();
+        let p = ws.create_project("Fish").unwrap();
+        let repo = d.path().join("repo");
+        let qpath = crate::questions::questions_path(&repo);
+        fs::create_dir_all(qpath.parent().unwrap()).unwrap();
+        fs::write(&qpath, "# Q
+
+- [ ] Q (T-1): how many fish? — combat
+- [x] old
+- [ ] free text
+").unwrap();
+        let patch = ProjectPatch { handoff_target: Some(repo.display().to_string()), ..Default::default() };
+        ws.update_project(&p.slug, patch).unwrap();
+        assert_eq!(crate::questions::open_count(&repo), 2);
+        assert!(crate::questions::import(&ws, &p.slug).unwrap());
+        assert!(!crate::questions::import(&ws, &p.slug).unwrap(), "idempotent");
+        let card = ws.load_project(&p.slug).unwrap().cards.into_iter().find(|c| c.meta.role.as_deref() == Some(ROLE_CC_QUESTIONS)).unwrap();
+        assert_eq!((card.meta.title.as_str(), card.meta.kind), ("From Claude Code", CardKind::Checklist));
+        assert_eq!(card.meta.items.len(), 2);
+        assert!(card.meta.items.iter().all(|i| i.question && i.source.is_some()));
+        // Answer the first one: the file gets the checked line + answer, the card keeps the item.
+        let mut items = card.meta.items.clone();
+        items[0].answer = Some("about twelve".into());
+        ws.update_card(&p.slug, &card.meta.id, CardPatch { items: Some(items), ..Default::default() }).unwrap();
+        let text = fs::read_to_string(&qpath).unwrap();
+        assert_eq!(text, "# Q
+
+- [x] Q (T-1): how many fish? — combat
+  - A: about twelve
+- [x] old
+- [ ] free text
+");
+        assert!(crate::questions::is_own_write(&qpath));
+        assert_eq!(crate::questions::open_count(&repo), 1);
+        assert!(!crate::questions::import(&ws, &p.slug).unwrap(), "our own write adds nothing");
+        // A new question from Claude Code is appended to the same card.
+        fs::write(&qpath, format!("{text}- [ ] another
+")).unwrap();
+        assert!(crate::questions::import(&ws, &p.slug).unwrap());
+        let n = ws.load_project(&p.slug).unwrap().cards.iter().filter(|c| c.meta.role.as_deref() == Some(ROLE_CC_QUESTIONS)).map(|c| c.meta.items.len()).sum::<usize>();
+        assert_eq!(n, 3);
+    }
+
+    #[test]
+    fn handoff_target_is_remembered_confirmed_and_cleared() {
+        let (d, ws) = ws();
+        let p = ws.create_project("Fish").unwrap();
+        let repo = d.path().join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        let path = repo.display().to_string();
+        let patch = |t: Option<&str>, c: Option<&str>| ProjectPatch { handoff_target: t.map(Into::into), handoff_target_confirmed: c.map(Into::into), ..Default::default() };
+        assert!(ws.update_project(&p.slug, patch(Some("relative/dir"), None)).is_err(), "must be an absolute, existing folder");
+        assert!(ws.update_project(&p.slug, patch(Some(&d.path().join("nope").display().to_string()), None)).is_err());
+        ws.update_project(&p.slug, patch(Some(&path), None)).unwrap();
+        assert!(ws.update_project(&p.slug, patch(None, Some("C:/other"))).is_err(), "only the current target can be confirmed");
+        ws.update_project(&p.slug, patch(None, Some(&path))).unwrap();
+        let meta = ws.load_project(&p.slug).unwrap().meta;
+        assert_eq!((meta.handoff_target.as_deref(), meta.handoff_target_confirmed.as_deref()), (Some(path.as_str()), Some(path.as_str())));
+        ws.update_project(&p.slug, patch(Some(&path), None)).unwrap();
+        assert!(ws.load_project(&p.slug).unwrap().meta.handoff_target_confirmed.is_some(), "re-setting the same folder keeps the confirmation");
+        ws.update_project(&p.slug, ProjectPatch { name: Some("Fish 2".into()), ..Default::default() }).unwrap();
+        assert_eq!(ws.load_project(&p.slug).unwrap().meta.handoff_target.as_deref(), Some(path.as_str()), "other edits keep it");
+        ws.update_project(&p.slug, patch(Some(""), None)).unwrap();
+        let meta = ws.load_project(&p.slug).unwrap().meta;
+        assert!(meta.handoff_target.is_none() && meta.handoff_target_confirmed.is_none());
+        // Unknown project.json keys survive.
+        let pj = ws.project_dir(&p.slug).unwrap().join("project.json");
+        let mut v: serde_json::Value = serde_json::from_str(&fs::read_to_string(&pj).unwrap()).unwrap();
+        v["mine"] = json!(1);
+        fs::write(&pj, v.to_string()).unwrap();
+        ws.update_project(&p.slug, ProjectPatch { name: Some("Fish 3".into()), ..Default::default() }).unwrap();
+        assert!(fs::read_to_string(&pj).unwrap().contains("\"mine\""));
+    }
+
+    #[test]
+    fn one_decisions_card_per_project() {
+        let (_d, ws) = ws();
+        let dec = |t: &str| NewCard { role: Some("decisions".into()), ..new_card(t) };
+        assert_eq!(ws.create_card(INBOX_SLUG, dec("Project decisions")).unwrap().meta.role.as_deref(), Some(ROLE_DECISIONS));
+        assert!(ws.create_card(INBOX_SLUG, dec("again")).is_err());
+        assert!(ws.create_card(INBOX_SLUG, NewCard { role: Some("tech".into()), ..new_card("t") }).is_ok(), "roles are independent");
+    }
+
+    #[test]
+    fn only_one_tech_card_per_project() {
+        let (_d, ws) = ws();
+        let tech = |t: &str| NewCard { role: Some("Tech".into()), ..new_card(t) };
+        let a = ws.create_card(INBOX_SLUG, tech("a")).unwrap();
+        assert_eq!(a.meta.role.as_deref(), Some(ROLE_TECH));
+        assert!(matches!(ws.create_card(INBOX_SLUG, tech("b")), Err(AppError::Invalid(_))));
+        assert!(ws.create_card(INBOX_SLUG, NewCard { role: Some("boss".into()), ..new_card("c") }).is_err());
+        let b = ws.create_card(INBOX_SLUG, new_card("b")).unwrap();
+        assert!(ws.update_card(INBOX_SLUG, &b.meta.id, CardPatch { role: Some("tech".into()), ..Default::default() }).is_err());
+        assert!(ws.update_card(INBOX_SLUG, &a.meta.id, CardPatch { role: Some("tech".into()), title: Some("A".into()), ..Default::default() }).is_ok(), "re-setting its own role is fine");
+        // Trashed tech card doesn't block; restoring it yields the role to the newer one.
+        ws.delete_card(INBOX_SLUG, &a.meta.id).unwrap();
+        ws.update_card(INBOX_SLUG, &b.meta.id, CardPatch { role: Some("tech".into()), ..Default::default() }).unwrap();
+        assert_eq!(ws.restore_card(INBOX_SLUG, &a.meta.id).unwrap().meta.role, None);
+        assert_eq!(ws.read_card(INBOX_SLUG, &a.meta.id).unwrap().meta.role, None);
+        let other = ws.create_project("Other").unwrap();
+        assert!(ws.create_card(&other.slug, tech("t")).is_ok(), "per project");
+    }
+
+    #[test]
+    fn frames_save_and_old_canvas_files_load() {
+        let (_d, ws) = ws();
+        let p = ws.create_project("P").unwrap();
+        let dir = ws.project_dir(&p.slug).unwrap();
+        fs::write(dir.join("canvas.json"), r#"{"version":1,"viewport":{"x":0,"y":0,"zoom":1},"cards":{}}"#).unwrap();
+        let mut data = ws.load_project(&p.slug).unwrap();
+        assert!(data.canvas.frames.is_empty());
+        assert_eq!(data.canvas.version, CANVAS_VERSION);
+        data.canvas.frames.insert("f1".into(), Frame { x: 10.0, y: f64::NAN, w: 5.0, h: 600.0, title: "Combat".into(), color: Some("#f00".into()), z: 2 });
+        ws.save_canvas(&p.slug, None, &data.canvas).unwrap();
+        let f = ws.load_project(&p.slug).unwrap().canvas.frames["f1"].clone();
+        assert_eq!(f, Frame { x: 10.0, y: 0.0, w: MIN_FRAME_SIDE, h: 600.0, title: "Combat".into(), color: Some("#f00".into()), z: 2 });
+        let raw: Value = serde_json::from_str(&fs::read_to_string(dir.join("canvas.json")).unwrap()).unwrap();
+        assert_eq!(raw["version"], CANVAS_VERSION);
+    }
+
+    #[test]
+    fn model_settings_default_and_reset() {
+        let (_d, ws) = ws();
+        let s = ws.get_settings().unwrap();
+        assert_eq!((s.model_chat.as_str(), s.model_export.as_str()), ("sonnet", "opus"));
+        let s = ws.update_settings(SettingsPatch { model_chat: Some(" haiku ".into()), model_export: Some("claude-opus-5-5".into()), ..Default::default() }).unwrap();
+        assert_eq!((s.model_chat.as_str(), s.model_export.as_str()), ("haiku", "claude-opus-5-5"));
+        assert_eq!(ws.update_settings(SettingsPatch { model_chat: Some(String::new()), ..Default::default() }).unwrap().model_chat, "sonnet");
+        assert!(ws.update_settings(SettingsPatch { model_chat: Some("two words".into()), ..Default::default() }).is_err());
+        let s = ws.get_settings().unwrap();
+        assert_eq!((s.model_router, s.model_fast.as_str(), s.model_deep.as_str()), (true, "haiku", "opus"));
+        let s = ws.update_settings(SettingsPatch { model_router: Some(false), model_fast: Some("claude-haiku-4-5".into()), ..Default::default() }).unwrap();
+        assert_eq!((s.model_router, s.model_fast.as_str()), (false, "claude-haiku-4-5"));
+        // Local chat: on by default with the Qwen MoE; an empty name restores it, a bad one is refused.
+        assert_eq!((s.local_chat, s.local_model.as_str()), (true, crate::model::DEFAULT_LOCAL_MODEL));
+        let s = ws.update_settings(SettingsPatch { local_chat: Some(false), local_model: Some("qwen3:30b-a3b-instruct-2507-q4_K_M".into()), ..Default::default() }).unwrap();
+        assert_eq!((s.local_chat, s.local_model.as_str()), (false, "qwen3:30b-a3b-instruct-2507-q4_K_M"));
+        assert_eq!(ws.update_settings(SettingsPatch { local_model: Some(" ".into()), ..Default::default() }).unwrap().local_model, crate::model::DEFAULT_LOCAL_MODEL);
+        assert!(ws.update_settings(SettingsPatch { local_model: Some("two words".into()), ..Default::default() }).is_err());
+    }
+
+    #[test]
+    fn proposals_live_beside_the_card_and_go_with_it() {
+        let (_d, ws) = ws();
+        let c = ws.create_card(INBOX_SLUG, new_card("A")).unwrap();
+        let id = c.meta.id.clone();
+        ws.write_proposal(INBOX_SLUG, &id, &serde_json::json!({ "title": "B", "reason": "r" })).unwrap();
+        ws.write_proposal(INBOX_SLUG, &id, &serde_json::json!({ "title": "C", "reason": "r" })).unwrap();
+        let data = ws.load_project(INBOX_SLUG).unwrap();
+        assert_eq!(data.proposals.len(), 1);
+        assert_eq!(data.proposals[&id]["title"], "C", "a new proposal replaces the old one");
+        assert_eq!(data.cards.len(), 1, "the proposal file is not read as a card");
+        assert_eq!(ws.read_card(INBOX_SLUG, &id).unwrap().meta.title, "A", "the card file is untouched");
+        ws.delete_proposal(INBOX_SLUG, &id).unwrap();
+        ws.delete_proposal(INBOX_SLUG, &id).unwrap();
+        assert!(ws.load_project(INBOX_SLUG).unwrap().proposals.is_empty());
+        ws.write_proposal(INBOX_SLUG, &id, &serde_json::json!({ "body": "x" })).unwrap();
+        ws.delete_card(INBOX_SLUG, &id).unwrap();
+        assert!(!ws.root.join(format!("inbox/cards/{id}.proposal.json")).exists(), "trashing the card drops its proposal");
+        assert!(ws.write_proposal(INBOX_SLUG, "01NOSUCHCARD", &serde_json::json!({})).is_err());
+    }
+
+    #[test]
+    fn card_frames_use_the_card_centre_and_topmost_frame() {
+        let (_d, ws) = ws();
+        let a = ws.create_card(INBOX_SLUG, NewCard { x: Some(0.0), y: Some(0.0), ..new_card("A") }).unwrap();
+        let b = ws.create_card(INBOX_SLUG, NewCard { x: Some(2000.0), y: Some(0.0), ..new_card("B") }).unwrap();
+        let mut data = ws.load_project(INBOX_SLUG).unwrap();
+        data.canvas.frames.insert("f1".into(), Frame { x: 100.0, y: 50.0, w: 400.0, h: 400.0, title: "Low".into(), color: None, z: 1 });
+        data.canvas.frames.insert("f2".into(), Frame { x: 100.0, y: 50.0, w: 400.0, h: 400.0, title: " ".into(), color: None, z: 5 });
+        ws.save_canvas(INBOX_SLUG, None, &data.canvas).unwrap();
+        let frames = ws.card_frames(INBOX_SLUG).unwrap();
+        assert_eq!(frames.get(&a.meta.id).map(String::as_str), Some("Untitled frame"), "centre (118, 75) is inside; topmost wins");
+        assert!(!frames.contains_key(&b.meta.id));
     }
 }

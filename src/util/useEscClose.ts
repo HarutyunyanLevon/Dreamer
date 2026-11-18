@@ -4,14 +4,17 @@ import { useEffect, useRef } from "react";
 const stack: symbol[] = [];
 
 /** Esc closes the top-most open dialog only (not every dialog stacked under it). */
-export function useEscClose(onClose: () => void) {
+export function useEscClose(onClose: () => void, skip?: (e: KeyboardEvent) => boolean) {
   const cb = useRef(onClose);
   cb.current = onClose;
+  const skipRef = useRef(skip);
+  skipRef.current = skip;
   useEffect(() => {
     const token = Symbol("dialog");
     stack.push(token);
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape" && stack[stack.length - 1] === token) {
+        if (skipRef.current?.(e)) return;
         e.stopPropagation();
         cb.current();
       }

@@ -14,17 +14,37 @@ import { useEscClose } from "../util/useEscClose";
  *   `window`); the canvas checks `dialogOpen()` instead.
  * - A full-window scrim under the popup swallows input meant for the canvas, grid and panels.
  *   A click on the scrim (press and release both on it) closes the popup and does nothing else.
+ * - `scope="canvas"` (card editor, fork compare): the scrim stops at the chat panel's left edge, so the
+ *   chat stays fully interactive; Esc pressed inside the chat only blurs the field.
  * - Esc closes only the top-most popup (`useEscClose`).
  */
-export function Layer({ onClose, className, children }: { onClose: () => void; className?: string; children: ReactNode }) {
-  useEscClose(onClose);
+export function Layer({
+  onClose,
+  className,
+  scope = "window",
+  children,
+}: {
+  onClose: () => void;
+  className?: string;
+  /** "canvas": the scrim covers the canvas and project sidebar only; the chat panel stays live. */
+  scope?: "window" | "canvas";
+  children: ReactNode;
+}) {
+  // In canvas scope, Esc from inside the chat panel only blurs the focused field.
+  useEscClose(onClose, (e) => {
+    if (scope !== "canvas") return false;
+    const t = e.target as HTMLElement | null;
+    if (!t?.closest?.("#chat-panel")) return false;
+    t.blur?.();
+    return true;
+  });
   // Close on click only if the press also started on the scrim: a text selection that is dragged
   // out of a field and released over the scrim must not close the popup.
   const pressOnScrim = useRef(false);
   const stop = (e: SyntheticEvent) => e.stopPropagation();
   return createPortal(
     <div
-      className={"layer" + (className ? ` ${className}` : "")}
+      className={"layer" + (scope === "canvas" ? " scope-canvas" : "") + (className ? ` ${className}` : "")}
       onPointerDown={stop}
       onPointerMove={stop}
       onPointerUp={stop}

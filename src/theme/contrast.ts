@@ -28,11 +28,11 @@ export function checkTheme(t: Theme): ContrastCheck[] {
     ["muted on glass", t.ui.muted, glass, 4.5],
     ["accent on glass", t.ui.accent, glass, 4.5],
     ["ghost text on white", t.ui.ghostText, WHITE, 4.5],
-    ["ink on cloud card", t.ui.ink, cloudCard, 4.5],
-    ["body on cloud card", t.ui.body, cloudCard, 4.5],
+    ["ink on mist card", t.ui.ink, cloudCard, 4.5],
+    ["body on mist card", t.ui.body, cloudCard, 4.5],
     // Card menu button, resize grip, "+ More" helper text sit on cards and dialogs.
-    ["muted on cloud card", t.ui.muted, cloudCard, 4.5],
-    ["accent on cloud card (links)", t.ui.accent, cloudCard, 4.5],
+    ["muted on mist card", t.ui.muted, cloudCard, 4.5],
+    ["accent on mist card (links)", t.ui.accent, cloudCard, 4.5],
     ["white on accent (buttons)", "#ffffff", hexToRgb(t.ui.accent), 4.5],
     // Fixed (theme-independent) destructive button, e.g. "Delete project".
     ["white on danger button", "#ffffff", hexToRgb("#a3283b"), 4.5],

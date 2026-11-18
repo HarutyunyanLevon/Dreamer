@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { api, type Card, type Link } from "../api";
+import type { Card, Link } from "../api";
 import type { Workspace } from "../state/useWorkspace";
 import { STAGES, STAGE_LABEL, type StageId } from "../theme/types";
 import { renderMarkdown } from "../util/markdown";
@@ -7,8 +7,12 @@ import { Modal } from "../ui/Modal";
 import { BranchCompare, branchGroup } from "./BranchCompare";
 import { IconClose, IconFork, IconTrash } from "./Icons";
 import { ScrollArea } from "../ui/Scroll";
+import { asUrl } from "../util/media";
+import { AttachmentsEditor, imageFiles } from "./Attachments";
+import { hasStage } from "./kinds";
 
-const RESERVED_FIELDS = new Set(["image", "url", "clip_title"]);
+/** Keys the app manages itself (legacy media keys, a label's size): hidden here, kept on save. */
+const RESERVED_FIELDS = new Set(["image", "url", "clip_title", "size"]);
 
 /** "+ More" open/closed is remembered per card (only meaningful once it holds values). */
 const moreKey = (id: string) => `dreamer.more.${id}`;
@@ -27,21 +31,70 @@ function writeMore(id: string, open: boolean) {
   }
 }
 
-export function CardEditor({ card, ws, onClose }: { card: Card; ws: Workspace; onClose: () => void }) {
-  const [title, setTitle] = useState(card.title);
-  const [stage, setStage] = useState<StageId>(card.stage);
-  const [body, setBody] = useState(card.body);
-  const [tags, setTags] = useState<string[]>(card.tags);
+/** Unsaved edits are kept as a draft when the editor switches to another card, and restored on reopen. */
+type Draft = { title: string; stage: StageId; body: string; tags: string[]; fields: [string, string][] };
+const draftKey = (id: string) => `dreamer.draft.${id}`;
+function readDraft(id: string): Draft | null {
+  try {
+    const raw = localStorage.getItem(draftKey(id));
+    return raw ? (JSON.parse(raw) as Draft) : null;
+  } catch {
+    return null;
+  }
+}
+function writeDraft(id: string, d: Draft | null) {
+  try {
+    if (d) localStorage.setItem(draftKey(id), JSON.stringify(d));
+    else localStorage.removeItem(draftKey(id));
+  } catch {
+    /* storage unavailable: the draft is lost */
+  }
+}
+const baseFields = (card: Card): [string, string][] =>
+  Object.entries(card.fields).filter(([k]) => !RESERVED_FIELDS.has(k)).map(([k, v]) => [k, String(v)]);
+
+export function CardEditor({
+  card,
+  ws,
+  onClose,
+  dirtyRef,
+  switchTo,
+  onSwitch,
+  onStay,
+}: {
+  card: Card;
+  ws: Workspace;
+  onClose: () => void;
+  /** Kept current with "has unsaved edits", for the host's chat-driven card switching. */
+  dirtyRef?: { current: boolean };
+  /** A chat link asked to open another card while this one has edits: show the inline confirm. */
+  switchTo?: { id: string; title: string } | null;
+  onSwitch?: (id: string) => void;
+  onStay?: () => void;
+}) {
+  const [init] = useState(() => readDraft(card.id));
+  const [title, setTitle] = useState(init?.title ?? card.title);
+  const [stage, setStage] = useState<StageId>(init?.stage ?? card.stage);
+  const [body, setBody] = useState(init?.body ?? card.body);
+  const [tags, setTags] = useState<string[]>(init?.tags ?? card.tags);
   const [tagInput, setTagInput] = useState("");
-  const [fields, setFields] = useState<[string, string][]>(
-    Object.entries(card.fields).filter(([k]) => !RESERVED_FIELDS.has(k)).map(([k, v]) => [k, String(v)]),
-  );
-  const [url, setUrl] = useState(typeof card.fields.url === "string" ? card.fields.url : "");
+  const [fields, setFields] = useState<[string, string][]>(init?.fields ?? baseFields(card));
+  const dirty =
+    title !== card.title ||
+    stage !== card.stage ||
+    body !== card.body ||
+    JSON.stringify(tags) !== JSON.stringify(card.tags) ||
+    JSON.stringify(fields) !== JSON.stringify(baseFields(card));
+  if (dirtyRef) dirtyRef.current = dirty;
+  useEffect(() => () => { if (dirtyRef) dirtyRef.current = false; }, [dirtyRef]);
+  /** Closing discards the edits (and any stored draft). */
+  const close = () => {
+    writeDraft(card.id, null);
+    onClose();
+  };
   const [preview, setPreview] = useState(false);
-  const [imageUrl, setImageUrl] = useState<string | null>(null);
   const [comparing, setComparing] = useState(false);
-  const [briefMsg, setBriefMsg] = useState<string | null>(null);
-  const hasExtras = fields.length > 0 || url.trim() !== "";
+  const hasExtras = fields.length > 0;
   const [moreOpen, setMoreOpen] = useState(() => hasExtras && readMore(card.id));
   const toggleMore = () => {
     const next = !moreOpen;
@@ -49,31 +102,8 @@ export function CardEditor({ card, ws, onClose }: { card: Card; ws: Workspace; o
     if (hasExtras || next) writeMore(card.id, next);
   };
   const group = branchGroup(card);
-
-  const exportBrief = async () => {
-    if (!ws.active) return;
-    try {
-      await persist();
-      const path = await api.exportBrief(ws.active, card.id);
-      setBriefMsg(`Exported to ${path}`);
-    } catch (e) {
-      setBriefMsg(e instanceof Error ? e.message : String(e));
-    }
-    setTimeout(() => setBriefMsg(null), 4000);
-  };
-
-  const imageRel = typeof card.fields.image === "string" ? card.fields.image : null;
-  useEffect(() => {
-    if (!imageRel || !ws.active) {
-      setImageUrl(null);
-      return;
-    }
-    let cancelled = false;
-    api.readMedia(ws.active, imageRel).then((u) => !cancelled && setImageUrl(u)).catch(() => {});
-    return () => {
-      cancelled = true;
-    };
-  }, [imageRel, ws.active]);
+  const staged = hasStage(card);
+  const isLabel = card.kind === "label";
 
   const byId = useMemo(() => new Map((ws.data?.cards ?? []).map((c) => [c.id, c])), [ws.data]);
 
@@ -84,39 +114,54 @@ export function CardEditor({ card, ws, onClose }: { card: Card; ws: Workspace; o
   };
 
   const persist = async () => {
-    const fieldsObj: Record<string, unknown> = {};
+    const fieldsObj: Record<string, unknown> = Object.fromEntries(Object.entries(card.fields).filter(([k]) => RESERVED_FIELDS.has(k)));
     for (const [k, v] of fields) if (k.trim()) fieldsObj[k.trim()] = v;
-    if (imageRel) fieldsObj.image = imageRel;
-    if (url.trim()) fieldsObj.url = url.trim();
-    if (typeof card.fields.clip_title === "string") fieldsObj.clip_title = card.fields.clip_title;
     await ws.updateCard(card.id, { title, stage, body, tags, fields: fieldsObj });
   };
 
   const save = async () => {
-    await persist();
-    onClose();
+    // An unchanged save of a Claude suggestion must not Keep it (editing a ghost keeps it).
+    if (dirty || !card.ghost) await persist();
+    close();
   };
 
-  const onPaste = async (e: React.ClipboardEvent) => {
-    const item = [...e.clipboardData.items].find((i) => i.type.startsWith("image/"));
-    if (!item) return;
-    const file = item.getAsFile();
-    if (!file) return;
-    e.preventDefault();
-    await ws.addImage(card.id, file, file.name || "pasted.png");
+  // Paste adds images; a pasted link becomes a web clip (except while typing in a text field).
+  const onPaste = (e: React.ClipboardEvent) => {
+    const files = imageFiles(e.clipboardData.items);
+    if (files.length) {
+      e.preventDefault();
+      void ws.addImages(card.id, files);
+      return;
+    }
+    const t = e.target as HTMLElement;
+    if (t.closest("input, textarea, [contenteditable]")) return;
+    const url = asUrl(e.clipboardData.getData("text/plain"));
+    if (url) {
+      e.preventDefault();
+      void ws.addClip(card.id, url);
+    }
   };
 
   return (
     <>
-      <Modal onClose={onClose} label={`Edit card ${title || "Untitled"}`} size="lg" placement="canvas" className="card-editor" onPaste={(e) => void onPaste(e)}>
+      <Modal onClose={close} label={`Edit card ${title || "Untitled"}`} size="lg" placement="canvas" className="card-editor" onPaste={onPaste}>
         <div className="modal-head">
           <input className="editor-title" value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Title" aria-label="Title" />
-          <button type="button" className="icon-btn" aria-label="Close" onClick={onClose}><IconClose /></button>
+          <button type="button" className="icon-btn" aria-label="Close" onClick={close}><IconClose /></button>
         </div>
 
+        {switchTo && (
+          <div className="switch-ask" role="alertdialog" aria-label="Switch card">
+            <span>Switch to “{switchTo.title || "Untitled"}”? Your edits stay as a draft.</span>
+            <button type="button" className="btn primary" onClick={() => { writeDraft(card.id, { title, stage, body, tags, fields }); onSwitch?.(switchTo.id); }}>Switch</button>
+            <button type="button" className="btn" onClick={onStay}>Stay</button>
+          </div>
+        )}
+
+        {(staged || group) && (
         <div className="editor-row">
           <div className="stage-filter" role="group" aria-label="Stage">
-            {STAGES.map((s) => (
+            {staged && STAGES.map((s) => (
               <button key={s} type="button" className={"filter" + (stage === s ? " on" : "")} aria-pressed={stage === s} onClick={() => setStage(s)}>
                 <span className={`dot dot-${s}`} aria-hidden="true" />
                 {STAGE_LABEL[s]}
@@ -129,16 +174,11 @@ export function CardEditor({ card, ws, onClose }: { card: Card; ws: Workspace; o
             )}
           </div>
         </div>
-
-        {imageUrl && (
-          <div className="editor-image">
-            <img src={imageUrl} alt="" />
-            <button type="button" className="btn" onClick={() => void ws.updateCard(card.id, { fields: { ...card.fields, image: undefined } })}>
-              Remove image
-            </button>
-          </div>
         )}
 
+        {!isLabel && <AttachmentsEditor card={card} ws={ws} />}
+
+        {!isLabel && (
         <div className="editor-row body-row">
           <div className="editor-row-head">
             <span className="side-label">Notes</span>
@@ -147,9 +187,10 @@ export function CardEditor({ card, ws, onClose }: { card: Card; ws: Workspace; o
           {preview ? (
             <ScrollArea className="md-preview" dangerouslySetInnerHTML={{ __html: renderMarkdown(body) }} />
           ) : (
-            <textarea className="editor-body scroll scroll-y" value={body} onChange={(e) => setBody(e.target.value)} placeholder="Paste an image, or write markdown notes…" aria-label="Notes" />
+            <textarea className="editor-body scroll scroll-y" value={body} onChange={(e) => setBody(e.target.value)} placeholder="Write markdown notes…" aria-label="Notes" />
           )}
         </div>
+        )}
 
         <div className="editor-row">
           <span className="side-label">Tags</span>
@@ -179,7 +220,7 @@ export function CardEditor({ card, ws, onClose }: { card: Card; ws: Workspace; o
         <div className="editor-row">
           <button type="button" className="chip more-toggle" aria-expanded={moreOpen} aria-controls="card-more" onClick={toggleMore}>
             {moreOpen ? "− Less" : "+ More"}
-            {!moreOpen && hasExtras && <span className="more-count">{fields.length + (url.trim() ? 1 : 0)}</span>}
+            {!moreOpen && hasExtras && <span className="more-count">{fields.length}</span>}
           </button>
         </div>
 
@@ -198,11 +239,6 @@ export function CardEditor({ card, ws, onClose }: { card: Card; ws: Workspace; o
           <button type="button" className="chip" onClick={() => setFields([...fields, ["", ""]])}>+ Field</button>
         </div>
 
-        <div className="editor-row">
-          <span className="side-label">Web clip URL</span>
-          <p className="helper">A link to the web page this card is a clip of.</p>
-          <input className="name-input" value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://…" aria-label="Web clip URL" />
-        </div>
         </div>
         )}
 
@@ -215,24 +251,14 @@ export function CardEditor({ card, ws, onClose }: { card: Card; ws: Workspace; o
           </div>
         )}
 
-        {briefMsg && <p className="chat-sub">{briefMsg}</p>}
         <div className="editor-actions">
-          <button type="button" className="btn" onClick={() => void ws.deleteCard(card.id).then(onClose)}><IconTrash /><span>Delete</span></button>
-          <button
-            type="button"
-            className="btn"
-            disabled={stage !== "pitch"}
-            title={stage !== "pitch" ? "Unlocks when the card reaches Pitch" : "Export a Markdown design brief"}
-            onClick={() => void exportBrief()}
-          >
-            Export brief
-          </button>
+          <button type="button" className="btn" onClick={() => void ws.deleteCard(card.id).then(close)}><IconTrash /><span>Delete</span></button>
           <div className="side-spacer" />
-          <button type="button" className="btn" onClick={onClose}>Cancel</button>
+          <button type="button" className="btn" onClick={close}>Cancel</button>
           <button type="button" className="btn primary" onClick={() => void save()}>Save</button>
         </div>
       </Modal>
-      {comparing && <BranchCompare card={card} ws={ws} onClose={() => { setComparing(false); onClose(); }} />}
+      {comparing && <BranchCompare card={card} ws={ws} onClose={() => { setComparing(false); close(); }} />}
     </>
   );
 }

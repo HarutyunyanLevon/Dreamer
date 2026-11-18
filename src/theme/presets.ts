@@ -12,7 +12,7 @@ const D2_SHADER: Omit<ShaderParams, "palette"> = {
   scale: 0.16,
 };
 
-const STAGES_D2 = { cloud: "#c9d3f5", sketch: "#8fa8f2", draft: "#f0a0c0", pitch: "#ffbf80" };
+const STAGES_D2 = { mist: "#c9d3f5", reverie: "#8fa8f2", lucid: "#f0a0c0", dream: "#ffbf80" };
 
 export const PEARL_GLOW: Theme = {
   id: "pearl-glow",
@@ -49,7 +49,7 @@ export const COOL_PEARL: Theme = {
     glass: 0.5,
     fallbackBg: "#e3f1fb",
   },
-  stages: { cloud: "#bcd6ee", sketch: "#7fb2e0", draft: "#a9a2ea", pitch: "#ffc874" },
+  stages: { mist: "#bcd6ee", reverie: "#7fb2e0", lucid: "#a9a2ea", dream: "#ffc874" },
 };
 
 export const GOLD_SKY: Theme = {
@@ -72,7 +72,7 @@ export const GOLD_SKY: Theme = {
     glass: 0.52,
     fallbackBg: "#d6e6ea",
   },
-  stages: { cloud: "#bcd0dc", sketch: "#8fb0c9", draft: "#e2b86a", pitch: "#ffcf6e" },
+  stages: { mist: "#bcd0dc", reverie: "#8fb0c9", lucid: "#e2b86a", dream: "#ffcf6e" },
 };
 
 export const IRIDESCENT: Theme = {
@@ -95,7 +95,7 @@ export const IRIDESCENT: Theme = {
     glass: 0.5,
     fallbackBg: "#ece6fb",
   },
-  stages: { cloud: "#cfd3f5", sketch: "#8fb8ee", draft: "#f0a0c8", pitch: "#ffc080" },
+  stages: { mist: "#cfd3f5", reverie: "#8fb8ee", lucid: "#f0a0c8", dream: "#ffc080" },
 };
 
 export const BUILTIN_THEMES: Theme[] = [PEARL_GLOW, COOL_PEARL, GOLD_SKY, IRIDESCENT];

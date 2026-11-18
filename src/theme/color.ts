@@ -40,7 +40,7 @@ export function rgbToHex([r, g, b]: RGB): string {
 /**
  * A stage's card border colour: the theme's stage colour, deepened toward `ink` in 5% steps only
  * as far as needed to reach `min` contrast against the card surface it borders (WCAG 1.4.11 asks
- * 3:1 for UI component boundaries). Pale stage colours (Cloud) get the most ink; strong ones stay
+ * 3:1 for UI component boundaries). Pale stage colours (Mist) get the most ink; strong ones stay
  * as they are.
  */
 export function stageBorder(stageHex: string, inkHex: string, surface: RGB, min = 3): string {

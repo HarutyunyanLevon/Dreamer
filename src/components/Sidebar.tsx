@@ -1,8 +1,9 @@
-import { useEffect, useRef, useState } from "react";
-import { api, type ProjectSummary } from "../api";
+import { useEffect, useRef, useState, type HTMLAttributes } from "react";
+import { api, type Folder, type ProjectSummary } from "../api";
+import { folderName, type Workspace } from "../state/useWorkspace";
 import { Modal } from "../ui/Modal";
 import { useTheme } from "../theme/ThemeContext";
-import { IconFolder, IconInbox, IconPlus, IconPower, IconTrash } from "./Icons";
+import { IconDoc, IconFolder, IconInbox, IconPlus, IconPower, IconTrash } from "./Icons";
 import { ThemeEditor } from "./ThemeEditor";
 import { ScrollArea } from "../ui/Scroll";
 
@@ -13,9 +14,20 @@ interface Props {
   /** Resolves to null on success, or the error text to show under the name field. */
   onCreate: (name: string) => Promise<string | null>;
   onDelete: (slug: string) => void;
+  /** The active project's Design view (handoff pack versions) is open. */
+  designOpen: boolean;
+  onOpenDesign: () => void;
+  /** The Memory modal is open for the active project. */
+  memoryOpen: boolean;
+  onOpenMemory: () => void;
+  /** Pointer handlers of the width drag handle (usePanels().resize.left). */
+  resize: HTMLAttributes<HTMLDivElement>;
+  /** For the active project's folder tree. */
+  ws: Workspace;
 }
 
-export function Sidebar({ projects, active, onSelect, onCreate, onDelete }: Props) {
+export function Sidebar({ projects, active, onSelect, onCreate, onDelete, designOpen, onOpenDesign, memoryOpen, onOpenMemory, resize, ws }: Props) {
+  const tree = useFolderTree(ws);
   const [deleting, setDeleting] = useState<ProjectSummary | null>(null);
   const { themes, theme, setThemeId } = useTheme();
   const [naming, setNaming] = useState(false);
@@ -75,6 +87,7 @@ export function Sidebar({ projects, active, onSelect, onCreate, onDelete }: Prop
 
   return (
     <aside id="projects-panel" className="glass sidebar" aria-label="Projects" data-wheel-boundary="">
+      <div className="panel-resize" role="separator" aria-orientation="vertical" aria-label="Resize projects panel" title="Drag to resize, double-click to reset" {...resize} />
       <div className="wordmark">Dreamer</div>
 
       <div className="side-label">Projects</div>
@@ -82,11 +95,31 @@ export function Sidebar({ projects, active, onSelect, onCreate, onDelete }: Prop
         {projects.map((p) => (
           <div key={p.slug} className={"side-row-wrap" + (p.slug === active ? " active" : "")}>
             <button
-              className={"side-row" + (p.slug === active ? " active" : "")}
+              className={"side-row" + (p.slug === active ? " active" : "") + (p.slug === active && tree.over === "root" ? " drop-hover-ext" : "")}
               type="button"
-              aria-current={p.slug === active ? "true" : undefined}
-              onClick={() => onSelect(p.slug)}
+              aria-current={p.slug === active && !ws.folder ? "true" : undefined}
+              data-drop-folder={p.slug === active ? "root" : undefined}
+              data-drop-project={p.slug}
+              onClick={() => {
+                if (p.slug !== active) return onSelect(p.slug);
+                ws.setDesignOpen(false);
+                ws.openFolder(null);
+              }}
+              {...(p.slug === active ? tree.dropProps(null) : {})}
             >
+              {p.slug === active && tree.has ? (
+                <span
+                  className={"tree-chev" + (tree.collapsed.has(ROOT_KEY) ? "" : " open")}
+                  role="button"
+                  aria-label={tree.collapsed.has(ROOT_KEY) ? "Show folders" : "Hide folders"}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    tree.toggle(ROOT_KEY);
+                  }}
+                >
+                  ›
+                </span>
+              ) : null}
               {p.is_inbox ? <IconInbox /> : <IconFolder />}
               <span>{p.name}</span>
               {p.is_inbox && p.card_count > 0 && (
@@ -95,9 +128,44 @@ export function Sidebar({ projects, active, onSelect, onCreate, onDelete }: Prop
                 </span>
               )}
             </button>
+            {p.slug === active && tree.has && !tree.collapsed.has(ROOT_KEY) && <FolderRows tree={tree} ws={ws} parent={null} depth={1} />}
             {!p.is_inbox && (
               <button type="button" className="icon-btn side-delete" aria-label={`Delete project ${p.name}`} title="Delete project" onClick={() => setDeleting(p)}>
                 <IconTrash />
+              </button>
+            )}
+            {p.slug === active && !p.is_inbox && (
+              <button
+                type="button"
+                className={"side-row side-sub" + (memoryOpen ? " active" : "")}
+                aria-current={memoryOpen ? "true" : undefined}
+                title="What Dreamer remembers about this project (read by Claude, kept up to date from your decisions)"
+                onClick={onOpenMemory}
+              >
+                <IconDoc />
+                <span>Memory</span>
+              </button>
+            )}
+            {p.slug === active && (
+              <button
+                type="button"
+                className={"side-row side-sub" + (designOpen ? " active" : "")}
+                aria-current={designOpen ? "true" : undefined}
+                title="Design docs written from this project (handoff pack)"
+                onClick={onOpenDesign}
+              >
+                <IconDoc />
+                <span>Design</span>
+                {(p.design_versions ?? 0) > 0 && (
+                  <span className="badge" aria-label={`${p.design_versions} version${p.design_versions === 1 ? "" : "s"}`}>
+                    {p.design_versions}
+                  </span>
+                )}
+                {(p.open_questions ?? 0) > 0 && (
+                  <span className="badge badge-alert" title="Unanswered questions from Claude Code" aria-label={`${p.open_questions} unanswered question${p.open_questions === 1 ? "" : "s"} from Claude Code`}>
+                    {p.open_questions}?
+                  </span>
+                )}
               </button>
             )}
           </div>
@@ -201,6 +269,110 @@ export function Sidebar({ projects, active, onSelect, onCreate, onDelete }: Prop
   );
 }
 
+const ROOT_KEY = "__project";
+const DRAG_TYPE = "application/x-dreamer-folder";
+
+/** Collapse state (localStorage, per project) and drag-to-re-parent for the folder tree. */
+function useFolderTree(ws: Workspace) {
+  const slug = ws.active ?? "";
+  const key = `dreamer.folderTree.${slug}`;
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  const [over, setOver] = useState<string | null>(null);
+  useEffect(() => {
+    try {
+      setCollapsed(new Set(JSON.parse(localStorage.getItem(key) ?? "[]") as string[]));
+    } catch {
+      setCollapsed(new Set());
+    }
+  }, [key]);
+  const toggle = (id: string) =>
+    setCollapsed((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      try {
+        localStorage.setItem(key, JSON.stringify([...next]));
+      } catch {
+        /* storage unavailable: the tree just won't remember */
+      }
+      return next;
+    });
+  const d = ws.data;
+  const folders: Folder[] = d?.folders ?? [];
+  /** HTML drag of a folder row onto another folder (or the project row = the root). */
+  const dropProps = (target: string | null) => ({
+    onDragOver: (e: React.DragEvent) => {
+      if (!e.dataTransfer.types.includes(DRAG_TYPE)) return;
+      e.preventDefault();
+      setOver(target ?? "root");
+    },
+    onDragLeave: () => setOver((o) => (o === (target ?? "root") ? null : o)),
+    onDrop: (e: React.DragEvent) => {
+      const id = e.dataTransfer.getData(DRAG_TYPE);
+      setOver(null);
+      if (!id || id === target) return;
+      e.preventDefault();
+      ws.reparentFolder(id, target);
+    },
+  });
+  return { collapsed, toggle, folders, has: folders.length > 0, over, setOver, dropProps, count: (id: string) => Object.keys(d?.canvases[id]?.cards ?? {}).length };
+}
+
+function FolderRows({ tree, ws, parent, depth }: { tree: ReturnType<typeof useFolderTree>; ws: Workspace; parent: string | null; depth: number }) {
+  const kids = tree.folders.filter((f) => f.parent === parent).sort((a, b) => folderName(a).localeCompare(folderName(b)));
+  if (!kids.length) return null;
+  return (
+    <div role="group">
+      {kids.map((f) => {
+        const hasKids = tree.folders.some((x) => x.parent === f.id);
+        const open = !tree.collapsed.has(f.id);
+        const n = tree.count(f.id);
+        return (
+          <div key={f.id}>
+            <button
+              type="button"
+              className={"side-row side-folder" + (ws.folder === f.id ? " active" : "") + (tree.over === f.id ? " drop-hover-ext" : "")}
+              style={{ paddingLeft: 10 + depth * 12 }}
+              aria-current={ws.folder === f.id ? "true" : undefined}
+              aria-expanded={hasKids ? open : undefined}
+              title={`Open ${folderName(f)} · drag onto another folder to move it`}
+              data-drop-folder={f.id}
+              data-drop-project={ws.active ?? undefined}
+              draggable
+              onDragStart={(e) => {
+                e.dataTransfer.setData(DRAG_TYPE, f.id);
+                e.dataTransfer.effectAllowed = "move";
+              }}
+              onClick={() => {
+                ws.setDesignOpen(false);
+                ws.openFolder(f.id);
+              }}
+              {...tree.dropProps(f.id)}
+            >
+              <span
+                className={"tree-chev" + (open ? " open" : "") + (hasKids ? "" : " none")}
+                role={hasKids ? "button" : undefined}
+                aria-label={hasKids ? (open ? "Collapse" : "Expand") : undefined}
+                onClick={(e) => {
+                  if (!hasKids) return;
+                  e.stopPropagation();
+                  tree.toggle(f.id);
+                }}
+              >
+                ›
+              </span>
+              <IconFolder />
+              <span>{folderName(f)}</span>
+              {n > 0 && <span className="badge" aria-label={`${n} card${n === 1 ? "" : "s"}`}>{n}</span>}
+            </button>
+            {hasKids && open && <FolderRows tree={tree} ws={ws} parent={f.id} depth={depth + 1} />}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 /** "Are you sure?" for deleting a project. Says plainly that the folder leaves the disk. */
 function DeleteProjectDialog({ project, onCancel, onConfirm }: { project: ProjectSummary; onCancel: () => void; onConfirm: () => void }) {
   const [root, setRoot] = useState<string | null>(null);
@@ -214,7 +386,7 @@ function DeleteProjectDialog({ project, onCancel, onConfirm }: { project: Projec
     <Modal onClose={onCancel} label={`Delete project ${project.name}`} size="sm">
       <h3 className="dialog-title">Delete “{project.name}”?</h3>
       <p>
-        This removes the project&apos;s files from disk: its {n} card{n === 1 ? "" : "s"}, canvas, media, briefs, trash and chats.
+        This removes the project&apos;s files from disk: its {n} card{n === 1 ? "" : "s"}, canvas, media, design versions, trash and chats.
       </p>
       <code className="dialog-path">{folder}</code>
       <p className="chat-sub">The folder is moved to the Recycle Bin, where you can restore it. If that isn&apos;t possible, it is deleted permanently. This can&apos;t be undone from inside Dreamer.</p>

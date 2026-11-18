@@ -4,7 +4,7 @@ import type { Workspace } from "../state/useWorkspace";
 import { STAGE_LABEL } from "../theme/types";
 import { Modal } from "../ui/Modal";
 import { ScrollArea } from "../ui/Scroll";
-import { IconClose, IconTrash } from "./Icons";
+import { IconClose, IconFolder, IconTrash } from "./Icons";
 
 export function TrashView({ ws, onClose }: { ws: Workspace; onClose: () => void }) {
   const [items, setItems] = useState<TrashItem[]>([]);
@@ -41,10 +41,10 @@ export function TrashView({ ws, onClose }: { ws: Workspace; onClose: () => void 
         <ScrollArea className="trash-list">
           {items.map((item) => (
             <div key={item.id} className="trash-row">
-              <span className={`dot dot-${item.stage}`} aria-hidden="true" />
+              {item.kind === "folder" ? <IconFolder /> : <span className={`dot dot-${item.stage}`} aria-hidden="true" />}
               <div className="trash-row-info">
                 <div className="trash-title">{item.title}</div>
-                <div className="chat-sub">{STAGE_LABEL[item.stage]} · {item.reason}</div>
+                <div className="chat-sub">{item.kind === "folder" ? `Folder with ${item.count ?? 0} card${item.count === 1 ? "" : "s"}` : STAGE_LABEL[item.stage]} · {item.reason}</div>
               </div>
               <button type="button" className="btn" onClick={() => void restore(item.id)}>Restore</button>
             </div>

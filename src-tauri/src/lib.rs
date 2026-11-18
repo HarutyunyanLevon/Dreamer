@@ -1,10 +1,19 @@
 mod claude_setup;
+mod clip;
 mod commands;
+mod ctx;
 mod error;
+mod handoff;
+mod memory;
 mod model;
+mod ollama;
+mod organize;
 mod proc_guard;
+mod questions;
+mod router;
 mod search;
 mod sidecar;
+mod sidecar_log;
 mod state;
 mod storage;
 mod watcher;
@@ -88,16 +97,69 @@ fn show_capture_window(app: &AppHandle) {
     }
 }
 
+/// Shows the main window, creating it on first use. It isn't in tauri.conf.json: an autostart
+/// boot (tray + hotkey only) must not pay for the webview, the shader or the file watcher.
 fn show_main_window(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
+        let _ = w.unminimize();
         let _ = w.show();
         let _ = w.set_focus();
+        return;
     }
+    let built = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
+        .title("Dreamer")
+        .inner_size(1440.0, 900.0)
+        .min_inner_size(1100.0, 600.0)
+        .build();
+    let Ok(w) = built else { return };
+    // Heavy work starts with the first show: file watcher and QUESTIONS.md import.
+    app.state::<state::AppState>().refresh_questions(app, true);
+
+    // Minimize to tray: closing the main window hides it instead of quitting the app. The
+    // first time, the page shows a one-time notice instead (keep running / quit), so the
+    // tray behaviour is discoverable; a second X while it's showing just hides.
+    let handle = w.clone();
+    w.on_window_event(move |event| {
+        if let WindowEvent::CloseRequested { api, .. } = event {
+            api.prevent_close();
+            let seen = handle
+                .state::<state::AppState>()
+                .ws
+                .lock()
+                .ok()
+                .and_then(|ws| ws.get_settings().ok())
+                .map(|s| s.tray_notice_shown)
+                .unwrap_or(true);
+            if !seen && !TRAY_NOTICE_PENDING.swap(true, Ordering::SeqCst) {
+                let _ = handle.emit("tray-notice", ());
+            } else {
+                hide_to_tray(handle.app_handle());
+            }
+        }
+    });
+}
+
+/// Launched by the Windows Run entry (not by the user opening the app).
+fn is_autostart_launch() -> bool {
+    std::env::args().any(|a| a == "--autostart")
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // One taskbar identity for the pinned shortcut, the window and the tray, however the app was
+    // launched (Start menu, pin, autostart Run entry): the identifier, which the NSIS installer
+    // also stamps on the Start menu shortcut.
+    #[cfg(windows)]
+    {
+        let id: Vec<u16> = "app.dreamer.desktop".encode_utf16().chain(std::iter::once(0)).collect();
+        unsafe { windows_sys::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID(id.as_ptr()) };
+    }
     tauri::Builder::default()
+        // A second launch (Start menu, double-click) just shows the running instance's window.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| show_main_window(app)))
+        .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, Some(vec!["--autostart"])))
+        // Only used from Rust (the handoff folder picker); no dialog permission for the UI.
+        .plugin(tauri_plugin_dialog::init())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, _shortcut, event| {
@@ -121,34 +183,30 @@ pub fn run() {
                 "quit" => quit(app),
                 _ => {}
             });
-            if let Some(icon) = app.default_window_icon() {
-                tray = tray.icon(icon.clone());
-            }
+            // Simplified pearl (icons/tray.svg) that stays legible at 16px.
+            tray = tray.icon(tauri::include_image!("icons/tray.png")).tooltip("Dreamer");
             tray.build(app)?;
 
-            // Minimize to tray: closing the main window hides it instead of quitting the app. The
-            // first time, the page shows a one-time notice instead (keep running / quit), so the
-            // tray behaviour is discoverable; a second X while it's showing just hides.
-            if let Some(w) = app.get_webview_window("main") {
-                let handle = w.clone();
-                w.on_window_event(move |event| {
-                    if let WindowEvent::CloseRequested { api, .. } = event {
-                        api.prevent_close();
-                        let seen = handle
-                            .state::<state::AppState>()
-                            .ws
-                            .lock()
-                            .ok()
-                            .and_then(|ws| ws.get_settings().ok())
-                            .map(|s| s.tray_notice_shown)
-                            .unwrap_or(true);
-                        if !seen && !TRAY_NOTICE_PENDING.swap(true, Ordering::SeqCst) {
-                            let _ = handle.emit("tray-notice", ());
-                        } else {
-                            hide_to_tray(handle.app_handle());
-                        }
-                    }
-                });
+            // Keep the Run entry in step with the setting (first run, reinstalls). Never in debug
+            // builds, so `tauri dev` doesn't register the dev exe.
+            let settings = app.state::<state::AppState>().ws.lock().ok().and_then(|ws| ws.get_settings().ok());
+            #[cfg(not(debug_assertions))]
+            if settings.as_ref().is_none_or(|s| s.start_with_windows) {
+                use tauri_plugin_autostart::ManagerExt;
+                let al = app.autolaunch();
+                if !al.is_enabled().unwrap_or(true) {
+                    let _ = al.enable();
+                }
+            }
+            if is_autostart_launch() {
+                // Autostart never shows the one-time "still in the tray" notice.
+                if let Ok(ws) = app.state::<state::AppState>().ws.lock() {
+                    let _ = ws.update_settings(model::SettingsPatch { tray_notice_shown: Some(true), ..Default::default() });
+                }
+            }
+            let hidden = is_autostart_launch() && settings.as_ref().is_none_or(|s| s.start_hidden);
+            if !hidden {
+                show_main_window(app.handle());
             }
             Ok(())
         })
@@ -162,6 +220,8 @@ pub fn run() {
             commands::update_project,
             commands::load_project,
             commands::save_canvas,
+            commands::save_layout,
+            commands::delete_folder,
             commands::create_card,
             commands::read_card,
             commands::update_card,
@@ -171,16 +231,33 @@ pub fn run() {
             commands::restore_card,
             commands::empty_trash,
             commands::save_media,
+            commands::add_attachment,
+            commands::update_attachment,
+            commands::remove_attachment,
+            commands::reorder_attachments,
             commands::read_media,
+            commands::fetch_clip,
+            commands::refresh_clip,
+            commands::open_url,
             commands::claude_status,
             commands::claude_install,
             commands::claude_login,
             commands::claude_setup_cancel,
             commands::claude_open_login_url,
             commands::claude_send,
+            commands::ollama_status,
+            commands::ollama_pull,
+            commands::ollama_cancel,
+            commands::ollama_open_installer,
             commands::claude_interrupt,
-            commands::export_brief,
             commands::search_cards,
+            commands::handoff_start,
+            commands::handoff_cancel,
+            commands::list_design_versions,
+            commands::read_design_doc,
+            commands::open_design_folder,
+            commands::open_logs_folder,
+            commands::pick_folder,
             commands::delete_project,
             commands::load_chat,
             commands::save_chat,
@@ -188,8 +265,18 @@ pub fn run() {
             commands::list_custom_themes,
             commands::save_custom_theme,
             commands::delete_custom_theme,
+            commands::dismiss_proposal,
+            commands::restore_proposal,
+            commands::memory_get,
+            commands::memory_save,
+            commands::memory_history,
+            commands::memory_revert,
+            commands::memory_undo,
+            commands::memory_seed,
             commands::quit_app,
             commands::hide_to_tray,
+            commands::autostart_enabled,
+            commands::set_autostart,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Dreamer")

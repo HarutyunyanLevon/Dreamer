@@ -30,8 +30,14 @@ pub fn classify(root: &Path, path: &Path) -> Option<ChangeEvent> {
     // <project>/chats/*.json is written by the chat panel itself on every turn; reloading the
     // canvas (and re-statting the search index) for those writes would be pure churn.
     let chats_at = if first == "inbox" { 1 } else { 2 };
-    if parts.get(chats_at).is_some_and(|p| p == "chats") && parts.len() > chats_at + 1 {
+    // design/ (handoff pack versions) is written only by Dreamer itself, which tells the UI when a
+    // version is done; a canvas reload per copied asset would be churn too.
+    if parts.get(chats_at).is_some_and(|p| p == "chats" || p == "design") && parts.len() > chats_at + 1 {
         return None;
+    }
+    // memory.md and its log: only the Memory modal cares, not the canvas.
+    if parts.len() == chats_at + 1 && parts.last().is_some_and(|f| f == "memory.md" || f == "memory.log.jsonl") {
+        return Some(ChangeEvent { scope: "memory".into(), project: Some(if first == "inbox" { "inbox".into() } else { parts.get(1)?.clone() }) });
     }
     match first.as_str() {
         "workspace.json" => Some(ChangeEvent { scope: "settings".into(), project: None }),
@@ -42,12 +48,25 @@ pub fn classify(root: &Path, path: &Path) -> Option<ChangeEvent> {
     }
 }
 
-/// Start watching `root`. `on_change` receives de-duplicated events, at most one burst per ~250ms.
-pub fn start(root: PathBuf, on_change: impl Fn(Vec<ChangeEvent>) + Send + 'static) -> Result<WatchHandle, String> {
+/// `QUESTIONS.md` of a project's handoff repo, if `path` is it.
+fn question_event(targets: &[(String, PathBuf)], path: &Path) -> Option<ChangeEvent> {
+    if path.file_name().is_none_or(|n| n != "QUESTIONS.md") {
+        return None;
+    }
+    targets
+        .iter()
+        .find(|(_, file)| path == file.as_path())
+        .map(|(slug, _)| ChangeEvent { scope: "questions".into(), project: Some(slug.clone()) })
+}
+
+/// Start watching `root`, plus the `QUESTIONS.md` files in `questions` (project slug, file path;
+/// they live in other repos). `on_change` receives de-duplicated events, at most one burst per ~250ms.
+pub fn start(root: PathBuf, questions: Vec<(String, PathBuf)>, on_change: impl Fn(Vec<ChangeEvent>) + Send + 'static) -> Result<WatchHandle, String> {
     let watch_root = root.clone();
+    let targets = questions.clone();
     let mut debouncer = new_debouncer(Duration::from_millis(250), move |res: DebounceEventResult| {
         if let Ok(events) = res {
-            let set: HashSet<ChangeEvent> = events.iter().filter_map(|e| classify(&root, &e.path)).collect();
+            let set: HashSet<ChangeEvent> = events.iter().filter_map(|e| classify(&root, &e.path).or_else(|| question_event(&targets, &e.path))).collect();
             if !set.is_empty() {
                 on_change(set.into_iter().collect());
             }
@@ -55,6 +74,14 @@ pub fn start(root: PathBuf, on_change: impl Fn(Vec<ChangeEvent>) + Send + 'stati
     })
     .map_err(|e| e.to_string())?;
     debouncer.watcher().watch(&watch_root, RecursiveMode::Recursive).map_err(|e| e.to_string())?;
+    for (_, file) in &questions {
+        // The folder (not the file) so a rewrite by rename is seen; a missing folder is skipped.
+        if let Some(dir) = file.parent().filter(|d| d.is_dir()) {
+            if let Err(e) = debouncer.watcher().watch(dir, RecursiveMode::NonRecursive) {
+                eprintln!("[dreamer] cannot watch {}: {e}", dir.display());
+            }
+        }
+    }
     Ok(debouncer)
 }
 
@@ -75,7 +102,10 @@ mod tests {
         assert_eq!(ev("/w/projects/fish/.git/HEAD"), None);
         assert_eq!(ev("/elsewhere/x"), None);
         assert_eq!(ev("/w/inbox/chats/01A.json"), None);
+        assert_eq!(ev("/w/projects/fish/memory.md"), Some(ChangeEvent { scope: "memory".into(), project: Some("fish".into()) }));
+        assert_eq!(ev("/w/projects/fish/memory.log.jsonl").unwrap().scope, "memory");
         assert_eq!(ev("/w/projects/fish/chats/project.json"), None);
+        assert_eq!(ev("/w/projects/fish/design/v1/01-gdd.md"), None);
         // A project whose slug is "chats" is still a real change.
         assert!(ev("/w/projects/chats/cards/01A.md").is_some());
         // Deleting a whole project folder still reports that project.
@@ -89,7 +119,7 @@ mod tests {
         let root = dir.path().canonicalize().unwrap();
         std::fs::create_dir_all(root.join("inbox/cards")).unwrap();
         let (tx, rx) = channel();
-        let _w = start(root.clone(), move |events| {
+        let _w = start(root.clone(), Vec::new(), move |events| {
             let _ = tx.send(events);
         })
         .unwrap();

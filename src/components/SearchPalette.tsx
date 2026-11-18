@@ -3,6 +3,7 @@ import { api, type SearchHit } from "../api";
 import type { Workspace } from "../state/useWorkspace";
 import { Modal } from "../ui/Modal";
 import { ScrollArea } from "../ui/Scroll";
+import { KIND_LABEL } from "./kinds";
 
 const DEBOUNCE_MS = 100;
 
@@ -45,8 +46,16 @@ export function SearchPalette({ ws, onClose }: { ws: Workspace; onClose: () => v
     listRef.current?.querySelector<HTMLElement>(`[data-i="${cursor}"]`)?.scrollIntoView({ block: "nearest" });
   }, [cursor]);
 
+  // In linking mode a hit in this project completes the link, wherever its folder is.
+  const linking = ws.linkMode && ws.linkFrom ? ws.linkFrom : null;
   const open = (h: SearchHit) => {
     onClose();
+    if (linking && h.project === ws.active && h.id !== linking) {
+      ws.addLink(linking, h.id);
+      ws.setLinking(false);
+      ws.toast(`Linked to “${h.title || "Untitled"}”${h.folder_path ? ` in ${h.folder_path}` : ""}.`);
+      return;
+    }
     void ws.focusCard(h.id, h.project);
   };
 
@@ -57,7 +66,7 @@ export function SearchPalette({ ws, onClose }: { ws: Workspace; onClose: () => v
             className="name-input palette-input"
             autoFocus
             value={query}
-            placeholder="Search cards…"
+            placeholder={linking ? "Link to which card?" : "Search cards…"}
             aria-label="Search cards"
             aria-controls="palette-results"
             aria-activedescendant={hits[cursor] ? `palette-hit-${cursor}` : undefined}
@@ -100,10 +109,10 @@ export function SearchPalette({ ws, onClose }: { ws: Workspace; onClose: () => v
                 onClick={() => open(h)}
               >
                 <div className="palette-hit-head">
-                  <span className={`dot dot-${h.stage}`} aria-hidden="true" />
-                  <span className="palette-hit-title">{h.title}</span>
+                  {!h.kind || h.kind === "card" ? <span className={`dot dot-${h.stage}`} aria-hidden="true" /> : <span className="palette-kind">{KIND_LABEL[h.kind]}</span>}
+                  <span className="palette-hit-title">{h.title || "Untitled"}</span>
                   {h.ghost && <span className="palette-badge">suggestion</span>}
-                  <span className="palette-hit-proj">{h.project_name}</span>
+                  <span className="palette-hit-proj">{h.folder_path ? `${h.project_name} › ${h.folder_path.split(" / ").join(" › ")}` : h.project_name}</span>
                 </div>
                 {h.snippet && <div className="palette-snippet">{h.snippet}</div>}
                 {h.tags.length > 0 && <div className="palette-tags">{h.tags.map((t) => `#${t}`).join(" ")}</div>}
@@ -111,7 +120,7 @@ export function SearchPalette({ ws, onClose }: { ws: Workspace; onClose: () => v
             ))}
           </ScrollArea>
         )}
-        <div className="palette-foot chat-sub">↑↓ to move · Enter to open · Esc to close</div>
+        <div className="palette-foot chat-sub">↑↓ to move · Enter to {linking ? "link to it" : "open"} · Esc to close</div>
     </Modal>
   );
 }

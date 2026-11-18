@@ -6,7 +6,7 @@ import { IconClose } from "./Icons";
 /**
  * The always-on-top "Catch a thought" popup, opened by the global hotkey.
  *
- * - Add (or Enter) creates an Inbox Cloud card and closes the popup at once. If creating fails,
+ * - Add (or Enter) creates an Inbox Mist card and closes the popup at once. If creating fails,
  *   the popup stays open with the error and the text, so nothing is lost.
  * - X, Esc, and clicking anywhere outside (the window losing focus, handled in Rust) close it and
  *   discard the text. The window is hidden, not destroyed, so the next hotkey opens it instantly,
@@ -55,7 +55,7 @@ export function CaptureWindow() {
     setBusy(true);
     setError(null);
     try {
-      await invoke("create_card", { slug: "inbox", card: { title, stage: "cloud" } });
+      await invoke("create_card", { slug: "inbox", card: { title, stage: "mist" } });
       close();
     } catch (e) {
       setError(`Couldn't add it: ${e instanceof Error ? e.message : String(e)}`);
@@ -103,7 +103,7 @@ export function CaptureWindow() {
           placeholder="What's the idea?"
         />
         <div className="capture-foot">
-          <span className="capture-hint">{error ? "" : "Lands in your Inbox as a Cloud card."}</span>
+          <span className="capture-hint">{error ? "" : "Lands in your Inbox as a Mist card."}</span>
           <button type="button" className="btn primary" disabled={!text.trim() || busy} onClick={() => void add()} title="Add to the Inbox (Enter)">
             Add
           </button>

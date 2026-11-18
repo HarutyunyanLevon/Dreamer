@@ -4,7 +4,6 @@ import { checkTheme } from "../theme/contrast";
 import { useTheme } from "../theme/ThemeContext";
 import { STAGES, STAGE_LABEL, type StageId, type Theme } from "../theme/types";
 import { Modal } from "../ui/Modal";
-import { CloudEdge } from "./CardEdge";
 import { IconClose, IconTrash } from "./Icons";
 
 function slugifyId(name: string): string {
@@ -155,7 +154,6 @@ function ThemePreview({ theme, warnings }: { theme: Theme; warnings: { label: st
       <div className="preview-cards">
         {STAGES.map((s) => (
           <div key={s} className={`card stage-${s}`}>
-            {s === "cloud" && <CloudEdge seed="preview" />}
             <div className="card-head">
               <span className={`dot dot-${s}`} aria-hidden="true" />
               <span className="stage-name">{STAGE_LABEL[s]}</span>
@@ -164,7 +162,7 @@ function ThemePreview({ theme, warnings }: { theme: Theme; warnings: { label: st
             <p className="card-body">A line of notes with a <a>link</a>.</p>
           </div>
         ))}
-        <div className="card ghost stage-cloud">
+        <div className="card ghost stage-mist">
           <div className="ghost-label">Claude suggests</div>
           <h3>Ghost card</h3>
         </div>

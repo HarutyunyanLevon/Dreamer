@@ -9,7 +9,7 @@
 //! Ranking is weighted keyword scoring: title > tags > fields > body, case- and
 //! accent-insensitive, with light suffix stemming (s/es/ing/ed).
 
-use crate::model::{Card, Link, ProjectMeta, Stage};
+use crate::model::{Attachment, Card, CardKind, Link, ProjectMeta, Stage};
 use crate::storage::{check_slug, parse_card, INBOX_SLUG};
 use serde::Serialize;
 use serde_json::Value;
@@ -143,6 +143,24 @@ impl Doc {
             }
             field_text(v, &mut ft);
         }
+        // Checklist items (and their answers) and attachment captions / clip titles count as fields.
+        for it in &card.meta.items {
+            ft.push(it.text.clone());
+            if let Some(a) = it.answer.as_deref().filter(|a| !a.trim().is_empty()) {
+                ft.push(a.to_string());
+            }
+        }
+        for a in &card.meta.attachments {
+            match a {
+                Attachment::Image { caption, .. } => ft.extend(caption.iter().cloned()),
+                Attachment::Clip { title, caption, site, .. } => {
+                    ft.extend(title.iter().cloned());
+                    ft.extend(caption.iter().cloned());
+                    ft.extend(site.iter().cloned());
+                }
+            }
+        }
+        ft.retain(|s| !s.trim().is_empty());
         let fields_text = ft.join(" · ");
         let mut body = HashMap::new();
         for t in terms(&card.body) {
@@ -254,16 +272,18 @@ pub fn snippet(text: &str, query: &[String]) -> String {
 /// One line of the per-turn project overview.
 #[derive(Clone, Debug, PartialEq)]
 pub struct OverviewCard {
+    pub id: String,
     pub title: String,
     pub tags: Vec<String>,
     pub stage: Stage,
     pub ghost: bool,
     pub updated: String,
+    pub kind: CardKind,
+    /// Title of the frame the card sits in (filled in by the caller, which knows the canvas).
+    pub frame: Option<String>,
+    pub attachments: usize,
 }
 
-pub const CONTEXT_MAX_CARDS: usize = 200;
-pub const CONTEXT_MAX_CHARS: usize = 12_000;
-const CONTEXT_MAX_TAGS: usize = 6;
 const CONTEXT_MAX_TITLE: usize = 90;
 
 fn clip(s: &str, max: usize) -> String {
@@ -275,39 +295,64 @@ fn clip(s: &str, max: usize) -> String {
     }
 }
 
-/// A compact overview Claude gets on every turn: project name, then one line per card (title,
-/// tags, stage), most recently updated first. Stops at `max_cards` cards or `max_chars`
-/// characters, whichever comes first, and says how many were left out.
-pub fn format_project_context(name: &str, cards: &[OverviewCard], max_cards: usize, max_chars: usize) -> String {
-    let mut sorted: Vec<&OverviewCard> = cards.iter().collect();
-    sorted.sort_by(|a, b| b.updated.cmp(&a.updated).then_with(|| a.title.cmp(&b.title)));
-    let n = cards.len();
-    let mut out = format!(
-        "[Project context] Project \"{}\" has {n} card{}{}.",
+/// The per-turn project digest (replaces the full card list): name, card count and counts per
+/// stage, a few dozen tokens. Everything else reaches Claude through retrieval.
+pub fn project_digest(name: &str, cards: &[OverviewCard]) -> String {
+    let kept: Vec<&OverviewCard> = cards.iter().filter(|c| !c.ghost).collect();
+    let count = |s: Stage| kept.iter().filter(|c| c.stage == s).count();
+    let ghosts = cards.len() - kept.len();
+    format!(
+        "[Project] \"{}\": {} card{} (mist {}, reverie {}, lucid {}, dream {}){}. Related cards for each message are attached below; use read_card for the rest.",
         clip(name, CONTEXT_MAX_TITLE),
-        if n == 1 { "" } else { "s" },
-        if n == 0 { "" } else { " (title [tags] · stage; * = unkept suggestion), most recently updated first" }
-    );
-    let mut listed = 0;
-    for c in sorted {
-        if listed >= max_cards {
-            break;
-        }
-        let mut line = format!("\n- {}{}", if c.ghost { "*" } else { "" }, clip(&c.title, CONTEXT_MAX_TITLE));
-        if !c.tags.is_empty() {
-            let tags: Vec<String> = c.tags.iter().take(CONTEXT_MAX_TAGS).map(|t| clip(t, 30)).collect();
-            line.push_str(&format!(" [{}{}]", tags.join(", "), if c.tags.len() > CONTEXT_MAX_TAGS { ", …" } else { "" }));
-        }
-        let stage = serde_json::to_value(c.stage).ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
-        line.push_str(&format!(" · {stage}"));
-        if out.chars().count() + line.chars().count() > max_chars {
-            break;
-        }
-        out.push_str(&line);
-        listed += 1;
+        kept.len(),
+        if kept.len() == 1 { "" } else { "s" },
+        count(Stage::Mist),
+        count(Stage::Reverie),
+        count(Stage::Lucid),
+        count(Stage::Dream),
+        if ghosts > 0 { format!(", {ghosts} unkept suggestion{}", if ghosts == 1 { "" } else { "s" }) } else { String::new() }
+    )
+}
+
+pub const EXCERPT_CHARS: usize = 300;
+
+/// One card retrieved for a message: enough for Claude to decide whether to read_card it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Retrieved {
+    pub id: String,
+    pub title: String,
+    pub stage: Stage,
+    pub updated: String,
+    pub excerpt: String,
+}
+
+/// `[Related cards]` block: id, title, stage and a short excerpt each.
+pub fn format_related(items: &[Retrieved]) -> String {
+    let mut out = String::from("[Related cards]");
+    for r in items {
+        let stage = serde_json::to_value(r.stage).ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
+        out.push_str(&format!("\n- {} · \"{}\" · {stage}: {}", r.id, clip(&r.title, CONTEXT_MAX_TITLE), r.excerpt));
     }
-    if listed < n {
-        out.push_str(&format!("\n…and {} more card{} not listed.", n - listed, if n - listed == 1 { "" } else { "s" }));
+    out
+}
+
+fn excerpt_of(card: &Card) -> String {
+    let body = crate::ctx::clean_for_claude(&card.body);
+    let mut out = clip(&body, EXCERPT_CHARS);
+    // Attachments by id + caption only: never their content.
+    let atts: Vec<String> = card
+        .meta
+        .attachments
+        .iter()
+        .take(3)
+        .map(|a| match a {
+            crate::model::Attachment::Image { id, caption, .. } | crate::model::Attachment::Clip { id, caption, .. } => {
+                format!("{id}{}", caption.as_deref().filter(|c| !c.trim().is_empty()).map(|c| format!(": {}", clip(c, 40))).unwrap_or_default())
+            }
+        })
+        .collect();
+    if !atts.is_empty() {
+        out.push_str(&format!(" [attachments: {}]", atts.join("; ")));
     }
     out
 }
@@ -323,8 +368,12 @@ pub struct SearchHit {
     pub stage: Stage,
     pub tags: Vec<String>,
     pub ghost: bool,
+    pub kind: CardKind,
     pub snippet: String,
     pub score: f32,
+    /// "Folder / Subfolder" when the card sits inside a folder (filled in by the caller).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub folder_path: Option<String>,
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq)]
@@ -498,8 +547,10 @@ impl SearchIndex {
                     stage: c.meta.stage,
                     tags: c.meta.tags.clone(),
                     ghost: c.meta.ghost,
+                    kind: c.meta.kind,
                     snippet: snippet(source, &q),
                     score: (score * 100.0).round() / 100.0,
+                    folder_path: None,
                 }
             })
             .collect()
@@ -513,11 +564,15 @@ impl SearchIndex {
             .docs
             .values()
             .map(|(_, d)| OverviewCard {
+                id: d.card.meta.id.clone(),
                 title: d.card.meta.title.clone(),
                 tags: d.card.meta.tags.clone(),
                 stage: d.card.meta.stage,
                 ghost: d.card.meta.ghost,
                 updated: d.card.meta.updated.clone(),
+                kind: d.card.meta.kind,
+                frame: None,
+                attachments: d.card.meta.attachments.len(),
             })
             .collect();
         Some((p.name.clone(), cards))
@@ -581,6 +636,40 @@ impl SearchIndex {
         }
         out.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.title.cmp(&b.1.title)));
         Some(out.into_iter().take(limit.clamp(1, MAX_LIMIT)).map(|(_, r)| r).collect())
+    }
+
+    /// The cards worth attaching to one message: for a card thread `related(card, 4)` + `search(text, 3)`,
+    /// for the project thread `search(text, 5)`; deduped, never the open card itself.
+    pub fn retrieve(&mut self, slug: &str, card: Option<&str>, text: &str) -> Vec<Retrieved> {
+        let mut ids: Vec<(String, String)> = Vec::new(); // (project, id)
+        let push = |p: &str, id: &str, ids: &mut Vec<(String, String)>| {
+            if Some(id) != card && !ids.iter().any(|(_, i)| i == id) {
+                ids.push((p.to_string(), id.to_string()));
+            }
+        };
+        let (n_search, n_related) = if card.is_some() { (3, 4) } else { (5, 0) };
+        if let Some(id) = card.filter(|_| n_related > 0) {
+            for r in self.related(id, n_related).unwrap_or_default() {
+                push(&r.project, &r.id, &mut ids);
+            }
+        }
+        // Ask for extra hits so skipping the open card still leaves `n_search`.
+        let mut added = 0;
+        for h in self.search(text, Some(slug), n_search + 1) {
+            if added >= n_search {
+                break;
+            }
+            let before = ids.len();
+            push(&h.project, &h.id, &mut ids);
+            added += ids.len() - before;
+        }
+        ids.into_iter()
+            .filter_map(|(p, id)| {
+                let (_, d) = self.projects.get(&p)?.docs.get(&id)?;
+                let c = &d.card;
+                Some(Retrieved { id: id.clone(), title: c.meta.title.clone(), stage: c.meta.stage, updated: c.meta.updated.clone(), excerpt: excerpt_of(c) })
+            })
+            .collect()
     }
 
     /// Links of a card with the target's title resolved (for `read_card`).
@@ -696,6 +785,25 @@ mod tests {
     }
 
     #[test]
+    fn checklist_items_and_attachment_text_are_indexed() {
+        let (_t, ws, mut idx) = setup();
+        let dir = ws.project_dir("inbox").unwrap();
+        let mut c = card("01LIST", "Todo", &[], "");
+        c.meta.kind = CardKind::Checklist;
+        c.meta.items = vec![crate::model::ChecklistItem { text: "Pick a harpoon".into(), question: true, answer: Some("barbed".into()), ..Default::default() }];
+        c.meta.attachments = vec![
+            Attachment::Image { id: "a".into(), path: "media/x.png".into(), caption: Some("lighthouse sketch".into()) },
+            Attachment::Clip { id: "b".into(), url: "https://e.x".into(), title: Some("Kraken lore".into()), description: None, site: None, favicon: None, thumb: None, excerpt: None, caption: None, fetched_at: None, fetch_error: None },
+        ];
+        write(&dir, &c);
+        for q in ["harpoon", "barbed", "lighthouse", "kraken"] {
+            let h = idx.search(q, None, 5);
+            assert_eq!(h.len(), 1, "{q}");
+            assert_eq!(h[0].kind, CardKind::Checklist);
+        }
+    }
+
+    #[test]
     fn snippet_centers_on_the_match() {
         let filler = "lorem ipsum dolor sit amet ".repeat(30);
         let text = format!("{filler}the hidden treasure lies under the old mill {filler}");
@@ -778,35 +886,28 @@ mod tests {
     }
 
     #[test]
-    fn project_context_is_compact_ordered_and_capped() {
-        let card = |t: &str, u: &str, tags: &[&str], ghost: bool| OverviewCard {
-            title: t.into(),
-            tags: tags.iter().map(|s| s.to_string()).collect(),
-            stage: Stage::Sketch,
-            ghost,
-            updated: u.into(),
-        };
-        let ctx = format_project_context("Fish-punk", &[card("Old", "2026-01-01", &[], false), card("New", "2026-06-01", &["boss", "water"], true)], 200, 12_000);
-        assert_eq!(
-            ctx,
-            "[Project context] Project \"Fish-punk\" has 2 cards (title [tags] · stage; * = unkept suggestion), most recently updated first.\n- *New [boss, water] · sketch\n- Old · sketch"
-        );
-        assert_eq!(format_project_context("Empty", &[], 200, 12_000), "[Project context] Project \"Empty\" has 0 cards.");
+    fn digest_and_retrieval_are_small() {
+        let oc = |stage: Stage, ghost: bool| OverviewCard { id: String::new(), kind: CardKind::Card, frame: None, attachments: 0, title: "t".into(), tags: vec![], stage, ghost, updated: String::new() };
+        let d = project_digest("Fish-punk", &[oc(Stage::Mist, false), oc(Stage::Mist, false), oc(Stage::Dream, false), oc(Stage::Lucid, true)]);
+        assert!(d.starts_with("[Project] \"Fish-punk\": 3 cards (mist 2, reverie 0, lucid 0, dream 1), 1 unkept suggestion."), "{d}");
+        assert!(d.len() < 300);
 
-        // 500 cards: capped at 200 lines, with a graceful note about the rest.
-        let many: Vec<OverviewCard> = (0..500).map(|i| card(&format!("Idea {i:03}"), &format!("2026-01-01T00:{:02}:{:02}", i / 60, i % 60), &["tag"], false)).collect();
-        let ctx = format_project_context("Big", &many, CONTEXT_MAX_CARDS, CONTEXT_MAX_CHARS);
-        assert_eq!(ctx.lines().filter(|l| l.starts_with("- ")).count(), 200);
-        assert!(ctx.ends_with("…and 300 more cards not listed."), "{}", &ctx[ctx.len() - 60..]);
-        assert!(ctx.contains("- Idea 499 [tag]"), "newest first");
-        assert!(!ctx.contains("Idea 000"));
-
-        // The character budget wins when titles are long; output stays within it (+ the note).
-        let long: Vec<OverviewCard> = (0..200).map(|i| card(&"x".repeat(200), &format!("{i:03}"), &["a", "b", "c", "d", "e", "f", "g", "h"], false)).collect();
-        let ctx = format_project_context("Long", &long, 200, 2_000);
-        assert!(ctx.chars().count() < 2_100);
-        assert!(ctx.contains("…, …]") || ctx.contains(", …]"), "tags capped");
-        assert!(ctx.contains("more cards not listed"));
+        let (_t, ws, mut idx) = setup();
+        let p = ws.create_project("Retrieval").unwrap();
+        let dir = ws.project_dir(&p.slug).unwrap();
+        write(&dir, &card("01ME", "Me", &["boss"], "the kraken guards the reef"));
+        write(&dir, &card("01TAG", "Tagged", &["boss"], &format!("data:image/png;base64,{} lots of text", "A".repeat(5000))));
+        write(&dir, &card("01TXT", "Kraken notes", &[], &"kraken ".repeat(200)));
+        // card thread: related (tags) + search (text), no duplicates, never the open card
+        let r = idx.retrieve(&p.slug, Some("01ME"), "kraken");
+        let ids: Vec<&str> = r.iter().map(|x| x.id.as_str()).collect();
+        assert_eq!(ids, ["01TAG", "01TXT"], "{ids:?}");
+        assert!(r.iter().all(|x| x.excerpt.chars().count() <= EXCERPT_CHARS + 60 && !x.excerpt.contains("AAAA")));
+        // project thread: search only
+        let r = idx.retrieve(&p.slug, None, "kraken");
+        assert_eq!(r.iter().map(|x| x.id.as_str()).collect::<Vec<_>>(), ["01TXT", "01ME"]);
+        assert!(format_related(&r).starts_with("[Related cards]
+- 01"));
     }
 
     /// Mirrors the `?stress=1` seed in src/api/mock.ts (500 cards, 4 stages, every third tagged),
@@ -816,7 +917,7 @@ mod tests {
         let (_t, ws, mut idx) = setup();
         let p = ws.create_project("Stress test (500 cards)").unwrap();
         let dir = ws.project_dir(&p.slug).unwrap();
-        let stages = [Stage::Cloud, Stage::Sketch, Stage::Draft, Stage::Pitch];
+        let stages = [Stage::Mist, Stage::Reverie, Stage::Lucid, Stage::Dream];
         for i in 0..500 {
             let mut c = card(&format!("01S{i:04}"), &format!("Idea {i}"), if i % 3 == 0 { &["tag"] } else { &[] }, "Lorem ipsum dolor sit amet, consectetur adipiscing elit.");
             c.meta.stage = stages[i % 4];
