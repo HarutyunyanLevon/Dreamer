@@ -340,6 +340,16 @@ impl Workspace {
             }
             s.local_model = if m.is_empty() { crate::model::DEFAULT_LOCAL_MODEL.into() } else { m.into() };
         }
+        if let Some(u) = patch.spritecook_url {
+            let u = u.trim();
+            if !u.is_empty() && (!u.starts_with("https://") || u.len() > 300 || u.chars().any(char::is_whitespace)) {
+                return Err(AppError::Invalid(format!("{u:?} is not an https URL")));
+            }
+            s.spritecook_url = if u.is_empty() { crate::model::DEFAULT_SPRITECOOK_URL.into() } else { u.into() };
+        }
+        if let Some(n) = patch.credit_cap {
+            s.credit_cap = if n == 0 { crate::model::DEFAULT_CREDIT_CAP } else { n.min(100) };
+        }
         write_json(&self.root.join("workspace.json"), &s)?;
         Ok(s)
     }

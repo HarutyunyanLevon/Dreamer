@@ -276,6 +276,16 @@ export interface Settings {
   local_chat: boolean;
   /** Ollama model for local turns. */
   local_model: string;
+  /** SpriteCook's remote MCP server (artifact images); the key is in the OS credential store. */
+  spritecook_url: string;
+  /** Paid SpriteCook calls an artifact turn makes before it asks. */
+  credit_cap: number;
+}
+/** The stored SpriteCook key (masked) and server URL. */
+export interface SpritecookKeyStatus {
+  hasKey: boolean;
+  masked?: string | null;
+  url: string;
 }
 export interface SettingsPatch {
   theme?: string;
@@ -303,6 +313,10 @@ export interface SettingsPatch {
   local_chat?: boolean;
   /** Empty string restores the default. */
   local_model?: string;
+  /** Empty string restores the default. */
+  spritecook_url?: string;
+  /** 0 restores the default. */
+  credit_cap?: number;
 }
 
 /** A project's memory (`<project>/memory.md`): bullets under six fixed sections, capped in words. */
@@ -555,4 +569,7 @@ export interface Api {
   /** Starts the one-time seed query (needs >= 3 kept cards and no memory.md); the draft arrives via onMemoryEvent. */
   memorySeed(slug: string): Promise<void>;
   onMemoryEvent(cb: (e: MemoryEvent) => void): Promise<() => void>;
+  spritecookKeyStatus(): Promise<SpritecookKeyStatus>;
+  /** Stores the SpriteCook API key in the OS credential store; "" removes it. */
+  spritecookSetKey(key: string): Promise<SpritecookKeyStatus>;
 }

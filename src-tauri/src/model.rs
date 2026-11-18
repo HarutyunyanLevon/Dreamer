@@ -642,6 +642,12 @@ pub struct Settings {
     /// The Ollama model for local turns (Dreamer runs a 64k-context copy of it, see ollama.rs).
     #[serde(default = "default_local_model")]
     pub local_model: String,
+    /// SpriteCook's remote MCP server (artifact images). The API key is in the OS credential store.
+    #[serde(default = "default_spritecook_url")]
+    pub spritecook_url: String,
+    /// Paid SpriteCook calls an artifact turn may make before it pauses for a confirm.
+    #[serde(default = "default_credit_cap")]
+    pub credit_cap: u32,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -671,6 +677,14 @@ pub const DEFAULT_MODEL_MEMORY: &str = "haiku";
 pub const DEFAULT_LOCAL_MODEL: &str = "qwen3.5:35b-a3b";
 fn default_local_model() -> String {
     DEFAULT_LOCAL_MODEL.into()
+}
+pub const DEFAULT_SPRITECOOK_URL: &str = "https://api.spritecook.ai/mcp/";
+pub const DEFAULT_CREDIT_CAP: u32 = 4;
+fn default_spritecook_url() -> String {
+    DEFAULT_SPRITECOOK_URL.into()
+}
+fn default_credit_cap() -> u32 {
+    DEFAULT_CREDIT_CAP
 }
 pub const DEFAULT_COMPACT_TOKENS: u64 = 50_000;
 fn default_model_memory() -> String {
@@ -712,6 +726,8 @@ impl Default for Settings {
             memory_cap: default_memory_cap(),
             local_chat: true,
             local_model: default_local_model(),
+            spritecook_url: default_spritecook_url(),
+            credit_cap: DEFAULT_CREDIT_CAP,
             extra: BTreeMap::new(),
         }
     }
@@ -748,6 +764,10 @@ pub struct SettingsPatch {
     pub local_chat: Option<bool>,
     /// Empty string restores the default.
     pub local_model: Option<String>,
+    /// Empty string restores the default; must be https.
+    pub spritecook_url: Option<String>,
+    /// 0 restores the default.
+    pub credit_cap: Option<u32>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]

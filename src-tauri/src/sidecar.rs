@@ -147,6 +147,16 @@ pub(crate) fn ensure_started(app: &AppHandle, state: &AppState) -> Result<()> {
     if let Some(cwd) = &cwd {
         cmd.current_dir(cwd);
     }
+    // SpriteCook (artifact images): the server URL and the key from the OS credential store. The
+    // sidecar strips the key from every Claude Code process's env; it only goes into the MCP header.
+    if let Ok(settings) = state.ws.lock().map_err(|_| ()).and_then(|ws| ws.get_settings().map_err(|_| ())) {
+        cmd.env("DREAMER_SPRITECOOK_URL", &settings.spritecook_url);
+        cmd.env("DREAMER_CREDIT_CAP", settings.credit_cap.to_string());
+    }
+    match crate::credentials::spritecook_key() {
+        Some(k) => cmd.env("DREAMER_SPRITECOOK_KEY", k),
+        None => cmd.env_remove("DREAMER_SPRITECOOK_KEY"),
+    };
     let _ = state.claude.app.set(app.clone());
     let generation = state.claude.generation.fetch_add(1, Ordering::SeqCst) + 1;
     let exe = claude_setup::claude_executable();
@@ -895,6 +905,11 @@ pub struct Turn {
     /// An organize turn: scope "folder" | "project", and a backend the user forced ("Redo with
     /// Claude" / "Redo locally"); None = by the number of cards in scope.
     pub organize: Option<(String, Option<crate::router::Backend>)>,
+    /// An artifact turn (create, regenerate, a suggestion chip, feedback in the artifact's thread):
+    /// the artifact id (= its card id). Always runs on Claude, with SpriteCook and the artifact tools.
+    pub artifact: Option<String>,
+    /// The chat thread an artifact request came from (escalate_artifact): its recap goes along.
+    pub recap_from: Option<String>,
 }
 
 /// Messages of a local thread an escalated Claude turn sees verbatim (besides the recap).
@@ -968,6 +983,10 @@ pub fn send_message(app: &AppHandle, state: &AppState, turn: Turn) -> Result<()>
     let local = settings.local_chat.then(|| state.ollama.for_turn(&settings.local_model));
     let local_ready = local.as_ref().is_some_and(|l| l.ready);
     let mut route = crate::router::backend(tier, turn.web, turn.retry_with_claude, settings.local_chat, local_ready);
+    // Artifacts always run on Claude, in the artifact thread's own (resumable) Claude session.
+    if turn.artifact.is_some() {
+        route = crate::router::Route { backend: crate::router::Backend::Claude, escalated: false, reason: None };
+    }
     // Organize: small scopes on the local model, big ones (or "Redo with Claude") on Claude.
     let mut route_note: Option<String> = None;
     if let Some((scope, forced)) = &turn.organize {
@@ -1033,7 +1052,22 @@ pub fn send_message(app: &AppHandle, state: &AppState, turn: Turn) -> Result<()>
     // An escalation gets the local model's recap of the thread (the sidecar writes it into the
     // slot) plus the last few messages, never the whole transcript.
     let transcript = crate::ctx::transcript(&file);
-    let recap_job = route.escalated && local_ready && !transcript.trim().is_empty();
+    let mut recap_job = route.escalated && local_ready && !transcript.trim().is_empty();
+    // An artifact requested from a chat thread: that thread's recap (local model) and last messages.
+    let source = turn.recap_from.as_deref().filter(|t| *t != turn.thread).and_then(|t| state.ws.lock().ok().and_then(|ws| ws.load_chat(&turn.slug, t).ok()));
+    let source_transcript = source.as_ref().map(crate::ctx::transcript).filter(|t| !t.trim().is_empty());
+    if let Some(src) = &source {
+        let recap = source_transcript.is_some() && local_ready;
+        if recap {
+            parts.push(format!("[Recap of the conversation that asked for this]
+{RECAP_SLOT}"));
+            recap_job = true;
+        }
+        if let Some(r) = crate::ctx::recent_turns(src, ESCALATION_RECENT) {
+            parts.push(format!("[Last messages of that conversation]
+{r}"));
+        }
+    }
     let earlier = if route.escalated {
         recap_job.then(|| RECAP_SLOT.to_string())
     } else if compact {
@@ -1090,6 +1124,8 @@ pub fn send_message(app: &AppHandle, state: &AppState, turn: Turn) -> Result<()>
     }
     let model: String = if is_local {
         local_model.clone()
+    } else if turn.artifact.is_some() {
+        if turn.think { settings.model_deep.clone() } else { settings.model_chat.clone() }
     } else if route.escalated && tier != crate::router::Tier::Deep {
         // Web, or Retry with Claude, from a local thread: the main Claude model.
         settings.model_chat.clone()
@@ -1131,7 +1167,7 @@ pub fn send_message(app: &AppHandle, state: &AppState, turn: Turn) -> Result<()>
     }
     // A router-picked fast Claude turn that fails or comes back empty is retried once on the main
     // model. Never for local turns: those offer "Retry with Claude" instead.
-    if !is_local && !route.escalated && tier == crate::router::Tier::Fast && turn.pin.is_none() {
+    if !is_local && !route.escalated && tier == crate::router::Tier::Fast && turn.pin.is_none() && turn.artifact.is_none() {
         msg["retryModel"] = json!(settings.model_chat);
     }
     if compact {
@@ -1140,7 +1176,11 @@ pub fn send_message(app: &AppHandle, state: &AppState, turn: Turn) -> Result<()>
         msg["compact"] = json!({ "transcript": transcript, "model": model, "local": is_local });
     }
     if recap_job {
-        msg["recap"] = json!({ "transcript": transcript, "model": local_model, "baseUrl": crate::ollama::BASE_URL });
+        let t = source_transcript.clone().unwrap_or_else(|| transcript.clone());
+        msg["recap"] = json!({ "transcript": t, "model": local_model, "baseUrl": crate::ollama::BASE_URL });
+    }
+    if let Some(a) = &turn.artifact {
+        msg["artifact"] = json!({ "id": a, "cap": settings.credit_cap, "spritecookUrl": settings.spritecook_url });
     }
     write_line(state, &msg);
     Ok(())

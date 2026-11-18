@@ -1420,3 +1420,6 @@ input.frame-tab { cursor: text; min-width: 180px; outline: 2px solid var(--accen
   .comp-tog.on, .comp-tog.on:hover:not(:disabled) { padding: 0; }
   .chat-head .chat-title { font-size: 15px; }
 }
+
+/* ---------- Artifacts ---------- */
+.settings-sub { margin: 10px 0 0; font-size: 13px; font-weight: 700; color: var(--ink); }

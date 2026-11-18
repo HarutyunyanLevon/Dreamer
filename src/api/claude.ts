@@ -1,5 +1,8 @@
 import type { OrganizePlanData } from "./types";
 
+/** The four artifact kinds (fields.artifactType of a kind "artifact" card). */
+export type ArtifactType = "theme" | "character" | "concept" | "mockup";
+
 export type SetupJob = "install" | "login";
 
 export interface ClaudeStatus {
@@ -114,6 +117,10 @@ export type ClaudeEvent =
   | { type: "edit_proposal"; id: string | null; slug: string; card: string; title: string }
   | { type: "organize_proposal"; id: string | null; plan: OrganizePlanData }
   | { type: "web_fetch"; id: string; url: string }
+  /** A chat turn handed an artifact request to Claude (escalate_artifact): the app creates the card and sends it. */
+  | { type: "artifact_escalate"; id: string | null; artifactType: ArtifactType; brief: string; title?: string }
+  /** An artifact session started: can SpriteCook make images? `reason`: "no_key" | "unreachable". */
+  | { type: "spritecook_status"; id: string | null; artifact: string | null; ok: boolean; reason: "no_key" | "unreachable" | null; missing: string[] }
   /** The memory pass (or remember/forget) changed memory after turn `id`; `ats` = its log entries, `card` = decisions drafted onto the card. */
   | { type: "memory_update"; id: string; label: string; ats: string[]; card?: { id: string; title: string; lines: string[] } | null }
   | { type: "stderr"; message: string }
@@ -128,7 +135,7 @@ export interface ClaudeApi {
   /** `thread` = card id or "project"; `resume` = that thread's saved Claude session id. */
   /** `web` = this turn may use WebSearch/WebFetch; `selection` = card ids selected on the canvas; `folder` = the folder open on the canvas. */
   /** `resumeLocal` = the thread's local-model session id; `escalate: "retry"` = Retry with Claude. */
-  send(slug: string, id: string, text: string, context?: string, thread?: string, resume?: string, opts?: { web?: boolean; selection?: string[]; folder?: string | null; memory?: boolean; question?: string; think?: boolean; pin?: ModelTier | null; resumeLocal?: string; escalate?: "retry"; organize?: "folder" | "project"; organizeBackend?: Backend | null }): Promise<void>;
+  send(slug: string, id: string, text: string, context?: string, thread?: string, resume?: string, opts?: { web?: boolean; selection?: string[]; folder?: string | null; memory?: boolean; question?: string; think?: boolean; pin?: ModelTier | null; resumeLocal?: string; escalate?: "retry"; organize?: "folder" | "project"; organizeBackend?: Backend | null; artifact?: string | null; recapFrom?: string | null }): Promise<void>;
   /** `memory: false` skips the memory pass after this turn (fixed chip commands); `question` = the question this text answers. */
   /** `hard`: also close the thread's Claude session (Retry after a stall); the next message resumes it. */
   interrupt(opts?: { hard?: boolean }): Promise<void>;

@@ -1,6 +1,7 @@
 mod claude_setup;
 mod clip;
 mod commands;
+mod credentials;
 mod ctx;
 mod error;
 mod handoff;
@@ -280,6 +281,8 @@ pub fn run() {
             commands::hide_to_tray,
             commands::autostart_enabled,
             commands::set_autostart,
+            commands::spritecook_key_status,
+            commands::spritecook_set_key,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Dreamer")

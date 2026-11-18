@@ -45,9 +45,14 @@ pub fn get_settings(state: State<AppState>) -> Result<Settings> {
 #[tauri::command(async)]
 pub fn update_settings(app: AppHandle, state: State<AppState>, patch: SettingsPatch) -> Result<Settings> {
     let rehook = patch.hotkey.clone();
+    let before = with_ws(&state, |ws| ws.get_settings())?.spritecook_url;
     let settings = with_ws(&state, |ws| ws.update_settings(patch))?;
     if rehook.is_some() {
         AppState::register_hotkey(&app, &settings.hotkey);
+    }
+    // The sidecar gets the SpriteCook server at spawn: a new URL needs a fresh one.
+    if settings.spritecook_url != before {
+        crate::sidecar::shutdown(&state);
     }
     Ok(settings)
 }
@@ -406,6 +411,8 @@ pub fn claude_send(
     folder: Option<String>,
     organize: Option<String>,
     organize_backend: Option<String>,
+    artifact: Option<String>,
+    recap_from: Option<String>,
 ) -> Result<()> {
     let turn = crate::sidecar::Turn {
         slug,
@@ -431,6 +438,8 @@ pub fn claude_send(
             };
             (if s == "project" { "project".to_string() } else { "folder".to_string() }, backend)
         }),
+        artifact: artifact.filter(|a| !a.is_empty()),
+        recap_from: recap_from.filter(|a| !a.is_empty()),
     };
     crate::sidecar::send_message(&app, &state, turn)
 }
@@ -579,4 +588,21 @@ mod tests {
             }
         }
     }
+}
+
+/// Whether a SpriteCook API key is stored (masked), and the server URL.
+#[tauri::command(async)]
+pub fn spritecook_key_status(state: State<AppState>) -> Result<serde_json::Value> {
+    let url = with_ws(&state, |ws| ws.get_settings())?.spritecook_url;
+    let key = crate::credentials::spritecook_key();
+    Ok(serde_json::json!({ "hasKey": key.is_some(), "masked": key.as_deref().map(crate::credentials::mask), "url": url }))
+}
+
+/// Stores the SpriteCook API key in the OS credential store (empty = remove it). The running
+/// sidecar is stopped so the next artifact turn starts one that has (or lacks) the key.
+#[tauri::command(async)]
+pub fn spritecook_set_key(state: State<AppState>, key: String) -> Result<serde_json::Value> {
+    crate::credentials::set_spritecook_key(&key)?;
+    crate::sidecar::shutdown(&state);
+    spritecook_key_status(state)
 }

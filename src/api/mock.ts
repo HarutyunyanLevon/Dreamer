@@ -137,7 +137,8 @@ function mockParse(text: string): [string, string[]][] {
 const mockRender = (s: [string, string[]][]) => s.map(([n, items]) => `## ${n}\n${items.map((i) => `- ${i}\n`).join("")}`).join("\n");
 
 export function createMockApi(): Api {
-  const settings: Settings = { version: 1, theme: "pearl-glow", hotkey: "Ctrl+Shift+Space", last_project: null, show_projects: true, show_chat: true, tray_notice_shown: false, start_with_windows: true, start_hidden: true, model_chat: "sonnet", model_router: true, model_fast: "haiku", model_deep: "opus", model_export: "opus", model_memory: "haiku", compact_tokens: 50000, memory_cap: 600, local_chat: true, local_model: "qwen3.5:35b-a3b" };
+  const settings: Settings = { version: 1, theme: "pearl-glow", hotkey: "Ctrl+Shift+Space", last_project: null, show_projects: true, show_chat: true, tray_notice_shown: false, start_with_windows: true, start_hidden: true, model_chat: "sonnet", model_router: true, model_fast: "haiku", model_deep: "opus", model_export: "opus", model_memory: "haiku", compact_tokens: 50000, memory_cap: 600, local_chat: true, local_model: "qwen3.5:35b-a3b", spritecook_url: "https://api.spritecook.ai/mcp/", credit_cap: 4 };
+  let mockKey = "";
   const projects = new Map<string, MockProject>();
   const customThemes = new Map<string, unknown>();
   const chats = new Map<string, ChatThreadFile>();
@@ -229,6 +230,8 @@ export function createMockApi(): Api {
       if (patch.memory_cap !== undefined) settings.memory_cap = patch.memory_cap || 600;
       if (patch.local_chat !== undefined) settings.local_chat = patch.local_chat;
       if (patch.local_model !== undefined) settings.local_model = patch.local_model.trim() || "qwen3.5:35b-a3b";
+      if (patch.spritecook_url !== undefined) settings.spritecook_url = patch.spritecook_url.trim() || "https://api.spritecook.ai/mcp/";
+      if (patch.credit_cap !== undefined) settings.credit_cap = patch.credit_cap || 4;
       return { ...settings };
     },
     listProjects: async () => [...projects.values()].map(summary),
@@ -607,6 +610,11 @@ export function createMockApi(): Api {
     memoryUndo: async () => {},
     memorySeed: async (slug) => {
       setTimeout(() => memoryListeners.forEach((l) => l({ type: "seed", slug, text: mockRender(mockParse("## Pitch\n- A calm cooperative sea-farming game\n## Decisions\n- Solo and co-op only, no PvP")) })), 600);
+    },
+    spritecookKeyStatus: async () => ({ hasKey: !!mockKey, masked: mockKey ? `••••${mockKey.slice(-4)}` : null, url: settings.spritecook_url }),
+    spritecookSetKey: async (key) => {
+      mockKey = key.trim();
+      return { hasKey: !!mockKey, masked: mockKey ? `••••${mockKey.slice(-4)}` : null, url: settings.spritecook_url };
     },
     onMemoryEvent: async (cb) => {
       memoryListeners.add(cb);

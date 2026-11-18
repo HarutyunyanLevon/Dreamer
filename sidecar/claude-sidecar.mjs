@@ -67,6 +67,31 @@ const CLAUDE_EXE = process.env.DREAMER_CLAUDE_EXE || "";
 const query = (args) =>
   sdkQuery({ ...args, options: { ...(CLAUDE_EXE ? { pathToClaudeCodeExecutable: CLAUDE_EXE } : {}), ...args.options } });
 
+// ---- SpriteCook (artifact images), through its remote MCP server ----
+// URL from Settings, key from the OS credential store (both passed by the app at spawn). The key is
+// removed from our env at once, so no Claude Code process inherits it; it only goes into the MCP
+// server's Authorization header of artifact sessions.
+const SPRITECOOK = { url: process.env.DREAMER_SPRITECOOK_URL || "https://api.spritecook.ai/mcp/", key: process.env.DREAMER_SPRITECOOK_KEY || "" };
+delete process.env.DREAMER_SPRITECOOK_KEY;
+const DEFAULT_CREDIT_CAP = Number(process.env.DREAMER_CREDIT_CAP) || 4;
+/** The SpriteCook tools artifact sessions may use (checked against the live list at session init). */
+const SPRITECOOK_TOOLS = [
+  "generate_game_art", "generate_character", "make_rotation_sheet", "generate_character_animations", "check_character_animation_run",
+  "animate_game_art", "remove_background", "create_ui_kit", "generate_ui_kit_concepts", "select_ui_kit_concept",
+  "generate_ui_kit_component_sheets", "extract_ui_kit_components", "finalize_ui_kit", "get_ui_kit", "check_job_status",
+  "get_asset_metadata", "get_credit_balance", "create_project", "assign_assets_to_project", "list_presets",
+  "get_preset_settings", "save_private_preset", "import_asset", "create_asset_upload", "finalize_asset_upload",
+];
+/** Calls that spend credits: they go through the per-turn cap (artifactGate) instead of allowedTools. */
+const PAID_TOOLS = new Set([
+  "generate_game_art", "generate_character", "make_rotation_sheet", "generate_character_animations", "animate_game_art",
+  "remove_background", "create_ui_kit", "generate_ui_kit_concepts", "generate_ui_kit_component_sheets", "extract_ui_kit_components", "finalize_ui_kit",
+]);
+/** These count by the credits they report, not as one call. */
+const CREDIT_COUNTED = new Set(["generate_character_animations", "animate_game_art", "create_ui_kit", "generate_ui_kit_concepts", "generate_ui_kit_component_sheets", "extract_ui_kit_components", "finalize_ui_kit"]);
+const FREE_TOOLS = SPRITECOOK_TOOLS.filter((t) => !PAID_TOOLS.has(t));
+const spritecookServer = () => (SPRITECOOK.key ? { type: "http", url: SPRITECOOK.url, headers: { Authorization: `Bearer ${SPRITECOOK.key}` } } : null);
+
 const pendingToolReplies = new Map();
 let reqSeq = 0;
 
@@ -104,13 +129,13 @@ function onFatal(kind, e) {
 process.on("uncaughtException", (e) => onFatal("uncaughtException", e));
 process.on("unhandledRejection", (e) => onFatal("unhandledRejection", e));
 
-function requestTool(tool_, input) {
+function requestTool(tool_, input, timeoutMs = 15000) {
   const reqId = `r${++reqSeq}`;
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       pendingToolReplies.delete(reqId);
       reject(new Error("timed out waiting for the app"));
-    }, 15000);
+    }, timeoutMs);
     pendingToolReplies.set(reqId, { resolve, reject, timer });
     send({ type: "tool_request", reqId, tool: tool_, input });
   });
@@ -218,12 +243,15 @@ const fail = (e) => ({ content: [{ type: "text", text: `Error: ${e.message}` }],
 // any more: Rust attaches related cards to each message. ----
 const LIMIT_MSG = "limit reached, answer with what you have";
 let turnLimits = { calls: 0, reads: 0, maxCalls: 4, maxReads: 1, hit: false };
-const resetTurnLimits = (text = "") => {
+const resetTurnLimits = (text = "", artifact = false) => {
   // /merge and /describe read several cards / images by design: larger allowance.
   const merge = /^[/](merge|describe)/.test(text);
   // /organize: list_tree, then propose_organize, with room to fix a rejected plan a few times.
   const organize = /^[/]organize/.test(text);
-  turnLimits = { calls: 0, reads: 0, maxCalls: merge ? 16 : organize ? 8 : 4, maxReads: merge ? 12 : 1, hit: false };
+  // An artifact turn saves files, notes and suggestions (SpriteCook calls are not counted here).
+  turnLimits = artifact
+    ? { calls: 0, reads: 0, maxCalls: 40, maxReads: 6, hit: false }
+    : { calls: 0, reads: 0, maxCalls: merge ? 16 : organize ? 8 : 4, maxReads: merge ? 12 : 1, hit: false };
 };
 /** An error result when this call would pass a limit; otherwise counts the call and returns null. */
 function hitLimit(kind) {
@@ -481,11 +509,37 @@ const forgetTool = tool(
   },
 );
 
+const ARTIFACT_TYPES = ["theme", "character", "concept", "mockup"];
+
+// Chat sessions (local or Claude) never make images: an artifact request is handed to an artifact
+// turn on Claude, in the new artifact's own thread. The app creates the artifact card and sends it.
+const escalateArtifactTool = tool(
+  "escalate_artifact",
+  "Hand a request for a visual artifact to Claude, who makes it with SpriteCook in a new artifact card: a theme " +
+    "(style guide: palette, fonts, mood, key art), a character design, a concept art piece, or an interactive HTML " +
+    "mockup. Call it once when the user asks for one; you cannot make images yourself. The brief says exactly what " +
+    "the user asked for (no extras) plus the relevant facts from the conversation and cards.",
+  {
+    type: z.enum(ARTIFACT_TYPES),
+    brief: z.string().describe("What to make, in the user's terms, with the relevant context"),
+    title: z.string().max(80).optional().describe("Short card title, e.g. 'Fish priest'"),
+  },
+  async (args) => {
+    {
+      const lim = hitLimit("any");
+      if (lim) return lim;
+    }
+    send({ type: "artifact_escalate", id: currentId, artifactType: args.type, brief: args.brief, title: args.title });
+    if (currentSession) currentSession.escalatedArtifact = true;
+    return text("Handed over: Dreamer is creating the artifact card and Claude is making it now in that card's thread. END YOUR TURN with one short sentence saying so.");
+  },
+);
+
 // A fresh MCP server instance per session: an SDK server object binds to one transport.
 const makeServer = () => createSdkMcpServer({
   name: "dreamer",
   version: "1.0.0",
-  tools: [createCardTool, askQuestionTool, readCardTool, proposeLinkTool, mergeCardsTool, viewAttachmentTool, proposeEditTool, rememberTool, forgetTool, listTreeTool, proposeOrganizeTool],
+  tools: [createCardTool, askQuestionTool, readCardTool, proposeLinkTool, mergeCardsTool, viewAttachmentTool, proposeEditTool, rememberTool, forgetTool, listTreeTool, proposeOrganizeTool, escalateArtifactTool],
 });
 
 // The checklist /grill-me works through, in order. Kept here so the prompt and any future UI
@@ -559,6 +613,9 @@ const SYSTEM_PROMPT = [
     "from list_tree exactly. If propose_organize returns an error, fix the listed ops and call it again. For " +
     "'/organize revise', the message carries the previous plan: propose the whole revised plan. Then reply with one " +
     "short sentence.",
+  "Artifacts: you cannot make images, style guides or mockups in chat. When the user asks for a theme / style " +
+    "guide, a character design or sheet, concept art, or an interactive mockup, call escalate_artifact once (type + " +
+    "a brief with only what they asked for and the relevant context), then end your turn with one short sentence.",
   "/describe: read_card, call view_attachment on each image, then call propose_edit once with a short, factual " +
     "caption for each image (captions keyed by attachment id) and the card's tags plus up to 4 new ones. Then reply " +
     "with exactly: Proposed captions and tags.",
@@ -871,6 +928,7 @@ const BASE_OPTIONS = {
     "mcp__dreamer__forget",
     "mcp__dreamer__list_tree",
     "mcp__dreamer__propose_organize",
+    "mcp__dreamer__escalate_artifact",
   ],
   // The only built-in tools offered. They are not in allowedTools, so every call goes through
   // canUseTool (see webGate), which allows them only on a turn the user switched web access on.
@@ -919,6 +977,39 @@ function webGate(s) {
   };
 }
 
+// ---- Artifact sessions: one per artifact thread, always on Claude ----
+// The artifact's own Dreamer tools (artifactTools, defined below) plus SpriteCook's MCP server. Free
+// SpriteCook calls are in allowedTools; paid ones pass through artifactGate (the per-turn credit cap).
+
+/** Dreamer's artifact tools (filled in further down; one array so the server and allowedTools agree). */
+const artifactTools = [];
+const ARTIFACT_SYSTEM_PARTS = [
+  "You are Claude, embedded in Dreamer, a desktop app for developing game ideas. In this thread you make and " +
+    "iterate one visual artifact for the user's game project: a theme (style guide), a character design, a concept " +
+    "art piece or an interactive HTML mockup. You do the thinking (briefs, prompts, design notes, HTML); SpriteCook " +
+    "makes the images through its tools. Tone: formal, neutral and concise. No exclamation marks, no flattery, no emoji.",
+];
+const artifactSystem = () => ARTIFACT_SYSTEM_PARTS.join("\n\n");
+const makeArtifactServer = () => createSdkMcpServer({ name: "dreamer", version: "1.0.0", tools: artifactTools });
+
+/** Permission callback of an artifact session: SpriteCook calls only (paid ones count against the cap). */
+function artifactGate(s) {
+  return async (toolName, input) => {
+    const short = toolName.replace(/^mcp__spritecook__/, "");
+    if (!toolName.startsWith("mcp__spritecook__") || !SPRITECOOK_TOOLS.includes(short)) {
+      return { behavior: "deny", message: `${toolName} is not available in Dreamer.` };
+    }
+    if (PAID_TOOLS.has(short)) {
+      const verdict = await creditCheck(s, short);
+      if (!verdict.ok) return { behavior: "deny", message: verdict.message };
+    }
+    return { behavior: "allow", updatedInput: input };
+  };
+}
+
+/** Per-turn credit cap (see the credits section below). */
+let creditCheck = async () => ({ ok: true });
+
 /** Thinking budget of a "Think" turn. */
 const THINK_BUDGET = 4000;
 const thinkingOption = (think) => (think ? { type: "enabled", budgetTokens: THINK_BUDGET } : { type: "disabled" });
@@ -949,14 +1040,14 @@ function localEnv(baseUrl, model) {
 /** Session key: one session per thread and backend (env is fixed per Claude Code process). */
 const sessionKey = (thread, backend, escalated) => `${thread}#${backend === "local" ? "local" : escalated ? "claude-x" : "claude"}`;
 
-/** `local` = {baseUrl, vision} for a local-model session, else null. */
-function openSession(key, resume, model, think = false, local = null) {
+/** `local` = {baseUrl, vision} for a local-model session, else null. `artifact` = {id, cap} for an artifact thread. */
+function openSession(key, resume, model, think = false, local = null, artifact = null) {
   evictIfNeeded();
   const turns = makeTurnQueue();
   // queue: turn ids pushed and not yet answered, oldest first. A session answers in order, so the
   // head is the turn its events belong to; an interrupted turn's late events and result are dropped
   // there instead of landing on the next turn.
-  const s = { key, local: local ? { ...local } : null, vision: !!local?.vision, q: null, turns, resume: resume || null, model: model || null, think: !!think, retryModel: null, retried: false, turnText: "", tier: null, web: false, lastUsed: Date.now(), text: "", answered: false, pending: null, closed: false, queue: [], tracker: null };
+  const s = { key, artifact: artifact ? { ...artifact } : null, local: local ? { ...local } : null, vision: !!local?.vision, q: null, turns, resume: resume || null, model: model || null, think: !!think, retryModel: null, retried: false, turnText: "", tier: null, web: false, lastUsed: Date.now(), text: "", answered: false, pending: null, closed: false, queue: [], tracker: null };
   s.q = query({
     prompt: turns,
     options: {
@@ -974,7 +1065,18 @@ function openSession(key, resume, model, think = false, local = null) {
         CLAUDE_CODE_AUTO_COMPACT_WINDOW: String(AUTO_COMPACT_TOKENS),
         ENABLE_CLAUDEAI_MCP_SERVERS: "false",
       },
-      // Only Dreamer's own tools: never the user's other MCP servers or claude.ai connectors.
+      // An artifact thread: its own prompt and tools, SpriteCook included (when a key is set).
+      ...(artifact
+        ? {
+            systemPrompt: { type: "custom", prompt: artifactSystem() },
+            allowedTools: [...artifactTools.map((t) => `mcp__dreamer__${t.name}`), ...FREE_TOOLS.map((t) => `mcp__spritecook__${t}`)],
+            tools: [],
+            canUseTool: artifactGate(s),
+            mcpServers: { dreamer: makeArtifactServer(), ...(spritecookServer() ? { spritecook: spritecookServer() } : {}) },
+          }
+        : {}),
+      // Only Dreamer's own tools (and SpriteCook in artifact threads): never the user's other MCP
+      // servers or claude.ai connectors.
       strictMcpConfig: true,
       ...(model ? { model } : {}),
       ...(resume ? { resume } : {}),
@@ -998,7 +1100,7 @@ function restartFresh(s) {
   s.closed = true;
   let fresh;
   try {
-    fresh = openSession(s.key, null, s.model, s.think, s.local);
+    fresh = openSession(s.key, null, s.model, s.think, s.local, s.artifact);
   } catch (e) {
     console.error(`[sidecar] could not start a fresh session after a failed resume: ${e?.stack ?? e}`);
     if (currentSession === s) failTurn(`Claude could not start a new session: ${e?.message ?? e}`);
@@ -1056,6 +1158,23 @@ function retryOnMain(s, head) {
   send({ type: "model_note", id: head, model: s.model, retried: true, from: s.retriedFrom });
 }
 
+/**
+ * An artifact session started: is SpriteCook there, and does it offer every tool Dreamer relies on?
+ * Anything missing is logged; the UI shows a note (with a link to Settings) when images can't be made.
+ */
+function checkSpritecook(s, init, turn) {
+  const status = (init.mcp_servers ?? []).find((m) => m.name === "spritecook")?.status;
+  const tools = new Set(init.tools ?? []);
+  const missing = SPRITECOOK_TOOLS.filter((t) => !tools.has(`mcp__spritecook__${t}`));
+  let reason = null;
+  if (!SPRITECOOK.key) reason = "no_key";
+  else if (status && status !== "connected") reason = "unreachable";
+  else if (missing.length === SPRITECOOK_TOOLS.length) reason = "unreachable";
+  s.spritecookOk = !reason;
+  dlog(`spritecook key=${SPRITECOOK.key ? "set" : "none"} status=${status ?? "absent"} missing=${missing.length ? missing.join(",") : "none"}`);
+  send({ type: "spritecook_status", id: turn, artifact: s.artifact?.id ?? null, ok: !reason, reason, missing: reason ? [] : missing });
+}
+
 function pump(s) {
   (async () => {
     try {
@@ -1072,6 +1191,7 @@ function pump(s) {
         }
         if (msg.type === "system" && msg.subtype === "init") {
           // A resume that worked keeps the saved session id; a different one means the history was not loaded.
+          if (s.artifact) checkSpritecook(s, msg, head);
           dlog(`session_init key=${s.key} resumeRequested=${s.resume ? "yes" : "no"} resumed=${s.resume ? msg.session_id === s.resume : "n/a"} session=${msg.session_id} model=${msg.model} tools=${msg.tools?.length ?? "?"} mcp=${JSON.stringify((msg.mcp_servers ?? []).map((m) => `${m.name}:${m.status}`))}`);
         }
         if (msg.type === "stream_event" && msg.event?.type === "content_block_delta" && msg.event.delta?.type === "text_delta") {
@@ -1573,7 +1693,14 @@ async function handleUserMessage(msg) {
     if (!useFull) msg.text = fullText;
   }
   const think = msg.think === true && !local;
-  s = s ?? openSession(key, resume, model, think, local);
+  const artifact = !local && msg.artifact?.id ? { id: String(msg.artifact.id), cap: Number(msg.artifact.cap) || DEFAULT_CREDIT_CAP } : null;
+  // A thread's session was opened for the other mode (chat vs artifact): reopen it with the right tools.
+  if (s && !!s.artifact !== !!artifact) {
+    closeSession(s);
+    s = undefined;
+  }
+  s = s ?? openSession(key, resume, model, think, local, artifact);
+  if (artifact) s.artifact = artifact;
   s.escalated = escalated;
   // The router (or a pin) picked another model than the session runs: switch it for this turn.
   if (model && s.model !== model) {
@@ -1594,7 +1721,8 @@ async function handleUserMessage(msg) {
   s.text = "";
   s.questionAsked = false;
   s.lastInput = null;
-  resetTurnLimits(msg.text);
+  resetTurnLimits(msg.text, !!artifact);
+  s.credits = { calls: 0, units: 0, spent: 0, jobs: [], allowed: artifact?.cap ?? 0 };
   currentSession = s;
   const turn = (t) => ({ type: "user", message: { role: "user", content: [{ type: "text", text: t }] }, parent_tool_use_id: null });
   s.pendingFull = turn(fullText);

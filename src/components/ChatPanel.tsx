@@ -10,6 +10,7 @@ import { Modal } from "../ui/Modal";
 import { DECISIONS_TITLE, TECH_TEMPLATE, TECH_TITLE } from "./kinds";
 import { ActivitySummary, LiveActivity, Tokens, fmtTokens, modelLabel } from "./Activity";
 import type { LocalStatus, ModelTier } from "../api/claude";
+import type { SpritecookKeyStatus } from "../api";
 import { claudeApi } from "../api/claudeIndex";
 import { LocalSetup } from "./LocalSetup";
 import { ThreadMenu } from "./chat/ThreadMenu";
@@ -891,8 +892,13 @@ function ModelSettings({ onClose, onError }: { onClose: () => void; onError: (e:
   const [localModel, setLocalModel] = useState("");
   const [autostart, setAutostart] = useState<boolean | null>(null);
   const [startHidden, setStartHidden] = useState(true);
+  const [scUrl, setScUrl] = useState("");
+  const [creditCap, setCreditCap] = useState("");
+  const [scKey, setScKey] = useState<SpritecookKeyStatus | null>(null);
+  const [newKey, setNewKey] = useState("");
   useEffect(() => {
     api.autostartEnabled().then(setAutostart).catch(() => setAutostart(false));
+    api.spritecookKeyStatus().then(setScKey).catch(() => setScKey(null));
     api
       .getSettings()
       .then((s) => {
@@ -907,12 +913,15 @@ function ModelSettings({ onClose, onError }: { onClose: () => void; onError: (e:
         setMemoryCap(String(s.memory_cap));
         setLocalChat(s.local_chat);
         setLocalModel(s.local_model);
+        setScUrl(s.spritecook_url);
+        setCreditCap(String(s.credit_cap));
       })
       .catch((e) => onError(String(e)));
   }, [onError]);
   const save = async () => {
     try {
-      await api.updateSettings({ model_chat: chatModel ?? "", model_router: router, model_fast: fastModel, model_deep: deepModel, model_export: exportModel, model_memory: memoryModel, compact_tokens: Math.max(0, Math.floor(Number(compactTokens)) || 0), memory_cap: Math.max(0, Math.floor(Number(memoryCap)) || 0), local_chat: localChat, local_model: localModel });
+      await api.updateSettings({ model_chat: chatModel ?? "", model_router: router, model_fast: fastModel, model_deep: deepModel, model_export: exportModel, model_memory: memoryModel, compact_tokens: Math.max(0, Math.floor(Number(compactTokens)) || 0), memory_cap: Math.max(0, Math.floor(Number(memoryCap)) || 0), local_chat: localChat, local_model: localModel, spritecook_url: scUrl, credit_cap: Math.max(0, Math.floor(Number(creditCap)) || 0) });
+      if (newKey.trim()) await api.spritecookSetKey(newKey.trim());
       onClose();
     } catch (e) {
       onError(String(e));
@@ -968,6 +977,29 @@ function ModelSettings({ onClose, onError }: { onClose: () => void; onError: (e:
           Project memory cap (words)
           <input className="name-input" inputMode="numeric" value={memoryCap} disabled={chatModel === null} placeholder="600" onChange={(e) => setMemoryCap(e.target.value)} />
         </label>
+        <h4 className="settings-sub" id="spritecook-settings">SpriteCook (artifact images)</h4>
+        <label>
+          API key {scKey?.hasKey ? <span className="chat-sub">saved: {scKey.masked}</span> : <span className="chat-sub">not set: themes and mockups still work, images don't</span>}
+          <input className="name-input" type="password" autoComplete="off" value={newKey} placeholder={scKey?.hasKey ? "Paste a new key to replace it" : "sc_live_…"} onChange={(e) => setNewKey(e.target.value)} />
+        </label>
+        {scKey?.hasKey && (
+          <button
+            type="button"
+            className="btn"
+            onClick={() => api.spritecookSetKey("").then(setScKey).catch((er) => onError(String(er)))}
+          >
+            Remove saved key
+          </button>
+        )}
+        <label>
+          Server URL
+          <input className="name-input" value={scUrl} disabled={chatModel === null} placeholder="https://api.spritecook.ai/mcp/" onChange={(e) => setScUrl(e.target.value)} />
+        </label>
+        <label>
+          Paid SpriteCook calls per artifact turn before asking
+          <input className="name-input" inputMode="numeric" value={creditCap} disabled={chatModel === null} placeholder="4" onChange={(e) => setCreditCap(e.target.value)} />
+        </label>
+        <p className="chat-sub">The key is kept in the Windows credential store, never in the workspace.</p>
         <label className="check-row">
           <input
             type="checkbox"

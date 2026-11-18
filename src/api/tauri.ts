@@ -78,6 +78,8 @@ export const tauriApi: Api = {
   memoryUndo: (slug, ats, card, lines) => invoke("memory_undo", { slug, ats, card: card ?? null, lines: lines ?? null }),
   memorySeed: (slug) => invoke("memory_seed", { slug }),
   onMemoryEvent: (cb) => listen<MemoryEvent>("memory-event", (e) => cb(e.payload)),
+  spritecookKeyStatus: () => invoke("spritecook_key_status"),
+  spritecookSetKey: (key) => invoke("spritecook_set_key", { key }),
   quitApp: () => invoke("quit_app"),
   autostartEnabled: () => invoke("autostart_enabled"),
   setAutostart: (enabled) => invoke("set_autostart", { enabled }),
