@@ -289,6 +289,7 @@ pub fn run() {
             commands::artifact_version_info,
             commands::artifact_set_active_theme,
             commands::artifact_themes,
+            commands::artifact_theme_css,
             commands::spritecook_key_status,
             commands::spritecook_set_key,
         ])

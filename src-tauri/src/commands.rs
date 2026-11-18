@@ -650,6 +650,18 @@ pub fn artifact_set_active_theme(state: State<AppState>, slug: String, id: Optio
     with_ws(&state, |ws| crate::artifacts::set_active_theme(ws, &slug, id.as_deref()))
 }
 
+/// The theme CSS (custom properties) an HTML version of this artifact gets.
+#[tauri::command(async)]
+pub fn artifact_theme_css(state: State<AppState>, slug: String, id: String) -> Result<String> {
+    with_ws(&state, |ws| {
+        let meta = crate::artifacts::read(ws, &slug, &id)?;
+        let inherited = crate::artifacts::inherited_theme(ws, &slug, &id, &meta);
+        let own = (meta.kind == "theme").then(|| meta.version(meta.current_version).and_then(|v| v.theme.clone())).flatten();
+        let mode = crate::artifacts::effective_art_mode(&meta, inherited.as_ref());
+        Ok(crate::artifacts::theme_css(own.as_ref().or(inherited.as_ref().map(|t| &t.spec)), mode.as_ref()))
+    })
+}
+
 #[tauri::command(async)]
 pub fn artifact_themes(state: State<AppState>, slug: String) -> Result<Vec<Value>> {
     with_ws(&state, |ws| Ok(crate::artifacts::themes(ws, &slug)))

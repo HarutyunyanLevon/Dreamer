@@ -844,9 +844,122 @@ pub fn run_tool(state: &crate::state::AppState, slug: &str, id: &str, tool: &str
     }
 }
 
-/// Theme specs arrive with the themes section.
-fn set_theme_spec(_ws: &Workspace, _slug: &str, _id: &str, _input: &Value) -> Result<Value> {
-    Err(AppError::Invalid("set_theme is not available yet".into()))
+fn is_hex(s: &str) -> bool {
+    let h = s.strip_prefix('#').unwrap_or("");
+    matches!(h.len(), 3 | 6 | 8) && h.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+fn str_list(input: &Value, k: &str, max: usize) -> Option<Vec<String>> {
+    input.get(k).and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_str).map(|s| s.trim().chars().take(200).collect::<String>()).filter(|s| !s.is_empty()).take(max).collect())
+}
+
+/// A font name a style guide may use: web-safe families plus the two Dreamer bundles.
+pub const FONTS: [&str; 14] = [
+    "Playfair Display", "Nunito", "Georgia", "Times New Roman", "Palatino", "Garamond", "Arial", "Helvetica", "Verdana", "Trebuchet MS", "Tahoma", "Courier New", "Lucida Console", "Impact",
+];
+
+/// set_theme: the theme spec of the working version. Only the given keys change (a key art file
+/// must exist in the version).
+pub fn set_theme_spec(ws: &Workspace, slug: &str, id: &str, input: &Value) -> Result<Value> {
+    if read(ws, slug, id)?.kind != "theme" {
+        return Err(AppError::Invalid("set_theme is for theme artifacts".into()));
+    }
+    let n = working_version(ws, slug, id)?;
+    let vdir = version_dir(&dir_of(ws, slug, id)?, n);
+    let spec = modify(ws, slug, id, |meta| {
+        let v = meta.version_mut(n).ok_or_else(|| AppError::NotFound(format!("version {n}")))?;
+        let mut t = v.theme.clone().unwrap_or_default();
+        if let Some(p) = input.get("palette").and_then(Value::as_array) {
+            let mut out = Vec::new();
+            for s in p.iter().take(16) {
+                let name = s.get("name").and_then(Value::as_str).unwrap_or("").trim();
+                let hex = s.get("hex").and_then(Value::as_str).unwrap_or("").trim();
+                if name.is_empty() || !is_hex(hex) {
+                    return Err(AppError::Invalid(format!("palette entries need a name and a #hex colour (got {name:?} {hex:?})")));
+                }
+                out.push(Swatch { name: name.chars().take(40).collect(), hex: hex.to_ascii_lowercase() });
+            }
+            t.palette = out;
+        }
+        if let Some(f) = input.get("fonts") {
+            for (k, slot) in [("heading", &mut t.fonts.heading), ("body", &mut t.fonts.body)] {
+                if let Some(name) = f.get(k).and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) {
+                    let known = FONTS.iter().find(|x| x.eq_ignore_ascii_case(name)).ok_or_else(|| AppError::Invalid(format!("font {name:?} is not available; use one of: {}", FONTS.join(", "))))?;
+                    *slot = known.to_string();
+                }
+            }
+        }
+        if let Some(l) = str_list(input, "mood", 12) {
+            t.mood = l;
+        }
+        if let Some(l) = str_list(input, "dos", 12) {
+            t.dos = l;
+        }
+        if let Some(l) = str_list(input, "donts", 12) {
+            t.donts = l;
+        }
+        if let Some(m) = input.get("art_mode").filter(|v| !v.is_null()) {
+            let m: ArtMode = serde_json::from_value(json!({ "mode": m.get("mode"), "pixelSize": m.get("pixel_size").or(m.get("pixelSize")) })).map_err(|e| AppError::Invalid(format!("art_mode: {e}")))?;
+            t.art_mode = Some(m.check()?);
+        }
+        if let Some(k) = input.get("key_art").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) {
+            let k = check_file_name(k)?;
+            if !vdir.join(&k).is_file() {
+                return Err(AppError::NotFound(format!("{k} in v{n}: save the key art with save_image first")));
+            }
+            t.key_art = Some(k);
+        }
+        for (k, slot) in [("key_art_asset_id", &mut t.key_art_asset_id), ("preset_id", &mut t.preset_id)] {
+            if let Some(x) = input.get(k).and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) {
+                *slot = Some(x.chars().take(100).collect());
+            }
+        }
+        v.theme = Some(t.clone());
+        Ok(t)
+    })?;
+    Ok(json!({ "version": n, "theme": spec }))
+}
+
+/// `--color-<name>` for a swatch name ("Rust red" -> "rust-red").
+fn css_ident(name: &str) -> String {
+    let mut out = String::new();
+    for c in name.trim().to_lowercase().chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c);
+        } else if !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    out.trim_matches('-').to_string()
+}
+
+fn css_font(name: &str) -> String {
+    let fallback = if ["Courier New", "Lucida Console"].contains(&name) { "monospace" } else if ["Playfair Display", "Georgia", "Times New Roman", "Palatino", "Garamond"].contains(&name) { "serif" } else { "sans-serif" };
+    if name.is_empty() { fallback.into() } else { format!("\"{name}\", {fallback}") }
+}
+
+/// The CSS custom properties an HTML artifact gets from its theme (a theme page: from itself).
+pub fn theme_css(spec: Option<&ThemeSpec>, mode: Option<&ArtMode>) -> String {
+    let mut vars: Vec<String> = Vec::new();
+    if let Some(t) = spec {
+        for (i, s) in t.palette.iter().enumerate() {
+            let id = css_ident(&s.name);
+            if !id.is_empty() {
+                vars.push(format!("--color-{id}: {};", s.hex));
+            }
+            vars.push(format!("--palette-{}: {};", i + 1, s.hex));
+        }
+        vars.push(format!("--font-heading: {};", css_font(&t.fonts.heading)));
+        vars.push(format!("--font-body: {};", css_font(&t.fonts.body)));
+    }
+    if let Some(m) = mode {
+        vars.push(format!("--pixel-size: {}px;", m.pixel_size.unwrap_or(1)));
+        vars.push(format!("--art-mode: {};", m.mode));
+        if m.mode == "pixel" {
+            vars.push("--image-rendering: pixelated;".into());
+        }
+    }
+    format!(":root {{ {} }}", vars.join(" "))
 }
 
 #[cfg(test)]
@@ -943,6 +1056,56 @@ mod tests {
         let s = |l: &str| Suggestion { label: l.into(), prompt: format!("do {l}"), est_credits: Some(1.0) };
         set_suggestions(&ws, INBOX_SLUG, &id, vec![s("a"), s("b"), s("c"), s("d"), s("e"), s("f"), Suggestion { label: " ".into(), prompt: "x".into(), est_credits: None }]).unwrap();
         assert_eq!(read(&ws, INBOX_SLUG, &id).unwrap().suggestions.len(), 5);
+    }
+
+    fn theme(ws: &Workspace, title: &str, hex: &str, mode: &str) -> String {
+        let id = create(ws, INBOX_SLUG, NewArtifact { title: Some(title.into()), ..new("theme") }).unwrap().meta.id;
+        save_file(ws, INBOX_SLUG, &id, "key-art.png", b"art", Some(&format!("ka-{title}")), Some("key-art")).unwrap();
+        set_theme_spec(
+            ws,
+            INBOX_SLUG,
+            &id,
+            &json!({ "palette": [{ "name": "Rust red", "hex": hex }], "fonts": { "heading": "playfair display", "body": "Nunito" }, "mood": ["oily"], "art_mode": { "mode": mode, "pixel_size": 16 }, "key_art": "key-art.png", "key_art_asset_id": format!("ka-{title}"), "preset_id": format!("p-{title}") }),
+        )
+        .unwrap();
+        id
+    }
+
+    #[test]
+    fn two_themes_the_active_one_is_inherited_and_overrides_win() {
+        let (_d, ws) = ws();
+        let a = theme(&ws, "Rust", "#AA3322", "pixel");
+        let b = theme(&ws, "Neon", "#00ffcc", "hd");
+        let ch = create(&ws, INBOX_SLUG, new("character")).unwrap().meta.id;
+        let meta = || read(&ws, INBOX_SLUG, &ch).unwrap();
+        assert!(inherited_theme(&ws, INBOX_SLUG, &ch, &meta()).is_none(), "no active theme yet");
+        set_active_theme(&ws, INBOX_SLUG, Some(&a)).unwrap();
+        let t = inherited_theme(&ws, INBOX_SLUG, &ch, &meta()).unwrap();
+        assert_eq!((t.id.as_str(), t.spec.palette[0].hex.as_str(), t.spec.fonts.heading.as_str()), (a.as_str(), "#aa3322", "Playfair Display"));
+        assert_eq!(effective_art_mode(&meta(), Some(&t)).unwrap().label(), "pixel 16px");
+        let block = context_block(&ws, INBOX_SLUG, &ch, 4, true).unwrap();
+        assert!(block.contains("preset p-Rust") && block.contains("key art asset ka-Rust") && block.contains("active theme"), "{block}");
+        // Switching the active theme changes what it inherits.
+        set_active_theme(&ws, INBOX_SLUG, Some(&b)).unwrap();
+        assert_eq!(inherited_theme(&ws, INBOX_SLUG, &ch, &meta()).unwrap().id, b);
+        // A per-artifact theme and art mode win over the active theme.
+        update(&ws, INBOX_SLUG, &ch, ArtifactPatch { theme_id: Some(a.clone()), art_mode: Some(Some(ArtMode { mode: "hd".into(), pixel_size: Some(4) })), ..Default::default() }).unwrap();
+        let t = inherited_theme(&ws, INBOX_SLUG, &ch, &meta()).unwrap();
+        assert_eq!(t.id, a);
+        assert_eq!(effective_art_mode(&meta(), Some(&t)).unwrap(), ArtMode { mode: "hd".into(), pixel_size: None });
+        assert!(context_block(&ws, INBOX_SLUG, &ch, 4, false).unwrap().contains("NOT configured"));
+        // CSS tokens for HTML artifacts.
+        let css = theme_css(Some(&t.spec), Some(&ArtMode { mode: "pixel".into(), pixel_size: Some(16) }));
+        assert!(css.contains("--color-rust-red: #aa3322;") && css.contains("--font-heading: \"Playfair Display\", serif;") && css.contains("--pixel-size: 16px;"), "{css}");
+        // Only themes can be active; bad input is refused.
+        assert!(set_active_theme(&ws, INBOX_SLUG, Some(&ch)).is_err());
+        assert!(set_theme_spec(&ws, INBOX_SLUG, &a, &json!({ "palette": [{ "name": "x", "hex": "red" }] })).is_err());
+        assert!(set_theme_spec(&ws, INBOX_SLUG, &a, &json!({ "fonts": { "heading": "Comic Sans Pro" } })).is_err());
+        assert!(set_theme_spec(&ws, INBOX_SLUG, &a, &json!({ "key_art": "missing.png" })).is_err());
+        assert_eq!(themes(&ws, INBOX_SLUG).len(), 2);
+        // A new theme version keeps the parent's spec until changed.
+        begin_version(&ws, INBOX_SLUG, &a, false, "warmer", None).unwrap();
+        assert_eq!(read(&ws, INBOX_SLUG, &a).unwrap().version(2).unwrap().theme.as_ref().unwrap().palette[0].hex, "#aa3322");
     }
 
     #[test]

@@ -999,6 +999,18 @@ const ARTIFACT_SYSTEM_PARTS = [
     "project) and set_spritecook_project with its id. Pass that project_id to every generation, and assign assets you " +
     "keep with assign_assets_to_project when a tool did not do it. Generation tools may return a job: wait with " +
     "check_job_status (wait_seconds up to 60) until it is done, then save_image with the result's sprite_url and asset id.",
+  "Themes (the style anchor of the project): a theme is a palette (5-8 named swatches), two fonts, mood words, " +
+    "do/don't notes, an art mode (pixel with a pixel size, or hd), a key art image and a SpriteCook private preset. " +
+    "Make the key art with generate_game_art, save_image it as key-art.png (role key-art), save_private_preset from it " +
+    "(named after the theme), then set_theme with everything including key_art, key_art_asset_id and preset_id. Then " +
+    "write index.html: a one-page style guide (swatches with names and hex, type specimens in both fonts, mood, " +
+    "do/don't, the art mode) that embeds the key art as <img src=\"key-art.png\">; plain HTML/SVG/CSS, using the " +
+    "injected CSS variables (--color-<swatch-name>, --font-heading, --font-body). Without SpriteCook, do everything " +
+    "except the key art and preset.",
+  "Inheritance: every image you generate for a non-theme artifact uses the theme in the block as its style reference: " +
+    "apply the preset's settings (get_preset_settings) and pass the key art asset in style_asset_ids. Generate in the " +
+    "block's art mode (the artifact's override wins over the theme's). With no theme, choose a style that fits the cards " +
+    "and state it in the notes.",
   "Without SpriteCook (the block says NOT configured, or its tools are missing): do every part that needs no image " +
     "(notes, HTML, the theme spec), then say in one sentence that images need a SpriteCook key in Settings. Do not " +
     "pretend an image exists.",
@@ -1111,6 +1123,30 @@ artifactTool(
   async (a) => {
     await artifactCall("set_spritecook_project", a);
     return text("Recorded.");
+  },
+);
+
+artifactTool(
+  "set_theme",
+  "Theme artifacts only: set the theme spec of the working version (only the keys you pass change). palette: named " +
+    "swatches; fonts: heading and body, each one of Playfair Display, Nunito (bundled) or a web-safe family (Georgia, " +
+    "Times New Roman, Palatino, Garamond, Arial, Helvetica, Verdana, Trebuchet MS, Tahoma, Courier New, Lucida Console, " +
+    "Impact); mood words; dos / donts; art_mode (pixel with pixel_size, or hd); key_art = the saved key art file, with " +
+    "its SpriteCook asset id; preset_id = the private preset saved from it.",
+  {
+    palette: z.array(z.object({ name: z.string(), hex: z.string() })).max(16).optional(),
+    fonts: z.object({ heading: z.string().optional(), body: z.string().optional() }).optional(),
+    mood: z.array(z.string()).max(12).optional(),
+    dos: z.array(z.string()).max(12).optional(),
+    donts: z.array(z.string()).max(12).optional(),
+    art_mode: z.object({ mode: z.enum(["pixel", "hd"]), pixel_size: z.number().int().optional() }).optional(),
+    key_art: z.string().optional(),
+    key_art_asset_id: z.string().optional(),
+    preset_id: z.string().optional(),
+  },
+  async (a) => {
+    const r = await artifactCall("set_theme", a);
+    return text(`Theme spec of v${r.version} saved.`);
   },
 );
 
