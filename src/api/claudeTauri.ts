@@ -18,4 +18,6 @@ export const claudeTauriApi: ClaudeApi = {
   cancelPullLocal: () => invoke("ollama_cancel"),
   openOllamaInstaller: () => invoke("ollama_open_installer"),
   onLocalSetupEvent: async (cb) => listen<OllamaSetupEvent>("ollama-setup", (e) => cb(e.payload)),
+  creditAnswer: (reqId, allow) => invoke("claude_credit_answer", { reqId, allow }),
+  spritecookBalance: () => invoke("spritecook_balance"),
 };

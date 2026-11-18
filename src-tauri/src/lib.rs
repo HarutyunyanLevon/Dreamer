@@ -291,6 +291,8 @@ pub fn run() {
             commands::artifact_themes,
             commands::artifact_theme_css,
             commands::artifact_html,
+            commands::claude_credit_answer,
+            commands::spritecook_balance,
             commands::spritecook_key_status,
             commands::spritecook_set_key,
         ])

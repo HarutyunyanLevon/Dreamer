@@ -1423,3 +1423,9 @@ input.frame-tab { cursor: text; min-width: 180px; outline: 2px solid var(--accen
 
 /* ---------- Artifacts ---------- */
 .settings-sub { margin: 10px 0 0; font-size: 13px; font-weight: 700; color: var(--ink); }
+.credit-ask { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 6px 0 4px; padding: 10px 12px; border-radius: 14px; background: color-mix(in srgb, var(--accent) 10%, rgba(255, 255, 255, 0.55)); border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent); color: var(--body); font-size: 13px; }
+.credit-ask span { flex: 1 1 100%; }
+.credit-ask.done { display: block; background: none; border: 0; padding: 0 2px; color: var(--muted); font-size: 12px; }
+.balance-chip { font-variant-numeric: tabular-nums; }
+.balance-chip.warn { color: var(--muted); }
+.sc-note .chat-failure-line span { color: var(--body); }

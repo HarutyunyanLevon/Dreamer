@@ -101,7 +101,7 @@ export type ClaudeEvent =
   | { type: "memory_progress"; id: string; active: boolean; input: number; output: number }
   /** `item`: the handoff gap item this question settles (the gap interview only). */
   | { type: "question"; id: string; turnId?: string | null; question: string; choices: string[]; item?: string }
-  | { type: "message_done"; id: string; text: string; sessionId?: string; isError?: boolean; inputTokens?: number; usage?: TokenUsage; durationMs?: number; contextTokens?: number; contextWindow?: number; model?: string; tier?: ModelTier; retried?: boolean; retriedFrom?: string; backend?: Backend; escalated?: boolean; fallback?: LocalFallback }
+  | { type: "message_done"; id: string; text: string; sessionId?: string; isError?: boolean; inputTokens?: number; usage?: TokenUsage; durationMs?: number; contextTokens?: number; contextWindow?: number; model?: string; tier?: ModelTier; retried?: boolean; retriedFrom?: string; backend?: Backend; escalated?: boolean; fallback?: LocalFallback; artifact?: { id: string; credits: number; paidCalls: number; jobs: string[]; spritecook: boolean } }
   /** Sent before a turn starts: where it runs. `note`: why the local model wasn't usable (reason "unavailable"). */
   | { type: "route"; id: string; backend: Backend; model: string; escalated: boolean; reason?: RouteReason | null; note?: string | null }
   /** A fast-model turn failed or came back empty and was sent again on the main model. */
@@ -114,6 +114,12 @@ export type ClaudeEvent =
   | { type: "edit_proposal"; id: string | null; slug: string; card: string; title: string }
   | { type: "organize_proposal"; id: string | null; plan: OrganizePlanData }
   | { type: "web_fetch"; id: string; url: string }
+  /** An artifact turn wants to go over the per-turn cap of paid SpriteCook calls: it waits for creditAnswer. */
+  | { type: "credit_confirm"; id: string | null; reqId: string; tool: string; used: number; cap: number; more: number; estCredits: number | null }
+  | { type: "credit_answered"; id: string | null; reqId: string; allow: boolean }
+  /** A SpriteCook step of artifact turn `id` started or reported (progress 0..1 when known). */
+  | { type: "artifact_progress"; id: string | null; artifact: string | null; label: string; progress: number | null; credits: number }
+  | { type: "spritecook_balance"; credits: number | null; tier?: string | null; error: string | null }
   /** A chat turn handed an artifact request to Claude (escalate_artifact): the app creates the card and sends it. */
   | { type: "artifact_escalate"; id: string | null; artifactType: ArtifactType; brief: string; title?: string }
   /** An artifact session started: can SpriteCook make images? `reason`: "no_key" | "unreachable". */
@@ -153,4 +159,8 @@ export interface ClaudeApi {
   /** Opens Ollama's Windows download page. */
   openOllamaInstaller(): Promise<void>;
   onLocalSetupEvent(cb: (event: OllamaSetupEvent) => void): Promise<() => void>;
+  /** Answers a paused artifact turn's "Generate N more?" (credit_confirm). */
+  creditAnswer(reqId: string, allow: boolean): Promise<void>;
+  /** Asks for the SpriteCook credit balance; it arrives as a spritecook_balance event. */
+  spritecookBalance(): Promise<void>;
 }

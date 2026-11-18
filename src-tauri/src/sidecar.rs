@@ -493,6 +493,19 @@ fn record_turn_result(app: &AppHandle, msg: &Value) {
             });
         }
     }
+    // An artifact turn: the model, SpriteCook job ids and credits go into the version's meta.json.
+    if kind == "message_done" {
+        if let Some(a) = msg.get("artifact").filter(|a| a.is_object()) {
+            let jobs: Vec<String> = a.get("jobs").and_then(Value::as_array).map(|j| j.iter().filter_map(Value::as_str).map(str::to_string).collect()).unwrap_or_default();
+            let credits = a.get("credits").and_then(Value::as_f64).unwrap_or(0.0);
+            let model = msg.get("model").and_then(Value::as_str);
+            if let Ok(ws) = state.ws.lock() {
+                if let Err(e) = crate::artifacts::record_turn(&ws, &slug, &thread, model, &jobs, credits) {
+                    crate::sidecar_log::line(&format!("artifact record_turn failed: {e}"));
+                }
+            }
+        }
+    }
     if escalated {
         return;
     }
@@ -1247,6 +1260,19 @@ pub fn reset_thread(state: &AppState, slug: &str, thread: &str) {
         map.remove(&thread_key(slug, thread));
     }
     write_line(state, &json!({ "type": "reset_thread", "thread": thread_key(slug, thread) }));
+}
+
+/// The user's answer to a paused artifact turn's "Generate N more?" confirm.
+pub fn credit_answer(state: &AppState, req_id: &str, allow: bool) {
+    write_line(state, &json!({ "type": "credit_answer", "reqId": req_id, "allow": allow }));
+}
+
+/// Asks the sidecar for the SpriteCook credit balance (a direct MCP call, no Claude); the answer
+/// arrives as a `spritecook_balance` claude-event.
+pub fn spritecook_balance(app: &AppHandle, state: &AppState) -> Result<()> {
+    ensure_started(app, state)?;
+    write_line(state, &json!({ "type": "spritecook_balance" }));
+    Ok(())
 }
 
 /// `hard`: also close the thread's Claude session (Retry after a stall); its next message resumes it.

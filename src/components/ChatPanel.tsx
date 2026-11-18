@@ -20,6 +20,7 @@ import { ActionMenu, filterActions, type ChatAction } from "./chat/ActionMenu";
 import { OrganizePlanCard, reviseText } from "./OrganizePlan";
 import type { OrganizeReq } from "../state/useClaudeChat";
 import { folderName } from "../state/useWorkspace";
+import { refreshBalance, useBalance } from "../state/artifactRuns";
 
 /** "/organize [project] [instruction]" -> the request (scope: the open folder unless "project"). */
 function parseOrganize(text: string): OrganizeReq | null {
@@ -427,6 +428,8 @@ export function ChatPanel({ ws, panels }: { ws: Workspace; panels: Pick<ReturnTy
             onStop={() => chat.interrupt()}
             onRetryStalled={() => chat.retryStalled(m.id)}
             onRetryWithClaude={() => chat.retryWithClaude(m.id)}
+            onCredit={(allow) => chat.answerCredit(m.id, allow)}
+            onOpenSettings={() => setShowModels(true)}
             onRetry={() => {
               // Not sent in this session (it failed before a restart): resend its visible text.
               if (!chat.retry(m.id)) {
@@ -559,6 +562,7 @@ export function ChatPanel({ ws, panels }: { ws: Workspace; panels: Pick<ReturnTy
             {think && <span className="tog-label">Think</span>}
           </button>
           <span className="composer-spacer" />
+          <BalanceChip onSettings={() => setShowModels(true)} />
           <ModelChip
             pin={modelPin}
             onPin={setModelPin}
@@ -601,7 +605,12 @@ function ChatBubble({
   retryDisabled,
   onStop,
   onRetryStalled,
+  onCredit,
+  onOpenSettings,
 }: {
+  /** Answer a paused artifact turn's credit confirm. */
+  onCredit: (allow: boolean) => void;
+  onOpenSettings: () => void;
   onRetry: () => void;
   /** A failed local turn: send it to Claude once. */
   onRetryWithClaude: () => void;
@@ -698,6 +707,17 @@ function ChatBubble({
           ))}
         </div>
       </div>
+      {message.creditAsk && <CreditAsk ask={message.creditAsk} live={!!live} onAnswer={onCredit} />}
+      {message.spritecookNote && message.role === "claude" && (
+        <div className="chat-failure sc-note" role="note">
+          <div className="chat-failure-line">
+            <span>{message.spritecookNote === "no_key" ? "No SpriteCook key: image steps were skipped. Themes and mockups still work as HTML." : "SpriteCook couldn't be reached: image steps were skipped."}</span>
+            <button type="button" className="chip" onClick={onOpenSettings}>
+              Settings
+            </button>
+          </div>
+        </div>
+      )}
       {badge}
       {retryClaude}
       {memBusy}
@@ -805,6 +825,52 @@ function ChatBubble({
       {memBusy}
       {mem}
     </>
+  );
+}
+
+/** "Generate N more (~X credits)?" under a paused artifact turn. */
+function CreditAsk({ ask, live, onAnswer }: { ask: NonNullable<ChatMessage["creditAsk"]>; live: boolean; onAnswer: (allow: boolean) => void }) {
+  if (ask.answered) {
+    return <div className="credit-ask done">{ask.answered === "yes" ? `Allowed ${ask.more} more paid SpriteCook calls.` : "Stopped at the credit cap."}</div>;
+  }
+  if (!live) return <div className="credit-ask done">Paused at the credit cap ({ask.used} of {ask.cap} paid calls).</div>;
+  return (
+    <div className="credit-ask" role="group" aria-label="Credit cap reached">
+      <span>
+        This turn used {ask.used} of {ask.cap} paid SpriteCook calls.
+      </span>
+      <button type="button" className="btn primary" onClick={() => onAnswer(true)}>
+        Generate {ask.more} more{ask.estCredits != null ? ` (~${ask.estCredits} credits)` : ""}?
+      </button>
+      <button type="button" className="btn" onClick={() => onAnswer(false)}>
+        Stop here
+      </button>
+    </div>
+  );
+}
+
+/** SpriteCook credits next to the model chip; refreshed after every artifact turn, click to refresh. */
+function BalanceChip({ onSettings }: { onSettings: () => void }) {
+  const b = useBalance();
+  useEffect(() => {
+    refreshBalance();
+  }, []);
+  if (b.error === "no_key") return null;
+  const label = b.credits != null ? `${Math.round(b.credits).toLocaleString()} cr` : b.loading ? "…" : "–";
+  return (
+    <button
+      type="button"
+      className={"model-chip balance-chip" + (b.error ? " warn" : "")}
+      title={b.error ? `SpriteCook balance unavailable: ${b.error}. Click to retry; SpriteCook settings are in Settings.` : "SpriteCook credits. Click to refresh."}
+      aria-label={`SpriteCook credits: ${label}`}
+      onClick={() => refreshBalance()}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        onSettings();
+      }}
+    >
+      ◈ {label}
+    </button>
   );
 }
 

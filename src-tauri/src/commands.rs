@@ -610,6 +610,22 @@ pub fn spritecook_set_key(state: State<AppState>, key: String) -> Result<serde_j
 // ---------- artifacts (artifacts.rs) ----------
 
 #[tauri::command(async)]
+pub fn claude_credit_answer(state: State<AppState>, req_id: String, allow: bool) -> Result<()> {
+    crate::sidecar::credit_answer(&state, &req_id, allow);
+    Ok(())
+}
+
+/// The balance arrives as a `spritecook_balance` claude-event.
+#[tauri::command(async)]
+pub fn spritecook_balance(app: AppHandle, state: State<AppState>) -> Result<()> {
+    if crate::credentials::spritecook_key().is_none() {
+        let _ = app.emit("claude-event", serde_json::json!({ "type": "spritecook_balance", "credits": null, "error": "no_key" }));
+        return Ok(());
+    }
+    crate::sidecar::spritecook_balance(&app, &state)
+}
+
+#[tauri::command(async)]
 pub fn artifact_create(state: State<AppState>, slug: String, artifact: crate::artifacts::NewArtifact) -> Result<Card> {
     let card = with_ws(&state, |ws| crate::artifacts::create(ws, &slug, artifact))?;
     if let Ok(mut idx) = state.search.lock() {

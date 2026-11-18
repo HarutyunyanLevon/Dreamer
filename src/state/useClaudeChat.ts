@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { api, type OrganizePlanData } from "../api";
 import { claudeApi, type ClaudeEvent, type ClaudeStatus, type SearchResultRef } from "../api/claudeIndex";
 import type { ActivityStep, Backend, LocalFallback, ModelTier, RouteReason, TokenUsage } from "../api/claude";
+import { artifactRuns } from "./artifactRuns";
 
 let seq = 0;
 const nextId = () => `c${Date.now()}-${++seq}`;
@@ -62,6 +63,12 @@ export interface ChatMessage {
   quiet?: boolean;
   /** "Memory updated" line under this turn: what the memory pass (or remember/forget) changed. `ats` = memory log entries; `card` = decisions drafted onto the card. */
   memory?: { label: string; ats: string[]; card?: { id: string; title: string; lines: string[] } | null; undone?: boolean };
+  /** An artifact turn paused at the credit cap: "Generate N more (~X credits)?" */
+  creditAsk?: { reqId: string; used: number; cap: number; more: number; estCredits: number | null; answered?: "yes" | "no" };
+  /** An artifact turn whose session couldn't reach SpriteCook (no key / unreachable): images were skipped. */
+  spritecookNote?: "no_key" | "unreachable";
+  /** An artifact turn: which artifact, and what it spent. */
+  artifact?: { id: string; credits?: number; paidCalls?: number };
   /** The sidecar died (or was restarted) while this reply was streaming: shown as a red line with Retry. */
   failure?: { code: number | null; details: string[]; restarted?: boolean };
   /** What Claude did this turn (tool calls, thinking), live while it runs. */
@@ -101,7 +108,8 @@ export interface OrganizeReq {
   backend?: Backend | null;
 }
 
-type SendOpts = { quiet?: boolean; web?: boolean; selection?: string[]; folder?: string | null; memory?: boolean; question?: string; think?: boolean; pin?: ModelTier | null; escalate?: "retry"; organize?: OrganizeReq };
+type SendOpts = { quiet?: boolean; web?: boolean; selection?: string[]; folder?: string | null; memory?: boolean; question?: string; think?: boolean; pin?: ModelTier | null; escalate?: "retry"; organize?: OrganizeReq; artifact?: string; recapFrom?: string };
+type ArtifactEscalation = Extract<ClaudeEvent, { type: "artifact_escalate" }>;
 
 type LinkProposal = Extract<ClaudeEvent, { type: "link_proposal" }>;
 
@@ -128,10 +136,12 @@ const keyOf = (slug: string, thread: string) => `${slug}/${thread}`;
  * the sidecar can resume it. Events are routed to their thread by message id, so a reply keeps
  * landing in the right thread even if the user selects another card meanwhile.
  */
-export function useClaudeChat(opts: { slug: string | null; thread: string; onLinkProposal?: (p: LinkProposal) => void }) {
+export function useClaudeChat(opts: { slug: string | null; thread: string; onLinkProposal?: (p: LinkProposal) => void; onArtifactEscalate?: (e: ArtifactEscalation, from: { slug: string; thread: string }) => void }) {
   const { slug, thread } = opts;
   const onLinkProposal = useRef(opts.onLinkProposal);
   onLinkProposal.current = opts.onLinkProposal;
+  const onArtifactEscalate = useRef(opts.onArtifactEscalate);
+  onArtifactEscalate.current = opts.onArtifactEscalate;
   const [status, setStatus] = useState<ClaudeStatus | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [busy, setBusy] = useState(false);
@@ -295,6 +305,7 @@ export function useClaudeChat(opts: { slug: string | null; thread: string; onLin
                       tier: e.tier ?? m.tier,
                       backend: e.backend ?? m.backend,
                       ...(e.fallback ? { fallback: e.fallback } : {}),
+                      ...(e.artifact ? { artifact: { id: e.artifact.id, credits: e.artifact.credits, paidCalls: e.artifact.paidCalls } } : {}),
                       ...(e.retried ? { retried: true, retriedFrom: e.retriedFrom } : {}),
                     }
                   : m,
@@ -362,6 +373,18 @@ export function useClaudeChat(opts: { slug: string | null; thread: string; onLin
           );
         } else if (e.type === "link_proposal") {
           onLinkProposal.current?.(e);
+        } else if (e.type === "credit_confirm") {
+          const ask = { reqId: e.reqId, used: e.used, cap: e.cap, more: e.more, estCredits: e.estCredits };
+          update(e.id ? idToKey.current.get(e.id) : undefined, (ms) => ms.map((m) => (m.id === e.id ? { ...m, creditAsk: ask, lastEventAt: at } : m)), true);
+        } else if (e.type === "credit_answered") {
+          update(e.id ? idToKey.current.get(e.id) : undefined, (ms) => ms.map((m) => (m.id === e.id && m.creditAsk?.reqId === e.reqId ? { ...m, creditAsk: { ...m.creditAsk, answered: e.allow ? "yes" : "no" } } : m)), true);
+        } else if (e.type === "spritecook_status" && !e.ok && e.reason) {
+          const reason = e.reason;
+          update(e.id ? idToKey.current.get(e.id) : undefined, (ms) => ms.map((m) => (m.id === e.id ? { ...m, spritecookNote: reason } : m)), true);
+        } else if (e.type === "artifact_escalate") {
+          const key = e.id ? idToKey.current.get(e.id) : undefined;
+          const t = key ? threads.current.get(key) : undefined;
+          if (t) onArtifactEscalate.current?.(e, { slug: t.slug, thread: t.thread });
         } else if (e.type === "question") {
           // Attach the question to the reply it belongs to: that reply then renders only as the
           // question card, so the question never appears twice (as streamed text and as a card).
@@ -406,9 +429,10 @@ export function useClaudeChat(opts: { slug: string | null; thread: string; onLin
       busyId.current = id;
       setBusy(true);
       const now = Date.now();
-      update(key, (ms) => [...ms, { id: `${id}-u`, role: "user", text: displayText ?? text }, { id, role: "claude", text: "", streaming: true, quiet: opts?.quiet, startedAt: now, lastEventAt: now, ...(opts?.organize ? { organizeReq: opts.organize } : {}) }], true);
+      update(key, (ms) => [...ms, { id: `${id}-u`, role: "user", text: displayText ?? text }, { id, role: "claude", text: "", streaming: true, quiet: opts?.quiet, startedAt: now, lastEventAt: now, ...(opts?.organize ? { organizeReq: opts.organize } : {}), ...(opts?.artifact ? { artifact: { id: opts.artifact } } : {}) }], true);
+      if (opts?.artifact) artifactRuns.start(opts.artifact, id);
       // A thread opened a moment ago (e.g. from the canvas context menu) may still be loading.
-      Promise.resolve(t.loaded ? undefined : t.loading).then(() => claudeApi.send(t.slug, id, text, context, t.thread, t.sessionId, { web: opts?.web, selection: opts?.selection, folder: opts?.folder, memory: opts?.memory, question: opts?.question, think: opts?.think, pin: opts?.pin, resumeLocal: t.localSessionId, escalate: opts?.escalate, organize: opts?.organize?.scope, organizeBackend: opts?.organize?.backend ?? null })).catch((e) => {
+      Promise.resolve(t.loaded ? undefined : t.loading).then(() => claudeApi.send(t.slug, id, text, context, t.thread, t.sessionId, { web: opts?.web, selection: opts?.selection, folder: opts?.folder, memory: opts?.memory, question: opts?.question, think: opts?.think, pin: opts?.pin, resumeLocal: t.localSessionId, escalate: opts?.escalate, organize: opts?.organize?.scope, organizeBackend: opts?.organize?.backend ?? null, artifact: opts?.artifact ?? null, recapFrom: opts?.recapFrom ?? null })).catch((e) => {
         update(key, (ms) => ms.map((m) => (m.id === id ? { ...m, text: String(e), streaming: false, isError: true } : m)), true);
         finishBusy(id);
       });
@@ -464,6 +488,19 @@ export function useClaudeChat(opts: { slug: string | null; thread: string; onLin
   const setOrganize = useCallback(
     (messageId: string, patch: Partial<{ status: "open" | "applied" | "discarded" | "replaced"; checked: boolean[] }>) => {
       update(currentKey.current ?? undefined, (ms) => ms.map((m) => (m.id === messageId && m.organize ? { ...m, organize: { ...m.organize, ...patch } } : m)), true);
+    },
+    [update],
+  );
+
+  /** Answers a paused artifact turn's credit confirm. */
+  const answerCredit = useCallback(
+    (messageId: string, allow: boolean) => {
+      const key = currentKey.current ?? undefined;
+      const t = key ? threads.current.get(key) : undefined;
+      const ask = t?.messages.find((m) => m.id === messageId)?.creditAsk;
+      if (!ask || ask.answered) return;
+      update(key, (ms) => ms.map((m) => (m.id === messageId && m.creditAsk ? { ...m, creditAsk: { ...m.creditAsk, answered: allow ? "yes" : "no" } } : m)), true);
+      void claudeApi.creditAnswer(ask.reqId, allow);
     },
     [update],
   );
@@ -531,7 +568,7 @@ export function useClaudeChat(opts: { slug: string | null; thread: string; onLin
     }
   }, []);
 
-  return { status, refreshStatus, messages, busy, context, sendText, retry, retryWithClaude, retryStalled, answerQuestion, markFetchSaved, setOrganize, undoMemory, interrupt, reset };
+  return { status, refreshStatus, messages, busy, context, sendText, retry, retryWithClaude, retryStalled, answerQuestion, answerCredit, markFetchSaved, setOrganize, undoMemory, interrupt, reset };
 }
 
 export type ClaudeChat = ReturnType<typeof useClaudeChat>;

@@ -8,6 +8,8 @@ import type { ActivityStep, ClaudeApi, ClaudeEvent, ClaudeStatus, LocalStatus, O
  */
 export function createClaudeMockApi(): ClaudeApi {
   const listeners = new Set<(e: ClaudeEvent) => void>();
+  let pendingArtifact: (() => void) | null = null;
+  let balance = 120;
   const emit = (e: ClaudeEvent) => listeners.forEach((l) => l(e));
   const setupListeners = new Set<(e: SetupEvent) => void>();
   const emitSetup = (e: SetupEvent) => setupListeners.forEach((l) => l(e));
@@ -68,6 +70,33 @@ export function createClaudeMockApi(): ClaudeApi {
     // per text), to show the 45 s stall warning; Retry then answers normally.
     send: async (_slug, id, text, _context, _thread, _resume, opts) => {
       turnTimers.forEach(clearTimeout);
+      // An artifact turn (browser dev): progress, one paused credit confirm, then done. No files appear.
+      if (opts?.artifact) {
+        const art = opts.artifact;
+        emit({ type: "route", id, backend: "claude", model: "claude-sonnet-5-5", escalated: false, reason: null, note: null });
+        turnTimers = [];
+        const at = (ms: number, fn: () => void) => turnTimers.push(window.setTimeout(fn, ms));
+        at(300, () => emit({ type: "spritecook_status", id, artifact: art, ok: false, reason: "no_key", missing: [] }));
+        at(600, () => emit({ type: "artifact_progress", id, artifact: art, label: "SpriteCook: generate game art…", progress: null, credits: 0 }));
+        at(1400, () => emit({ type: "artifact_progress", id, artifact: art, label: "SpriteCook: running", progress: 0.4, credits: 2 }));
+        at(2200, () => emit({ type: "credit_confirm", id, reqId: `cc-${id}`, tool: "generate_game_art", used: 4, cap: 4, more: 4, estCredits: 8 }));
+        pendingArtifact = () => {
+          emit({ type: "delta", id, text: "Made the hero image and the design notes (mock: nothing is saved in the browser)." });
+          emit({ type: "message_done", id, text: "Made the hero image and the design notes (mock: nothing is saved in the browser).", model: "claude-sonnet-5-5", backend: "claude", artifact: { id: art, credits: 6, paidCalls: 3, jobs: [], spritecook: false } });
+          balance = Math.max(0, balance - 6);
+        };
+        return;
+      }
+      // A local chat turn that asks for a visual hands it to Claude (escalate_artifact).
+      if (!opts?.think && /character sheet|concept art|style guide|mockup/i.test(text)) {
+        const type = /concept/i.test(text) ? "concept" : /style guide/i.test(text) ? "theme" : /mockup/i.test(text) ? "mockup" : "character";
+        emit({ type: "route", id, backend: "local", model: localModel, escalated: false, reason: null, note: null });
+        window.setTimeout(() => {
+          emit({ type: "artifact_escalate", id, artifactType: type, brief: text, title: undefined });
+          emit({ type: "message_done", id, text: "Claude is making it now in a new artifact card.", model: localModel, backend: "local" });
+        }, 500);
+        return;
+      }
       const toClaude = !!(opts?.think || opts?.web || opts?.escalate || opts?.pin === "deep");
       const local = ollama === "ready" && !toClaude;
       const reason = opts?.escalate ? "retry" : opts?.think || opts?.pin === "deep" ? "think" : opts?.web ? "web" : ollama !== "ready" ? "unavailable" : null;
@@ -193,6 +222,17 @@ export function createClaudeMockApi(): ClaudeApi {
     onLocalSetupEvent: async (cb) => {
       localListeners.add(cb);
       return () => localListeners.delete(cb);
+    },
+    creditAnswer: async (reqId, allow) => {
+      const id = reqId.replace(/^cc-/, "");
+      emit({ type: "credit_answered", id, reqId, allow });
+      window.setTimeout(() => {
+        pendingArtifact?.();
+        pendingArtifact = null;
+      }, 600);
+    },
+    spritecookBalance: async () => {
+      window.setTimeout(() => emit({ type: "spritecook_balance", credits: balance, error: null }), 200);
     },
   };
 }
