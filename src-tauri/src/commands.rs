@@ -650,6 +650,18 @@ pub fn artifact_set_active_theme(state: State<AppState>, slug: String, id: Optio
     with_ws(&state, |ws| crate::artifacts::set_active_theme(ws, &slug, id.as_deref()))
 }
 
+/// An HTML version bundled for the sandboxed iframe (CSP, theme tokens, files inlined).
+/// `head`: extra head markup from the UI (the bundled fonts as data: @font-face rules).
+#[tauri::command(async)]
+pub fn artifact_html(state: State<AppState>, slug: String, id: String, version: u32, head: Option<String>) -> Result<String> {
+    let head = head.unwrap_or_default();
+    // Only <style> blocks may be added (fonts); nothing that runs.
+    if head.to_ascii_lowercase().contains("<script") {
+        return Err(AppError::Invalid("head may only add styles".into()));
+    }
+    with_ws(&state, |ws| crate::artifacts::render_html(ws, &slug, &id, version, &head))
+}
+
 /// The theme CSS (custom properties) an HTML version of this artifact gets.
 #[tauri::command(async)]
 pub fn artifact_theme_css(state: State<AppState>, slug: String, id: String) -> Result<String> {

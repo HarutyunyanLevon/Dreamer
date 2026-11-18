@@ -663,6 +663,8 @@ export interface Api {
   /** null clears the active theme. */
   artifactSetActiveTheme(slug: string, id: string | null): Promise<void>;
   artifactThemes(slug: string): Promise<ArtifactThemeRef[]>;
+  /** An HTML version bundled for the sandbox (CSP first, theme tokens, files inlined); `head` = extra <style> (fonts). */
+  artifactHtml(slug: string, id: string, version: number, head?: string): Promise<string>;
   spritecookKeyStatus(): Promise<SpritecookKeyStatus>;
   /** Stores the SpriteCook API key in the OS credential store; "" removes it. */
   spritecookSetKey(key: string): Promise<SpritecookKeyStatus>;

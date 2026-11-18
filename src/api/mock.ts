@@ -651,6 +651,8 @@ export function createMockApi(): Api {
     artifactFile: async (_slug, _id, version, file) =>
       `data:image/svg+xml;utf8,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="320" height="240"><rect width="100%" height="100%" fill="#f5c3d8"/><text x="50%" y="50%" text-anchor="middle" font-family="sans-serif" fill="#472a4b">v${version} · ${file}</text></svg>`)}`,
     artifactVersionInfo: async () => ({ brief: "", notes: "", meta: null }),
+    artifactHtml: async (_slug, _id, version, head) =>
+      `<!doctype html><html><head><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; font-src data:; script-src 'unsafe-inline'">${head ?? ""}</head><body style="font-family:Nunito,sans-serif;background:#fdebf1;color:#472a4b"><h1 style="font-family:'Playfair Display',serif">Mock page v${version}</h1><button onclick="this.textContent='clicked'">Try me</button></body></html>`,
     artifactSetActiveTheme: async (slug, id) => {
       if (id) activeThemes.set(slug, id);
       else activeThemes.delete(slug);

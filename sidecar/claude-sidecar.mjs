@@ -535,11 +535,37 @@ const escalateArtifactTool = tool(
   },
 );
 
+// Deepen / grill: Claude may propose an artifact as a ghost card (a brief only, nothing spent).
+const proposeArtifactTool = tool(
+  "propose_artifact",
+  "Propose a visual artifact as a ghost card (a brief only: nothing is generated or spent until the user keeps it; " +
+    "keeping it makes Claude generate it). Use sparingly, in /grill-me or /expand, when seeing something would settle " +
+    "a design question (a character's look, a place's mood, a screen's layout, the game's style).",
+  {
+    type: z.enum(ARTIFACT_TYPES),
+    title: z.string().max(80),
+    brief: z.string().describe("What to make and which question it answers"),
+    source_card: z.string().optional().describe("The card it visualizes (id)"),
+  },
+  async (args) => {
+    {
+      const lim = hitLimit("any");
+      if (lim) return lim;
+    }
+    try {
+      const r = await requestTool("propose_artifact", args);
+      return text(`Proposed the ${args.type} "${r.title}" as a ghost card; nothing is generated until the user keeps it.`);
+    } catch (e) {
+      return fail(e);
+    }
+  },
+);
+
 // A fresh MCP server instance per session: an SDK server object binds to one transport.
 const makeServer = () => createSdkMcpServer({
   name: "dreamer",
   version: "1.0.0",
-  tools: [createCardTool, askQuestionTool, readCardTool, proposeLinkTool, mergeCardsTool, viewAttachmentTool, proposeEditTool, rememberTool, forgetTool, listTreeTool, proposeOrganizeTool, escalateArtifactTool],
+  tools: [createCardTool, askQuestionTool, readCardTool, proposeLinkTool, mergeCardsTool, viewAttachmentTool, proposeEditTool, rememberTool, forgetTool, listTreeTool, proposeOrganizeTool, escalateArtifactTool, proposeArtifactTool],
 });
 
 // The checklist /grill-me works through, in order. Kept here so the prompt and any future UI
@@ -597,6 +623,9 @@ const SYSTEM_PROMPT = [
   "/related: from the [Related cards] block, call propose_link for the 1-5 strongest connections to the selected card, " +
     "each with a short label and reason, and list them briefly.",
   "'Give me 3 takes': propose three distinctly different create_card calls.",
+  "Ghost artifacts: during /grill-me or /expand, when a visual would settle an open question, you may call " +
+    "propose_artifact once (type, title, a brief naming the question, source_card = the card). It costs nothing until " +
+    "the user keeps it. Never more than one per turn.",
   "/expand: from the selected card in this message, propose 2-4 child ghost cards with create_card, each a concrete next idea " +
     "that grows out of it, each with linked_from set to the card's id and a 2-3 word label. Same stage as the " +
     "card or earlier. Then list them in one line each.",
@@ -929,6 +958,7 @@ const BASE_OPTIONS = {
     "mcp__dreamer__list_tree",
     "mcp__dreamer__propose_organize",
     "mcp__dreamer__escalate_artifact",
+    "mcp__dreamer__propose_artifact",
   ],
   // The only built-in tools offered. They are not in allowedTools, so every call goes through
   // canUseTool (see webGate), which allows them only on a turn the user switched web access on.
@@ -1011,6 +1041,26 @@ const ARTIFACT_SYSTEM_PARTS = [
     "apply the preset's settings (get_preset_settings) and pass the key art asset in style_asset_ids. Generate in the " +
     "block's art mode (the artifact's override wins over the theme's). With no theme, choose a style that fits the cards " +
     "and state it in the notes.",
+  "Generate only what was asked for. Make exactly the parts the user specified, nothing extra (no unrequested " +
+    "turnarounds, expressions, variants or animations), then call suggest_next with 2-5 next steps. A chip click or a " +
+    "follow-up is its own turn.",
+  "Character: the base is a hero image (generate_character, or generate_game_art for a single illustration) plus " +
+    "notes.md with the design notes: bio, silhouette, palette, personality. Only when asked or from a chip: a turnaround " +
+    "(make_rotation_sheet from the hero asset), expressions or poses (generated with the hero asset as reference_asset_id), " +
+    "animations (generate_character_animations, then check_character_animation_run until done). Add-ons use start_version " +
+    "mode 'add' and land next to the hero.",
+  "Concept art: generate_game_art with the theme reference; notes.md says what the piece shows and the open design " +
+    "questions it raises.",
+  "Mockup: a live, self-contained index.html (inline CSS and JS, no CDN, no network: the sandbox blocks it) showing the " +
+    "screen interactively. Use the theme's CSS variables, project sprites via copy_asset (reference them as " +
+    "assets/<file>), and, when it helps, a matching SpriteCook UI kit: create_ui_kit or generate_ui_kit_concepts -> " +
+    "select_ui_kit_concept -> generate_ui_kit_component_sheets -> extract_ui_kit_components (check its quality_summary " +
+    "and fix flagged 9-slice borders) -> finalize_ui_kit; save each component you use as assets/<name>.png and draw " +
+    "9-slice parts with CSS border-image using the reported slice insets. notes.md lists what the screen tests.",
+  "Iteration: feedback in this thread (\"bigger hat\", \"more rust\") edits from the current version: start_version mode " +
+    "'new', then regenerate with the current asset as edit_asset_id (a direct edit) or reference_asset_id (a variation), " +
+    "and save the result under the same file name. A new version starts as a copy of the current one, so only replace " +
+    "what changes, and update notes.md to say what changed.",
   "Without SpriteCook (the block says NOT configured, or its tools are missing): do every part that needs no image " +
     "(notes, HTML, the theme spec), then say in one sentence that images need a SpriteCook key in Settings. Do not " +
     "pretend an image exists.",
@@ -1147,6 +1197,22 @@ artifactTool(
   async (a) => {
     const r = await artifactCall("set_theme", a);
     return text(`Theme spec of v${r.version} saved.`);
+  },
+);
+
+artifactTool(
+  "suggest_next",
+  "End every artifact turn with this: 2-5 contextual next steps shown as chips on the card (they replace the previous " +
+    "ones). Each: a 1-3 word label, the exact instruction to run when clicked, and the estimated SpriteCook credits. " +
+    "Character examples: Turnaround, Angry expression, Animate idle, Rival faction version. Concept examples: Storm " +
+    "weather, Night, Abandoned, Other faction's district. Only steps that build on what exists; never repeat one just done.",
+  {
+    artifact_id: z.string().optional(),
+    suggestions: z.array(z.object({ label: z.string().max(40), prompt: z.string(), estCredits: z.number().optional() })).min(2).max(5),
+  },
+  async (a) => {
+    await artifactCall("suggest_next", { suggestions: a.suggestions });
+    return text("Chips set. End the turn with one or two sentences on what you made.");
   },
 );
 

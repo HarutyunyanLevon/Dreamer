@@ -300,9 +300,20 @@ pub fn begin_version(ws: &Workspace, slug: &str, id: &str, add: bool, brief: &st
         }
         atomic_write(&vdir.join("brief.md"), format!("# v{n}\n\n{}\n", brief.trim()).as_bytes())?;
         write_json(&vdir.join("meta.json"), &json!({ "version": n, "parent": parent, "created": stamp, "model": model, "jobs": [], "credits": 0 }))?;
-        // A theme version starts from its parent's spec, so a small change keeps the rest.
-        let theme = parent.and_then(|p| meta.version(p)).and_then(|v| v.theme.clone());
-        meta.versions.push(Version { n, parent, created: stamp, files: Vec::new(), theme, credits: 0.0 });
+        // A new version starts as a copy of its parent (files and, for a theme, the spec), so it is
+        // complete on its own; the turn then replaces what it changes. The parent stays untouched.
+        let base = parent.and_then(|p| meta.version(p)).cloned();
+        let mut files = Vec::new();
+        if let Some(b) = &base {
+            for f in &b.files {
+                if let Ok(bytes) = fs::read(version_dir(&dir, b.n).join(&f.file)) {
+                    atomic_write(&vdir.join(&f.file), &bytes)?;
+                    files.push(f.clone());
+                }
+            }
+        }
+        let theme = base.and_then(|v| v.theme);
+        meta.versions.push(Version { n, parent, created: stamp, files, theme, credits: 0.0 });
         meta.current_version = n;
         Ok(n)
     })
@@ -618,6 +629,122 @@ pub fn themes(ws: &Workspace, slug: &str) -> Vec<Value> {
             Some(json!({ "id": id, "title": card.meta.title, "active": active.as_deref() == Some(id.as_str()), "versions": m.versions.len(), "spec": m.settled_version().and_then(|v| v.theme.clone()) }))
         })
         .collect()
+}
+
+// ---------- HTML artifacts (mockups, theme style guides) ----------
+
+/// The sandbox policy written into every HTML artifact before anything else: no network at all,
+/// only inline code and data: URLs (the version's own files, inlined below).
+pub const HTML_CSP: &str = "default-src 'none'; img-src data: blob:; media-src data: blob:; font-src data:; style-src 'unsafe-inline' data:; script-src 'unsafe-inline' data:; connect-src 'none'; frame-src 'none'; worker-src 'none'; object-src 'none'; form-action 'none'; base-uri 'none'";
+
+fn mime_of(file: &str) -> &'static str {
+    match file.rsplit('.').next().map(str::to_ascii_lowercase).as_deref() {
+        Some("png") => "image/png",
+        Some("webp") => "image/webp",
+        Some("gif") => "image/gif",
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("svg") => "image/svg+xml",
+        Some("mp4") => "video/mp4",
+        Some("webm") => "video/webm",
+        Some("css") => "text/css",
+        Some("js") => "text/javascript",
+        Some("json") => "application/json",
+        Some("woff2") => "font/woff2",
+        _ => "application/octet-stream",
+    }
+}
+
+/// A reference that points into the version folder ("assets/x.png", "./style.css").
+fn local_ref(r: &str) -> Option<String> {
+    let r = r.trim();
+    let r = r.split(['?', '#']).next().unwrap_or("");
+    if r.is_empty() || r.contains(':') || r.starts_with("//") || r.starts_with('/') {
+        return None;
+    }
+    check_file_name(r.trim_start_matches("./")).ok()
+}
+
+/// Replaces local references in `src="…"`, `href="…"` and `url(…)` with data: URLs of the
+/// version's files. Anything else (http links included) stays as written; the CSP blocks it.
+fn inline_refs(text: &str, load: &dyn Fn(&str) -> Option<String>, depth: u8) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    loop {
+        // The next attribute or url( opener.
+        let hit = ["src=", "href=", "url("].iter().filter_map(|k| rest.find(k).map(|i| (i, *k))).min_by_key(|(i, _)| *i);
+        let Some((i, key)) = hit else {
+            out.push_str(rest);
+            return out;
+        };
+        out.push_str(&rest[..i + key.len()]);
+        rest = &rest[i + key.len()..];
+        let (quote, body_start) = match rest.chars().next() {
+            Some(q @ ('"' | '\'')) => (Some(q), 1),
+            _ if key == "url(" => (None, 0),
+            _ => continue,
+        };
+        let body = &rest[body_start..];
+        let end = match quote {
+            Some(q) => body.find(q),
+            None => body.find(')'),
+        };
+        let Some(end) = end else { continue };
+        let target = &body[..end];
+        match local_ref(target).and_then(|f| {
+            let data = load(&f)?;
+            Some((f, data))
+        }) {
+            Some((f, data)) => {
+                let data = if depth > 0 && f.ends_with(".css") {
+                    // url(...) inside a stylesheet resolves against the version folder too.
+                    use base64::Engine;
+                    let css = base64::engine::general_purpose::STANDARD.decode(data.rsplit(',').next().unwrap_or("")).ok().map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
+                    format!("data:text/css;base64,{}", base64::engine::general_purpose::STANDARD.encode(inline_refs(&css, load, depth - 1)))
+                } else {
+                    data
+                };
+                if let Some(q) = quote {
+                    out.push(q);
+                }
+                out.push_str(&data);
+            }
+            None => {
+                if let Some(q) = quote {
+                    out.push(q);
+                }
+                out.push_str(target);
+            }
+        }
+        rest = &body[end..];
+    }
+}
+
+/// An HTML version ready for the sandboxed iframe: the CSP meta first, then the theme's CSS
+/// variables (`extra_head` = fonts from the UI), with every local file inlined as a data: URL.
+pub fn render_html(ws: &Workspace, slug: &str, id: &str, n: u32, extra_head: &str) -> Result<String> {
+    let meta = read(ws, slug, id)?;
+    let v = meta.version(n).ok_or_else(|| AppError::NotFound(format!("version {n}")))?;
+    let page = v.files.iter().find(|f| f.file == "index.html").or_else(|| v.files.iter().find(|f| f.file.ends_with(".html"))).ok_or_else(|| AppError::NotFound(format!("an HTML file in v{n}")))?;
+    let vdir = version_dir(&dir_of(ws, slug, id)?, n);
+    let html = String::from_utf8_lossy(&fs::read(vdir.join(&page.file)).map_err(|e| AppError::io(format!("read {}", page.file), e))?).into_owned();
+    let inherited = inherited_theme(ws, slug, id, &meta);
+    let own = (meta.kind == "theme").then(|| v.theme.clone()).flatten();
+    let mode = effective_art_mode(&meta, inherited.as_ref());
+    let css = theme_css(own.as_ref().or(inherited.as_ref().map(|t| &t.spec)), mode.as_ref());
+    let load = |f: &str| -> Option<String> {
+        use base64::Engine;
+        let bytes = fs::read(vdir.join(f)).ok()?;
+        Some(format!("data:{};base64,{}", mime_of(f), base64::engine::general_purpose::STANDARD.encode(bytes)))
+    };
+    let body = inline_refs(&html, &load, 1);
+    let head = format!("<meta charset=\"utf-8\"><meta http-equiv=\"Content-Security-Policy\" content=\"{HTML_CSP}\"><style>{css} img {{ image-rendering: var(--image-rendering, auto); }}</style>{extra_head}");
+    // The policy must come before anything that could run or load: right after <head>, or first.
+    let lower = body.to_ascii_lowercase();
+    let at = lower.find("<head").and_then(|i| lower[i..].find('>').map(|j| i + j + 1));
+    Ok(match at {
+        Some(i) => format!("{}{head}{}", &body[..i], &body[i..]),
+        None => format!("<!doctype html><html><head>{head}</head><body>{body}</body></html>"),
+    })
 }
 
 // ---------- what Claude sees and does in an artifact turn ----------
@@ -1008,6 +1135,7 @@ mod tests {
         save_file(&ws, INBOX_SLUG, &id, "hero.png", b"v2-hero", Some("asset-3"), Some("hero")).unwrap();
         assert_eq!(read_file(&ws, INBOX_SLUG, &id, 1, "hero.png").unwrap(), b"v1-hero");
         assert_eq!(read_file(&ws, INBOX_SLUG, &id, 2, "hero.png").unwrap(), b"v2-hero");
+        assert_eq!(read_file(&ws, INBOX_SLUG, &id, 2, "turnaround.png").unwrap(), b"turn", "v2 starts as a copy of v1");
         let meta = read(&ws, INBOX_SLUG, &id).unwrap();
         assert_eq!(meta.current_version, 2);
         assert_eq!(meta.version(2).unwrap().parent, Some(1));
@@ -1106,6 +1234,35 @@ mod tests {
         // A new theme version keeps the parent's spec until changed.
         begin_version(&ws, INBOX_SLUG, &a, false, "warmer", None).unwrap();
         assert_eq!(read(&ws, INBOX_SLUG, &a).unwrap().version(2).unwrap().theme.as_ref().unwrap().palette[0].hex, "#aa3322");
+    }
+
+    #[test]
+    fn html_is_sandboxed_and_self_contained() {
+        let (_d, ws) = ws();
+        let t = theme(&ws, "Rust", "#aa3322", "pixel");
+        set_active_theme(&ws, INBOX_SLUG, Some(&t)).unwrap();
+        let id = create(&ws, INBOX_SLUG, new("mockup")).unwrap().meta.id;
+        save_file(&ws, INBOX_SLUG, &id, "assets/btn.png", b"PNG", None, Some("ui-kit")).unwrap();
+        save_file(&ws, INBOX_SLUG, &id, "style.css", b".b { background: url(assets/btn.png); }", None, None).unwrap();
+        let page = "<html><head><script>window.x = 1</script><link rel=\"stylesheet\" href=\"style.css\"></head><body><img src='assets/btn.png'><img src=\"https://evil.example/x.png\"><a href=\"#top\">t</a></body></html>";
+        save_file(&ws, INBOX_SLUG, &id, "index.html", page.as_bytes(), None, Some("html")).unwrap();
+        let out = render_html(&ws, INBOX_SLUG, &id, 1, "").unwrap();
+        let csp = out.find("Content-Security-Policy").unwrap();
+        assert!(csp < out.find("<script").unwrap(), "the policy comes before any script");
+        assert!(out.contains("default-src 'none'") && out.contains("connect-src 'none'"));
+        assert!(out.contains("src='data:image/png;base64,UE5H'"), "local image inlined: {out}");
+        assert!(out.contains("href=\"data:text/css;base64,"), "stylesheet inlined");
+        assert!(out.contains("https://evil.example/x.png"), "remote refs are left for the CSP to block");
+        assert!(out.contains("--color-rust-red: #aa3322;"), "theme tokens injected");
+        assert!(out.contains("href=\"#top\""));
+        // The stylesheet's own url() was inlined too.
+        let css_b64 = out.split("href=\"data:text/css;base64,").nth(1).unwrap().split('"').next().unwrap();
+        use base64::Engine;
+        let css = String::from_utf8(base64::engine::general_purpose::STANDARD.decode(css_b64).unwrap()).unwrap();
+        assert!(css.contains("url(data:image/png;base64,UE5H)"), "{css}");
+        // A fragment without <head> still gets the policy first.
+        save_file(&ws, INBOX_SLUG, &id, "index.html", b"<div>hi</div>", None, None).unwrap();
+        assert!(render_html(&ws, INBOX_SLUG, &id, 1, "").unwrap().starts_with("<!doctype html><html><head><meta charset"));
     }
 
     #[test]

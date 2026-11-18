@@ -807,6 +807,32 @@ fn run_tool(state: &AppState, tool: &str, input: Value) -> Result<Value> {
             }
             Ok(json!({ "slug": slug, "title": card.meta.title }))
         }
+        // A ghost artifact (deepen / grill): a brief only. Nothing is generated or spent until the
+        // user keeps it; keeping it starts the artifact's first turn (UI).
+        "propose_artifact" => {
+            let slug = active_slug(state)?;
+            let kind = input.get("type").and_then(Value::as_str).unwrap_or_default().to_string();
+            let source = input.get("source_card").and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_string);
+            let folder = state.claude.folder.lock().ok().and_then(|f| f.clone());
+            let guard = state.ws.lock().map_err(|_| AppError::Invalid("workspace lock poisoned".into()))?;
+            let source = source.filter(|s| guard.read_card(&slug, s).is_ok());
+            let folder = folder.filter(|f| guard.folders(&slug).is_ok_and(|l| l.iter().any(|x| &x.id == f)));
+            let new = crate::artifacts::NewArtifact {
+                kind,
+                title: input.get("title").and_then(Value::as_str).map(str::to_string),
+                brief: input.get("brief").and_then(Value::as_str).unwrap_or_default().to_string(),
+                source_card: source,
+                ghost: true,
+                folder,
+                ..Default::default()
+            };
+            let card = crate::artifacts::create(&guard, &slug, new)?;
+            drop(guard);
+            if let Ok(mut idx) = state.search.lock() {
+                idx.mark_dirty(Some(&slug));
+            }
+            Ok(json!({ "id": card.meta.id, "title": card.meta.title }))
+        }
         other => Err(AppError::Invalid(format!("unknown tool {other:?}"))),
     }
 }

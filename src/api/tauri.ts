@@ -94,6 +94,7 @@ export const tauriApi: Api = {
   artifactVersionInfo: (slug, id, version) => invoke("artifact_version_info", { slug, id, version }),
   artifactSetActiveTheme: (slug, id) => invoke("artifact_set_active_theme", { slug, id }),
   artifactThemes: (slug) => invoke("artifact_themes", { slug }),
+  artifactHtml: (slug, id, version, head) => invoke("artifact_html", { slug, id, version, head: head ?? null }),
   spritecookKeyStatus: () => invoke("spritecook_key_status"),
   spritecookSetKey: (key) => invoke("spritecook_set_key", { key }),
   quitApp: () => invoke("quit_app"),
