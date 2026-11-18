@@ -2,6 +2,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { proposalPatch } from "../components/ProposalView";
 import { api, type Attachment, type Canvas, type Card, type CardKind, type CardPatch, type EditProposal, type Folder, type Frame, type HandoffScope, type Link, type NewCard, type OrganizeLayout, type OrganizePlanData, type Pos, type ProjectData, type ProjectSummary } from "../api";
 import { CARD_H, CARD_W, FOLDER_H, FOLDER_W } from "../components/cardGeometry";
+import type { NewArtifact } from "../api";
+import { ARTIFACT_LABEL, artifactType, createPrompt } from "../components/artifacts/prompts";
 
 const INBOX = "inbox";
 const CANVAS_SAVE_DEBOUNCE_MS = 500;
@@ -327,6 +329,12 @@ export interface ChatRequest {
   thread?: string | null;
   /** With `display`: show only a typing indicator while Claude answers (grill-me style turns). */
   quiet?: boolean;
+  /** An artifact turn on Claude in that artifact's thread (create, chip, regenerate). */
+  artifact?: string;
+  /** The chat thread an artifact request came from: its recap goes along. */
+  recapFrom?: string;
+  /** Wait while Claude is busy (e.g. the chat turn that asked for it is still finishing). */
+  wait?: boolean;
   n: number;
 }
 
@@ -1487,6 +1495,43 @@ export function useWorkspace() {
    * Keep on a ghost card. A merge ghost (`merged_from`) also moves its originals to Trash, all as
    * one undo step. Dismiss needs nothing special: the originals were never touched.
    */
+  const requestChat = useCallback((r: Omit<ChatRequest, "n">) => setChatRequest({ ...r, n: ++chatSeq.current }), []);
+
+  // ----- artifacts -----
+
+  /** Runs an artifact turn on Claude in the artifact's own thread (its chat opens there). */
+  const runArtifact = useCallback(
+    (id: string, text: string, display: string, o?: { recapFrom?: string }) => {
+      setContextCardId(id);
+      requestChat({ text, display, thread: id, send: true, artifact: id, wait: true, recapFrom: o?.recapFrom });
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [requestChat],
+  );
+
+  /**
+   * Creates an artifact card (undoable like any card) and, unless `generate` is false (a ghost),
+   * starts its first Claude turn.
+   */
+  const createArtifact = useCallback(
+    async (a: NewArtifact, o?: { generate?: boolean; recapFrom?: string }) => {
+      const slug = activeRef.current!;
+      const into = folderRef.current;
+      const created = await run(() => api.artifactCreate(slug, { ...(into ? { folder: into } : {}), ...a }));
+      if (!created) return null;
+      pushUndo({
+        label: "create artifact",
+        undo: async () => api.deleteCard(slug, created.id).then(() => {}),
+        redo: async () => api.restoreCard(slug, created.id).then(() => {}),
+      });
+      await refresh();
+      if (o?.generate !== false && !a.ghost) runArtifact(created.id, createPrompt(a.type, created.title), `Make the ${ARTIFACT_LABEL[a.type].toLowerCase()}`, { recapFrom: o?.recapFrom });
+      return created;
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [run, pushUndo, runArtifact],
+  );
+
   const keepGhostCard = useCallback(
     async (id: string) => {
       const slug = activeRef.current!;
@@ -1494,6 +1539,8 @@ export function useWorkspace() {
       const originals = (card?.merged_from ?? []).filter((o) => dataRef.current?.cards.some((c) => c.id === o));
       if (!card || originals.length === 0) {
         await updateCard(id, { ghost: false });
+        // A ghost artifact (Claude's proposal) is generated once the user keeps it.
+        if (card?.kind === "artifact") runArtifact(id, createPrompt(artifactType(card), card.title), `Make the ${ARTIFACT_LABEL[artifactType(card)].toLowerCase()}`);
         return;
       }
       const reason = `merged into ${card.title}`;
@@ -1511,7 +1558,7 @@ export function useWorkspace() {
       });
       if (ok) pushUndo({ label: "keep merge", undo: revert, redo: apply });
     },
-    [run, pushUndo, updateCard],
+    [run, pushUndo, updateCard, runArtifact],
   );
 
   /**
@@ -1570,7 +1617,7 @@ export function useWorkspace() {
   const keepAllSuggestions = useCallback(() => settleSuggestions(true), [settleSuggestions]);
   const dismissAllSuggestions = useCallback(() => settleSuggestions(false), [settleSuggestions]);
 
-  const requestChat = useCallback((r: Omit<ChatRequest, "n">) => setChatRequest({ ...r, n: ++chatSeq.current }), []);
+  // (requestChat is defined with the artifact actions, above keepGhostCard)
 
   // ----- ghost links (Claude's /related proposals) -----
 
@@ -1666,6 +1713,8 @@ export function useWorkspace() {
     dismissAllSuggestions,
     chatRequest,
     requestChat,
+    createArtifact,
+    runArtifact,
     clearChatRequest: () => setChatRequest(null),
     handoffRequest,
     openHandoff: (scope: HandoffScope) => setHandoffRequest({ scope, n: ++handoffSeq.current }),

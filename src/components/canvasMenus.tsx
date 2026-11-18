@@ -5,6 +5,8 @@ import type { Rect } from "./cardGeometry";
 import type { MenuItem, MenuSection } from "./ContextMenu";
 import { CONVERTIBLE, KIND_LABEL, SWATCHES, SWATCH_LABEL, hasStage, labelSize, swatchOf, type LabelSize } from "./kinds";
 import { isClip, isImage } from "./Attachments";
+import type { ArtifactType } from "../api";
+import { ARTIFACT_LABEL, ARTIFACT_TYPES, artifactType } from "./artifacts/prompts";
 
 /** What a right-click (or Shift+F10) landed on. */
 export type MenuTarget =
@@ -54,6 +56,12 @@ export interface MenuEnv {
   renameFolder: (id: string) => void;
   /** Folder nodes selected on the canvas. */
   folderSelection: string[];
+  /** Card › Visualize… : an artifact of that type from the card (brief = title, body, tags), linked to it. */
+  visualize: (c: Card, type: ArtifactType) => void;
+  /** Add › New artifact… at a world point. */
+  newArtifact: (point: { x: number; y: number }) => void;
+  /** Open an artifact's full-size view. */
+  openArtifact: (id: string) => void;
 }
 
 const stageDot = (s: string) => <span className={`dot dot-${s}`} />;
@@ -69,6 +77,7 @@ export function menuFor(target: MenuTarget, env: MenuEnv): { label: string; sect
       const c = find(target.id);
       if (!c) return null;
       if (c.ghost) return { label: "Suggestion menu", sections: ghostMenu(c, env) };
+      if (c.kind === "artifact") return { label: `${ARTIFACT_LABEL[artifactType(c)]} menu`, sections: artifactMenu(c, env) };
       if (c.kind === "image" || c.kind === "clip") return { label: `${KIND_LABEL[c.kind]} menu`, sections: objectMenu(c, env) };
       return { label: `${KIND_LABEL[c.kind]} menu`, sections: cardMenu(c, env) };
     }
@@ -156,6 +165,7 @@ function canvasMenu(p: { x: number; y: number }, env: MenuEnv): MenuSection[] {
                 { label: "Folder", run: () => env.newFolder(p) },
               ],
             },
+            { items: [{ label: "New artifact…", run: () => env.newArtifact(p) }] },
             {
               items: [
                 { label: "Image…", run: () => env.pickImages({ point: p }) },
@@ -254,6 +264,49 @@ function claudeCardMenu(c: Card, env: MenuEnv): MenuItem {
   return { label: "Claude", submenu: [{ items }] };
 }
 
+/** Card › Visualize… › Theme / Character / Concept / Mockup. */
+function visualizeMenu(c: Card, env: MenuEnv): MenuItem {
+  return { label: "Visualize…", submenu: [{ items: ARTIFACT_TYPES.map((t) => ({ label: ARTIFACT_LABEL[t], run: () => env.visualize(c, t) })) }] };
+}
+
+function artifactMenu(c: Card, env: MenuEnv): MenuSection[] {
+  const { ws } = env;
+  const type = artifactType(c);
+  const items: MenuItem[] = [{ label: "Open full size", hint: "Enter", run: () => env.openArtifact(c.id) }];
+  if (type === "theme") {
+    items.push({
+      label: "Set as active theme",
+      run: () =>
+        void api
+          .artifactSetActiveTheme(env.data.slug, c.id)
+          .then(() => ws.toast(`"${c.title}" is now the active theme: new artifacts inherit it.`))
+          .catch((e) => ws.setError(String(e))),
+    });
+  }
+  return [
+    { title: "Artifact", items },
+    {
+      title: "Claude",
+      items: [
+        { label: "Regenerate", run: () => ws.runArtifact(c.id, "Regenerate this artifact from its brief as a new version (start_version mode 'new'). Make the same parts as the current version, a fresh take. Then call suggest_next.", "Regenerate") },
+        { label: "Feedback…", run: () => env.askClaude(c.id, "", { prefill: true }) },
+      ],
+    },
+    {
+      title: "Arrange",
+      items: [
+        { label: "Link from here", hint: "L", run: () => env.startLink(c.id) },
+        { label: "Wrap in frame", hint: "Ctrl+G", run: () => env.wrap([c.id]) },
+        { label: "Group into folder", run: () => env.groupIntoFolder({ cards: [c.id] }) },
+        pinItem("cards", c.id, env),
+        { label: "Bring to front", run: () => ws.bringToFront(c.id) },
+        { label: "Send to back", run: () => ws.sendToBack(c.id) },
+      ],
+    },
+    { title: "Danger", items: [{ label: "Delete", hint: "Del", danger: true, run: () => env.deleteCards([c.id]) }] },
+  ];
+}
+
 function cardMenu(c: Card, env: MenuEnv): MenuSection[] {
   const { ws } = env;
   const isLabel = c.kind === "label";
@@ -308,7 +361,7 @@ function cardMenu(c: Card, env: MenuEnv): MenuSection[] {
         stageMenu([c], env),
       ],
     },
-    { title: "Claude", items: [claudeCardMenu(c, env)] },
+    { title: "Claude", items: [claudeCardMenu(c, env), visualizeMenu(c, env)] },
     { title: "Arrange", items: arrange },
     { title: "Danger", items: [{ label: "Delete", hint: "Del", danger: true, run: () => env.deleteCards([c.id]) }] },
   ];
@@ -332,7 +385,7 @@ function objectMenu(c: Card, env: MenuEnv): MenuSection[] {
         }),
     },
   ];
-  const claude: MenuItem[] = [];
+  const claude: MenuItem[] = [visualizeMenu(c, env)];
   if (c.kind === "image") claude.push({ label: "Describe image", disabled: att ? undefined : "There's no image yet", run: () => env.askClaude(c.id, "/describe") });
   if (c.kind === "clip") {
     const clip = att && isClip(att) ? att : undefined;

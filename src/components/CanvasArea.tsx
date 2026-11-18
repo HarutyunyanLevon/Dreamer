@@ -26,6 +26,8 @@ import { TrashView } from "./TrashView";
 import { ProposalView } from "./ProposalView";
 import { DuskStrip, useDuskGlass } from "./DuskGlass";
 import { OrganizePreviewLayer, TidyNudge } from "./OrganizePlan";
+import { NewArtifactDialog } from "./artifacts/NewArtifact";
+import { briefFromCard } from "./artifacts/prompts";
 
 /** Cards loose on one canvas (outside every frame) before "Tidy this folder?" shows. */
 const TIDY_NUDGE_AT = 25;
@@ -58,6 +60,8 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
   const imageTarget = useRef<null | { at?: { x: number; y: number }; cardId?: string }>(null);
   /** A one-line text prompt (tag, link label, caption). */
   const [ask, setAsk] = useState<Parameters<MenuEnv["askText"]>[0] | null>(null);
+  /** Add › New artifact… (at a point, or the centre of the view). */
+  const [newArtifact, setNewArtifact] = useState<null | { at?: { x: number; y: number } }>(null);
   /** An attachment opened from a card on the canvas: an image in the lightbox, or a clip's popover. */
   const [viewer, setViewer] = useState<{ cardId: string; attId: string; anchor: DOMRect } | null>(null);
   const onAttachment = useCallback((cardId: string, attId: string, anchor: DOMRect) => setViewer({ cardId, attId, anchor }), []);
@@ -1047,6 +1051,12 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
     promptClip: (t) => setClipPrompt("cardId" in t ? { cardId: t.cardId } : { at: t.point }),
     paste: (p) => void pasteAt(p),
     askText: setAsk,
+    visualize: (c, type) => {
+      const pos = data?.canvas.cards[c.id];
+      void ws.createArtifact({ type, title: c.title, brief: briefFromCard(c, type), sourceCard: c.id, ...(pos ? { x: pos.x + (pos.w ?? CARD_W) + 60, y: pos.y } : {}) });
+    },
+    newArtifact: (point) => setNewArtifact({ at: { x: point.x - CARD_W / 2, y: point.y - CARD_H / 2 } }),
+    openArtifact: (id) => ws.setContextCard(id),
     selectAll: () => {
       setSelection(new Set(visibleRef.current.map((c) => c.id)));
       setFolderSel(new Set(Object.keys(data?.canvas.folders ?? {})));
@@ -1104,6 +1114,7 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
         { label: data?.cards.some((c) => c.role === "tech") ? "Tech & constraints (open)" : "Tech & constraints", run: () => void addKind("tech") },
       ],
     },
+    { items: [{ label: "New artifact…", run: () => setNewArtifact({}) }] },
   ];
 
   const editingCard = data?.cards.find((c) => c.id === editing) ?? null;
@@ -1464,6 +1475,16 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
       })()}
       {addMenu && <ContextMenu x={addMenu.x} y={addMenu.y} label="Add" sections={addMenuSections} onClose={() => setAddMenu(null)} />}
       {ask && <AskText {...ask} onClose={() => setAsk(null)} />}
+      {newArtifact && (
+        <NewArtifactDialog
+          onClose={() => setNewArtifact(null)}
+          onCreate={(type, title, brief) => {
+            const { w, h } = sizeRef.current;
+            const at = newArtifact.at ?? { x: (w / 2 - vp.x) / vp.zoom - CARD_W / 2, y: (h / 2 - vp.y) / vp.zoom - CARD_H / 2 };
+            void ws.createArtifact({ type, title: title || undefined, brief, ...at });
+          }}
+        />
+      )}
       {editingCard && (
         <CardEditor
           key={editingCard.id}

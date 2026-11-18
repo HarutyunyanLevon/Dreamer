@@ -1429,3 +1429,9 @@ input.frame-tab { cursor: text; min-width: 180px; outline: 2px solid var(--accen
 .balance-chip { font-variant-numeric: tabular-nums; }
 .balance-chip.warn { color: var(--muted); }
 .sc-note .chat-failure-line span { color: var(--body); }
+.new-artifact form { display: flex; flex-direction: column; gap: 10px; }
+.artifact-types { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+.artifact-type { display: flex; flex-direction: column; align-items: center; gap: 6px; min-height: 64px; padding: 10px 6px; border-radius: 14px; border: 1px solid rgba(255, 255, 255, 0.9); background: rgba(255, 255, 255, 0.5); color: var(--body); font: inherit; font-size: 13px; cursor: pointer; }
+.artifact-type:hover { background: rgba(255, 255, 255, 0.8); }
+.artifact-type.on { border-color: var(--accent); background: var(--accent-soft); color: var(--ink); font-weight: 700; }
+.artifact-brief { min-height: 88px; resize: vertical; font: inherit; }

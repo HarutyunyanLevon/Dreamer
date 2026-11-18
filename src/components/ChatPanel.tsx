@@ -77,6 +77,17 @@ export function ChatPanel({ ws, panels }: { ws: Workspace; panels: Pick<ReturnTy
     slug: ws.active,
     thread,
     onLinkProposal: (p) => ws.addGhostLink({ slug: p.slug, from: p.from, to: p.to, label: p.label, reason: p.reason }),
+    // A chat turn (usually local) asked for a visual: Claude makes it in a new artifact card, with
+    // a recap of the thread that asked. The request waits until that chat turn has finished.
+    onArtifactEscalate: (e, from) => {
+      if (from.slug !== ws.active) return;
+      const source = from.thread !== "project" ? ws.data?.cards.find((c) => c.id === from.thread) : undefined;
+      const pos = source ? ws.data?.canvas.cards[source.id] : undefined;
+      void ws.createArtifact(
+        { type: e.artifactType, title: e.title, brief: e.brief, sourceCard: source?.id, ...(pos ? { x: pos.x + (pos.w ?? 260) + 60, y: pos.y } : {}) },
+        { recapFrom: from.thread },
+      );
+    },
   });
   const [text, setText] = useState("");
   const [confirmReset, setConfirmReset] = useState(false);
@@ -178,8 +189,14 @@ export function ChatPanel({ ws, panels }: { ws: Workspace; panels: Pick<ReturnTy
       if (pinned && ws.active) setPin(ws.active, null);
       return;
     }
+    // An artifact request (or one that asked to wait) is held until Claude is free.
+    if (req.send && req.wait && chat.busy) return;
     handledReq.current = req.n;
     ws.clearChatRequest();
+    if (req.send && req.artifact) {
+      chat.sendText(req.text, undefined, req.display ?? req.text, { artifact: req.artifact, recapFrom: req.recapFrom, memory: false, folder: ws.folder });
+      return;
+    }
     if (req.send) {
       const org = parseOrganize(req.text);
       if (chat.busy) ws.setError("Claude is still answering; try again in a moment.");
@@ -221,6 +238,13 @@ export function ChatPanel({ ws, panels }: { ws: Workspace; panels: Pick<ReturnTy
     if (org) {
       runOrganize(org, display);
       setText("");
+      return;
+    }
+    // In an artifact's thread every message is an artifact turn on Claude (feedback, a new part).
+    if (contextCard?.kind === "artifact" && !contextCard.ghost) {
+      chat.sendText(display, undefined, display, { artifact: contextCard.id, think, folder: ws.folder, memory: false });
+      setText("");
+      setThink(false);
       return;
     }
     const x = expand(display, contextCard);
