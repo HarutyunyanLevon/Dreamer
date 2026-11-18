@@ -137,6 +137,18 @@ pub fn resolve(tool: Tool) -> Option<PathBuf> {
     resolve_with(tool, &SearchEnv::from_process(), |p| p.is_file())
 }
 
+/// The installed Claude Code as something the Agent SDK can spawn directly (`pathToClaudeCodeExecutable`):
+/// a native binary or a `.js` entry point. npm's `claude.cmd` shim is unwrapped to the package it
+/// launches, since Node cannot spawn a `.cmd` without a shell.
+pub fn claude_executable() -> Option<PathBuf> {
+    let p = resolve(Tool::Claude)?;
+    if !p.extension().is_some_and(|e| e.eq_ignore_ascii_case("cmd")) {
+        return Some(p);
+    }
+    let pkg = p.parent()?.join("node_modules").join("@anthropic-ai").join("claude-code");
+    [pkg.join("bin").join("claude.exe"), pkg.join("cli.js")].into_iter().find(|c| c.is_file())
+}
+
 /// A one-line description of where we looked, for the "not found" message.
 pub fn searched_locations(tool: Tool, windows: bool) -> &'static str {
     match (tool, windows) {
@@ -149,7 +161,7 @@ pub fn searched_locations(tool: Tool, windows: bool) -> &'static str {
 
 /// PATH for children: the folders of the tools we resolved go first, so e.g. `claude.cmd`
 /// (which calls `node`) works even when the app's own PATH lacks the Node.js folder.
-fn child_path(extra: &[&Path]) -> OsString {
+fn child_path_env(extra: &[&Path]) -> OsString {
     let mut dirs: Vec<PathBuf> = extra.iter().filter_map(|p| p.parent().map(Path::to_path_buf)).collect();
     if let Some(node) = resolve(Tool::Node) {
         if let Some(d) = node.parent() {
@@ -163,11 +175,20 @@ fn child_path(extra: &[&Path]) -> OsString {
     std::env::join_paths(dirs).unwrap_or_else(|_| std::env::var_os("PATH").unwrap_or_default())
 }
 
+/// The one place every path handed to a child process (argv, cwd, env, stdin) goes through.
+/// Tauri's `resource_dir()` etc. return Windows verbatim paths (`\\?\C:\...`), which Node's
+/// `realpathSync` chokes on ("EISDIR ... lstat 'C:'"). `dunce` strips the prefix when safe and
+/// leaves the path unchanged when it can't be simplified.
+pub fn child_path(p: &Path) -> PathBuf {
+    dunce::simplified(p).to_path_buf()
+}
+
 /// Builds a Command that never flashes a console window on Windows (Dreamer is a GUI app; in
 /// release builds every console child would otherwise pop up its own black window).
 pub fn command(program: &Path) -> Command {
-    let mut cmd = Command::new(program);
-    cmd.env("PATH", child_path(&[program]));
+    let program = child_path(program);
+    let mut cmd = Command::new(&program);
+    cmd.env("PATH", child_path_env(&[&program]));
     hide_window(&mut cmd);
     cmd
 }
@@ -580,6 +601,15 @@ pub fn start_login(app: &AppHandle, setup: &SetupState) -> Result<()> {
 pub fn open_login_url(url: &str) -> Result<()> {
     if !is_anthropic_url(url) {
         return Err(AppError::Invalid("refusing to open a non-Anthropic URL".into()));
+    }
+    open_in_browser(url)
+}
+
+/// Opens an http(s) URL in the default browser (web clips' "Open in browser").
+pub fn open_in_browser(url: &str) -> Result<()> {
+    let lower = url.trim().to_ascii_lowercase();
+    if !(lower.starts_with("http://") || lower.starts_with("https://")) || url.chars().any(|c| c.is_control() || c == '"') {
+        return Err(AppError::Invalid("only http(s) URLs can be opened".into()));
     }
     #[cfg(windows)]
     let mut cmd = {
