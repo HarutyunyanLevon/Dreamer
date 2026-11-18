@@ -28,6 +28,7 @@ import { DuskStrip, useDuskGlass } from "./DuskGlass";
 import { OrganizePreviewLayer, TidyNudge } from "./OrganizePlan";
 import { NewArtifactDialog } from "./artifacts/NewArtifact";
 import { ArtifactFullView } from "./artifacts/ArtifactView";
+import { ArtifactCardBody, ArtifactHead } from "./artifacts/ArtifactCard";
 import { briefFromCard } from "./artifacts/prompts";
 
 /** Cards loose on one canvas (outside every frame) before "Tidy this folder?" shows. */
@@ -663,6 +664,16 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
     [dragApi],
   );
   const onProposalCard = useCallback((id: string) => setProposalFor(id), []);
+  const runArtifactRef = useRef(ws.runArtifact);
+  runArtifactRef.current = ws.runArtifact;
+  const artifactActions = useMemo<ArtifactActions>(
+    () => ({
+      chip: (id, prompt, label) => runArtifactRef.current(id, `${prompt}\n\n(Suggestion chip "${label}": make exactly this in one turn; an add-on to what exists uses start_version mode 'add'. Then call suggest_next.)`, label),
+      open: (id) => setArtifactView(id),
+      settings: () => window.dispatchEvent(new CustomEvent("dreamer:open-settings", { detail: "spritecook" })),
+    }),
+    [],
+  );
   // The chat reads the canvas selection when it sends (list_cards scope "selection").
   useEffect(() => ws.setCanvasSelection([...selection]), [ws, selection]);
 
@@ -1203,6 +1214,7 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
                 isLinkSource={linkFrom === c.id}
                 selected={selection.size ? selection.has(c.id) : ws.contextCardId === c.id}
                 onOpen={onOpenCard}
+                artifact={artifactActions}
                 onPrompt={onPromptCard}
                 proposed={!!data.proposals?.[c.id]}
                 onProposal={onProposalCard}
@@ -1665,6 +1677,9 @@ function CrossLinks({ cards, all, data, rectOf, ws }: { cards: Card[]; all: Map<
   );
 }
 
+/** What an artifact card can ask the canvas to do. */
+type ArtifactActions = { chip: (id: string, prompt: string, label: string) => void; open: (id: string) => void; settings: () => void };
+
 type CardActions = Pick<Workspace, "moveCard" | "resizeCard" | "flushCanvas" | "bringToFront" | "updateCard" | "deleteCard" | "keepGhostCard">;
 /** Drag into a folder: start, hover (highlight), release (true = moved into a folder). */
 type CardDrag = { begin: () => void; over: (x: number, y: number, id: string) => void; drop: (x: number, y: number, id: string) => boolean; unpin: (id: string) => void };
@@ -1688,6 +1703,7 @@ const CardView = memo(function CardView({
   onMeasure,
   onAttachment,
   drag,
+  artifact,
 }: {
   card: Card;
   pos?: Pos;
@@ -1706,6 +1722,8 @@ const CardView = memo(function CardView({
   onMeasure: (id: string, h: number) => void;
   onAttachment: (cardId: string, attId: string, anchor: DOMRect) => void;
   drag: CardDrag;
+  /** Artifact cards: run a suggestion chip, open the full-size view, open Settings (SpriteCook). */
+  artifact: ArtifactActions;
 }) {
   const elRef = useRef<HTMLElement | null>(null);
 
@@ -1840,7 +1858,9 @@ const CardView = memo(function CardView({
   const open = openQuestions(card.items);
   const doneCount = (card.items ?? []).filter((i) => i.done).length;
   const ghost = !!card.ghost;
-  const head = staged ? (
+  const head = kind === "artifact" ? (
+    <ArtifactHead card={card} menu={menuBtn} />
+  ) : staged ? (
     <div className="card-head">
       <span className={`dot dot-${card.stage}`} aria-hidden="true" />
       <span className="stage-name">{STAGE_LABEL[card.stage]}</span>
@@ -1872,7 +1892,9 @@ const CardView = memo(function CardView({
     menuBtn
   );
   const media =
-    kind === "image" ? (
+    kind === "artifact" && !ghost ? (
+      <ArtifactCardBody card={card} slug={active} onChip={artifact.chip} onOpen={artifact.open} onSettings={artifact.settings} />
+    ) : kind === "image" ? (
       <ImageBody image={card.attachments.find(isImage)} slug={active} title={card.title} />
     ) : kind === "clip" ? (
       <ClipBody clip={card.attachments.find(isClip)} slug={active} title={card.title} />
@@ -1911,6 +1933,7 @@ const CardView = memo(function CardView({
         (pos.pinned ? " pinned" : "")
       }
       style={style}
+      onDoubleClick={kind === "artifact" && !ghost ? () => artifact.open(card.id) : undefined}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}

@@ -122,6 +122,12 @@ export function ChatPanel({ ws, panels }: { ws: Workspace; panels: Pick<ReturnTy
       .catch(() => {});
   }, []);
   useEffect(loadTierModels, [loadTierModels]);
+  // An artifact card's "Images need a SpriteCook key" note opens Settings.
+  useEffect(() => {
+    const open = () => setShowModels(true);
+    window.addEventListener("dreamer:open-settings", open);
+    return () => window.removeEventListener("dreamer:open-settings", open);
+  }, []);
   // Startup may find and prepare a local model after the panel loaded its settings.
   useEffect(() => {
     let unsub: (() => void) | undefined;
