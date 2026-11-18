@@ -592,6 +592,109 @@ pub fn project_images(ws: &Workspace, slug: &str, except: &str) -> Vec<Value> {
         .collect()
 }
 
+// ---------- handoff ----------
+
+/// What the handoff pack gets from the artifacts: the approved versions' files (copied to
+/// `assets/<artifact-slug>/...`), the 05-assets.md sections (artifacts + the active theme's style
+/// guide) and a short note for Claude's generation prompt.
+#[derive(Default)]
+pub struct HandoffPart {
+    pub assets: Vec<(String, PathBuf)>,
+    pub section: String,
+    pub prompt_note: String,
+}
+
+fn unique_slug(title: &str, used: &mut Vec<String>) -> String {
+    let base = { let s = crate::storage::slugify(title); if s.is_empty() { "artifact".to_string() } else { s } };
+    let mut s = base.clone();
+    let mut i = 2;
+    while used.contains(&s) {
+        s = format!("{base}-{i}");
+        i += 1;
+    }
+    used.push(s.clone());
+    s
+}
+
+pub fn handoff(ws: &Workspace, slug: &str) -> HandoffPart {
+    let Ok(dir) = ws.existing_project_dir(slug) else { return HandoffPart::default() };
+    let mut used = Vec::new();
+    let mut part = HandoffPart::default();
+    let mut lines: Vec<String> = Vec::new();
+    let mut slugs: BTreeMap<String, String> = BTreeMap::new();
+    let active = active_theme(ws, slug);
+    for (id, meta) in list(ws, slug) {
+        let Ok(card) = ws.read_card(slug, &id) else { continue };
+        if card.meta.ghost {
+            continue;
+        }
+        let title = card.meta.title.trim().to_string();
+        let aslug = unique_slug(&title, &mut used);
+        slugs.insert(id.clone(), aslug.clone());
+        // Unapproved artifacts are ignored.
+        let Some(n) = meta.approved_version else { continue };
+        let Some(v) = meta.version(n) else { continue };
+        let vdir = version_dir(&dir.join("artifacts").join(&id), n);
+        let mut files = Vec::new();
+        for f in &v.files {
+            let name = format!("{aslug}/{}", f.file);
+            part.assets.push((name.clone(), vdir.join(&f.file)));
+            files.push(format!("assets/{name}"));
+        }
+        let theme = inherited_theme(ws, slug, &id, &meta).map(|t| t.title).unwrap_or_else(|| if meta.kind == "theme" { "(this theme)".into() } else { "none".into() });
+        let brief = card.body.trim().lines().filter(|l| !l.trim().is_empty()).take(3).collect::<Vec<_>>().join(" ");
+        let cover = files.iter().find(|f| f.ends_with("/hero.png") || f.ends_with("/key-art.png") || f.ends_with("/concept.png")).or_else(|| files.iter().find(|f| [".png", ".webp", ".jpg", ".gif"].iter().any(|x| f.ends_with(x))));
+        let mut entry = format!("### {title}\n\n- Type: {}\n- Version: v{n} (approved)\n- Theme: {theme}\n- Brief: {}\n- Files: {}\n", meta.kind, if brief.is_empty() { "(none)".into() } else { brief }, files.iter().map(|f| format!("`{f}`")).collect::<Vec<_>>().join(", "));
+        if let Some(c) = cover {
+            entry.push_str(&format!("\n![{title}]({c})\n"));
+        }
+        lines.push(entry);
+        part.prompt_note.push_str(&format!("\n- \"{title}\" ({}, v{n}): files under assets/{aslug}/{}", meta.kind, cover.map(|c| format!(", main image {c}")).unwrap_or_default()));
+    }
+    if !lines.is_empty() {
+        part.section.push_str("\n\n## Artifacts (approved)\n\nVisual artifacts the user approved in Dreamer. Unapproved versions are not part of the pack.\n\n");
+        part.section.push_str(&lines.join("\n"));
+    }
+    // The active theme is the style guide (its approved version, else the current one).
+    if let Some(tid) = active {
+        if let (Ok(meta), Ok(card)) = (read(ws, slug, &tid), ws.read_card(slug, &tid)) {
+            if let Some(v) = meta.settled_version() {
+                let t = v.theme.clone().unwrap_or_default();
+                let aslug = slugs.get(&tid).cloned().unwrap_or_else(|| unique_slug(&card.meta.title, &mut used));
+                let mut s = format!("\n\n## Style guide: {}\n\n", card.meta.title.trim());
+                s.push_str(&format!("From the project's active theme (v{}{}).\n", v.n, if meta.approved_version == Some(v.n) { ", approved" } else { ", not approved yet" }));
+                if !t.palette.is_empty() {
+                    s.push_str("\n| Swatch | Hex |\n|---|---|\n");
+                    for sw in &t.palette {
+                        s.push_str(&format!("| {} | `{}` |\n", sw.name, sw.hex));
+                    }
+                }
+                s.push_str(&format!("\n- Fonts: headings {}, body {}\n", if t.fonts.heading.is_empty() { "TBD" } else { &t.fonts.heading }, if t.fonts.body.is_empty() { "TBD" } else { &t.fonts.body }));
+                s.push_str(&format!("- Art mode: {}\n", t.art_mode.as_ref().map(ArtMode::label).unwrap_or_else(|| "TBD".into())));
+                if !t.mood.is_empty() {
+                    s.push_str(&format!("- Mood: {}\n", t.mood.join(", ")));
+                }
+                if !t.dos.is_empty() {
+                    s.push_str(&format!("- Do: {}\n", t.dos.join("; ")));
+                }
+                if !t.donts.is_empty() {
+                    s.push_str(&format!("- Don't: {}\n", t.donts.join("; ")));
+                }
+                if let Some(k) = &t.key_art {
+                    let name = format!("{aslug}/{k}");
+                    if !part.assets.iter().any(|(n, _)| n == &name) {
+                        part.assets.push((name.clone(), version_dir(&dir.join("artifacts").join(&tid), v.n).join(k)));
+                    }
+                    s.push_str(&format!("\n![Key art](assets/{name})\n"));
+                }
+                part.prompt_note.push_str(&format!("\nThe active theme \"{}\" is the style guide (palette, fonts, art mode, do/don't); refer to it for art direction.", card.meta.title.trim()));
+                part.section.push_str(&s);
+            }
+        }
+    }
+    part
+}
+
 /// Deletes the folders of artifacts whose card is gone for good (Trash emptied).
 pub fn sweep(project_dir: &Path, live: &dyn Fn(&str) -> bool) {
     let Ok(rd) = fs::read_dir(project_dir.join("artifacts")) else { return };
@@ -1263,6 +1366,32 @@ mod tests {
         // A fragment without <head> still gets the policy first.
         save_file(&ws, INBOX_SLUG, &id, "index.html", b"<div>hi</div>", None, None).unwrap();
         assert!(render_html(&ws, INBOX_SLUG, &id, 1, "").unwrap().starts_with("<!doctype html><html><head><meta charset"));
+    }
+
+    #[test]
+    fn handoff_takes_only_approved_versions_and_the_active_theme() {
+        let (_d, ws) = ws();
+        let t = theme(&ws, "Rust lake", "#aa3322", "pixel");
+        set_active_theme(&ws, INBOX_SLUG, Some(&t)).unwrap();
+        let ch = create(&ws, INBOX_SLUG, NewArtifact { title: Some("Fish priest".into()), ..new("character") }).unwrap().meta.id;
+        save_file(&ws, INBOX_SLUG, &ch, "hero.png", b"v1", None, Some("hero")).unwrap();
+        begin_version(&ws, INBOX_SLUG, &ch, false, "bigger hat", None).unwrap();
+        save_file(&ws, INBOX_SLUG, &ch, "hero.png", b"v2", None, Some("hero")).unwrap();
+        let other = create(&ws, INBOX_SLUG, NewArtifact { title: Some("Docks".into()), ..new("concept") }).unwrap().meta.id;
+        save_file(&ws, INBOX_SLUG, &other, "concept.png", b"c", None, None).unwrap();
+        // Nothing approved: no artifact section, but the active theme is the style guide.
+        let p = handoff(&ws, INBOX_SLUG);
+        assert!(!p.section.contains("## Artifacts"));
+        assert!(p.section.contains("## Style guide: Rust lake") && p.section.contains("| Rust red | `#aa3322` |") && p.section.contains("Art mode: pixel 16px"), "{}", p.section);
+        assert_eq!(p.assets.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(), vec!["rust-lake/key-art.png"]);
+        // Approve v1 of the character only.
+        update(&ws, INBOX_SLUG, &ch, ArtifactPatch { approved_version: Some(1), ..Default::default() }).unwrap();
+        let p = handoff(&ws, INBOX_SLUG);
+        assert!(p.section.contains("### Fish priest") && p.section.contains("v1 (approved)") && p.section.contains("Theme: Rust lake"));
+        assert!(p.section.contains("`assets/fish-priest/hero.png`") && !p.section.contains("Docks"), "unapproved artifacts are ignored");
+        let hero = p.assets.iter().find(|(n, _)| n == "fish-priest/hero.png").unwrap();
+        assert_eq!(fs::read(&hero.1).unwrap(), b"v1", "the approved version, not the current one");
+        assert!(p.prompt_note.contains("Fish priest"));
     }
 
     #[test]

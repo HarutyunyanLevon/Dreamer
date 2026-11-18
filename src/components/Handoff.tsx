@@ -148,6 +148,7 @@ export function cardsInScope(data: ProjectData, spec: HandoffSpec): Card[] {
     if (!base.has(c.id)) return false;
     if (c.kind === "sticky") return spec.include_stickies;
     if (c.kind === "card") return spec.stages.includes(c.stage);
+    if (c.kind === "artifact") return false; // artifacts go in through approval, not as cards
     return true;
   });
 }

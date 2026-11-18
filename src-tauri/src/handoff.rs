@@ -196,6 +196,8 @@ pub fn resolve_scope(data: &ProjectData, spec: &ScopeSpec) -> Result<Vec<String>
         match c.meta.kind {
             CardKind::Sticky => spec.include_stickies,
             CardKind::Card => spec.stages.contains(&c.meta.stage),
+            // Artifacts enter the pack through approval (assets + 05-assets.md), not as cards.
+            CardKind::Artifact => false,
             _ => true,
         }
     };
@@ -522,10 +524,16 @@ pub fn start(app: &AppHandle, state: &AppState, slug: &str, mode: Mode, spec: Sc
     }
     let label = scope_label(&data, &spec.scope);
     let version = next_version(&dir);
-    let prompt = match mode {
+    let mut prompt = match mode {
         Mode::Gaps => gap_prompt(&data, &label, &spec, &cards, &frames, memory.as_deref()),
         Mode::Generate => gen_prompt(&data, &label, &spec, &cards, &frames, version, &gaps, previous(&dir).as_ref(), memory.as_deref()),
     };
+    if mode == Mode::Generate {
+        let note = state.ws.lock().map(|ws| crate::artifacts::handoff(&ws, slug).prompt_note).unwrap_or_default();
+        if !note.is_empty() {
+            prompt.push_str(&format!("\nApproved visual artifacts (Dreamer copies their files and appends an 'Artifacts' and a 'Style guide' section to 05-assets.md itself; do not repeat those lists, but refer to these files where they matter, e.g. art direction in 01-gdd.md):{note}\n"));
+        }
+    }
     let id = format!("h{}", ulid::Ulid::generate());
     let images = image_count(&data, &cards);
     {
@@ -775,7 +783,20 @@ fn finalize(state: &AppState, job: &Job) -> Result<Value> {
                 }
             }
         }
+        // Approved artifacts and the active theme's style guide (written by Dreamer, not Claude).
+        let art = crate::artifacts::handoff(&ws, &job.slug);
+        for (n, p) in art.assets {
+            if !assets.iter().any(|(x, _)| x == &n) {
+                assets.push((n, p));
+            }
+        }
         let mut docs = job.docs.clone();
+        if !art.section.is_empty() {
+            if let Some(d) = docs.get_mut("05-assets.md") {
+                d.push_str(&art.section);
+                d.push('\n');
+            }
+        }
         docs.entry(CHANGELOG.to_string()).or_insert_with(|| format!("# Changelog\n\n## v{version}\n\n{}\n", if version == 1 { "Initial version" } else { "Regenerated from the current cards." }));
         let created = now();
         let manifest = json!({
