@@ -20,13 +20,13 @@ Reference sketches (12 screens + style variants): https://claude.ai/artifact/HQ4
 
 **Layout of the main screen (1440x900 reference):**
 - Left sidebar (224px, frosted glass): wordmark "Dreamer" (italic serif), Projects list (Inbox with count badge, then projects), "New project" dashed button at the bottom.
-- Center: infinite canvas (pan/zoom) on top of the animated shader background, with a faint **dotted grid** (30px, white dots) over the canvas area. Floating pill with project title and stage filter (Cloud / Sketch / Draft / Pitch), bottom-left zoom pill, bottom-center toolbar (add card, link, image, web clip).
+- Center: infinite canvas (pan/zoom) on top of the animated shader background, with a faint **dotted grid** (30px, white dots) over the canvas area. Floating pill with project title and stage filter (Mist / Reverie / Lucid / Dream), bottom-left zoom pill, bottom-center toolbar (add card, link, image, web clip).
 - Right: Claude chat panel (340px, frosted glass): header with glowing orb avatar, messages, quick chips (`/grill-me`, Suggest links, Summarize), input with send button.
 - Frosted-glass panels: `rgba(255,255,255,.45-.5)`, 1px white border, `backdrop-filter: blur(18px)`, radius 26px.
 
 **Cards** (links are plain lines with an optional label):
-- Maturity stage changes the look: **Cloud** (translucent, dashed border, blur) -> **Sketch** (light, thin solid border) -> **Draft** (lifted, shadow) -> **Pitch** (crisp, soft peach glow).
-- Stage dot colors: Cloud `#c9d3f5` (dashed ring), Sketch `#8fa8f2`, Draft `#f0a0c0`, Pitch `#ffbf80`.
+- Maturity stage changes the look: **Mist** (translucent, dashed border, blur) -> **Reverie** (light, thin solid border) -> **Lucid** (lifted, shadow) -> **Dream** (crisp, soft peach glow).
+- Stage dot colors: Mist `#c9d3f5` (dashed ring), Reverie `#8fa8f2`, Lucid `#f0a0c0`, Dream `#ffbf80`.
 - Card fields: title, markdown body, images, links/web clips, tags + custom fields.
 - **Claude's additions appear as "ghost cards"** (dashed, soft glow, label "Claude suggests", Keep / Dismiss buttons) until the user accepts them.
 
@@ -66,9 +66,9 @@ D2 params: `FREQ=1.7, FALL=0.5, SH=0.16, SHP=3.5, MIST=0.06, IRI=0.3`, time = `s
 ## 3. Product decisions (all decided)
 
 1. **Projects:** each project is its own infinite canvas. A special **Inbox** canvas collects raw ideas.
-2. **Quick capture:** a **global hotkey** (default `Ctrl+Shift+Space`, configurable) opens a small always-on-top popup ("Catch a thought"). Enter drops the text into the Inbox as a **Cloud** card. Esc closes. Works while the app is minimized/in tray.
-3. **Cards:** rich text/markdown, images, links and web clips, tags and custom fields. Links are plain lines with an optional label. Maturity stages: **Cloud -> Sketch -> Draft -> Pitch**.
-4. **Pitch output:** when a card is at Pitch, an **Export design brief** action has Claude compile the card, its linked cards and its grill-me notes into a one-page markdown brief (saved in the project's `briefs/`). The button is disabled with the hint "Unlocks when the card reaches Pitch" before then.
+2. **Quick capture:** a **global hotkey** (default `Ctrl+Shift+Space`, configurable) opens a small always-on-top popup ("Catch a thought"). Enter drops the text into the Inbox as a **Mist** card. Esc closes. Works while the app is minimized/in tray.
+3. **Cards:** rich text/markdown, images, links and web clips, tags and custom fields. Links are plain lines with an optional label. Maturity stages: **Mist -> Reverie -> Lucid -> Dream**.
+4. **Dream output:** when a card is at Dream, an **Export design brief** action has Claude compile the card, its linked cards and its grill-me notes into a one-page markdown brief (saved in the project's `briefs/`). The button is disabled with the hint "Unlocks when the card reaches Dream" before then.
 5. **Claude panel:** chat that can **create, link, edit and re-stage cards directly** on the canvas, plus **`/grill-me` mode**: Claude interviews the user about the selected card with multiple-choice questions (2-4 options + free text) and writes the answers back into the card as notes. Claude's new cards are **ghost cards** until accepted. Claude never deletes anything itself (it can only propose; deletion goes through the Trash).
 6. **Themes** (section 6). 7. **Branching, compare, trash** (section 7).
 
@@ -104,7 +104,7 @@ Card file frontmatter: `id, title, stage, tags[], fields{}, created, updated, so
 - **Built-in presets** (ship at least these, each with tuned shader palette + UI tokens that keep text contrast >= 4.5:1): **Pearl glow** (default, = D2), **Cool pearl** (A2 palette `#e3f1fb,#a8d5ee,#f4eeff,#fff0c6,#ffffff`), **Gold sky** (C2 palette `#a9c6d9,#d6e6ea,#f4ead0,#e9d29b,#fff6dc`), **Iridescent** (A3 palette `#ece6fb,#bde4f4,#fbd7e7,#ffe6bf,#ffffff`). Optionally an aura-style preset if time allows.
 - **Custom theme editor:** pick the 5 shader colors + UI accent colors with live preview, tweak speed/blur/sheen sliders, save as a named theme (`themes/<id>.json`), duplicate, delete. Validate contrast and warn (do not block).
 - **Scope:** one **global** theme (in `workspace.json`) with an **optional per-project override** (`project.json`). Switching is instant with a short cross-fade.
-- Theme JSON schema: `{ id, name, shader: { palette[5], freq, fall, sheen, sheenPower, mist, iridescence, speed, scale }, ui: { ink, body, muted, link, accent, ghost, ghostText, glass, fallbackBg }, stages: { cloud, sketch, draft, pitch } }`.
+- Theme JSON schema: `{ id, name, shader: { palette[5], freq, fall, sheen, sheenPower, mist, iridescence, speed, scale }, ui: { ink, body, muted, link, accent, ghost, ghostText, glass, fallbackBg }, stages: { mist, reverie, lucid, dream } }`.
 
 ## 7. Branching, compare, trash (decided)
 
@@ -123,16 +123,16 @@ Card file frontmatter: `id, title, stage, tags[], fields{}, created, updated, so
 2. **Shell + theme system:** sidebar/canvas/chat layout, the WebGL background with D2 params, theme tokens as CSS variables, theme switcher with the 4 presets, glass panels.
 3. **Storage core (Rust):** workspace, projects, Inbox, card CRUD, canvas.json, file watcher, atomic writes. Commands exposed to the UI.
 4. **Canvas:** infinite pan/zoom, dotted grid, drag cards, add/edit cards, links with optional labels, stage look per card, stage filter, images and web-clip cards.
-5. **Quick capture:** global hotkey popup -> Inbox Cloud card; tray behavior.
+5. **Quick capture:** global hotkey popup -> Inbox Mist card; tray behavior.
 6. **Claude sidecar + chat panel:** streaming chat, app tools, ghost cards (Keep/Dismiss), `/grill-me` mode with multiple-choice questions, setup screen if Claude Code is missing.
 7. **Branch / compare / trash:** fork badge, compare view with diff, pick winner -> trash, Trash view with labels and restore choice, "Give me 3 takes".
-8. **Theme editor** (custom palettes, per-project override) and **Export design brief** for Pitch cards.
+8. **Theme editor** (custom palettes, per-project override) and **Export design brief** for Dream cards.
 9. **Polish:** keyboard shortcuts, Undo, empty states, reduced motion, error handling, performance (60fps canvas with ~500 cards).
 
 ## 9. Definition of done
 
 - `cargo tauri dev` runs; `cargo tauri build` produces a Windows installer.
-- I can: create a project, drop cards, link them, move them through stages, capture an idea with the hotkey into the Inbox, chat with Claude (it creates ghost cards I can accept), run `/grill-me` on a card, branch a card, compare variants, pick one (others land in Trash labeled), restore one with a choice, switch themes (including a custom one and a per-project override), and export a design brief from a Pitch card.
+- I can: create a project, drop cards, link them, move them through stages, capture an idea with the hotkey into the Inbox, chat with Claude (it creates ghost cards I can accept), run `/grill-me` on a card, branch a card, compare variants, pick one (others land in Trash labeled), restore one with a choice, switch themes (including a custom one and a per-project override), and export a design brief from a Dream card.
 - The look matches the D2 sketch: animated pearl-pink shader, dotted grid, frosted glass panels, soft serif titles.
 - Short test plan in `docs/testing.md` and a note on anything you could not verify.
 

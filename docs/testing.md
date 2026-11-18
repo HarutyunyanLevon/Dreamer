@@ -11,7 +11,7 @@ Automated (any OS): `npm run check:themes` prints contrast ratios for each built
 Manual (Windows, `npm run tauri dev`):
 1. Window shows a slowly moving pearl-pink background, dotted white grid, frosted sidebar (left) and chat panel (right), five demo cards (one dashed "Claude suggests" ghost card with Keep/Dismiss), title pill with stage filter on top, zoom pill bottom-left, toolbar bottom-center.
 2. Click each of the four theme swatches in the sidebar: the background colors fade over about half a second and all text/buttons re-tint. Relaunch: the chosen theme is still active with no flash of Pink.
-3. Click stage filters (Cloud/Sketch/Draft/Pitch): matching demo cards hide and show.
+3. Click stage filters (Mist/Reverie/Lucid/Dream): matching demo cards hide and show.
 4. Windows Settings > Accessibility > Visual effects > Animation effects off: the background becomes a still image (restart the app to be sure).
 5. Minimize the window for a minute and restore: animation resumes without a time jump.
 6. Resize to the minimum (1100x600): nothing overlaps.
@@ -21,9 +21,9 @@ Automated (any OS): `cd src-tauri && cargo test` runs 17 tests: workspace layout
 
 Manual (Windows, `npm run tauri dev`; workspace appears at `%USERPROFILE%\Dreamer`):
 1. First launch creates `Dreamer\workspace.json`, `Dreamer\inbox\...` and `Dreamer\themes\`. The sidebar shows Inbox (no badge while empty) and an empty-state message on the canvas.
-2. Click **Card** (toolbar): a "New idea" Cloud card appears; a file `inbox\cards\<ULID>.md` exists and `inbox\canvas.json` has its position. The Inbox badge shows 1.
+2. Click **Card** (toolbar): a "New idea" Mist card appears; a file `inbox\cards\<ULID>.md` exists and `inbox\canvas.json` has its position. The Inbox badge shows 1.
 3. **New project** > type a name > Enter: it appears in the sidebar and is selected; `projects\<slug>\` has `cards`, `media`, `briefs`, `trash`, `project.json`, `canvas.json`.
-4. Live reload: copy a card file within `cards\` (new name) or create `cards\01TEST.md` with `---`, `title: From outside`, `stage: sketch`, `---`, a body line. It appears on the canvas within about a second, no restart.
+4. Live reload: copy a card file within `cards\` (new name) or create `cards\01TEST.md` with `---`, `title: From outside`, `stage: reverie`, `---`, a body line. It appears on the canvas within about a second, no restart.
 5. Edit a card file's `title:` in an editor and save: the title updates live. Break its YAML (`title: [oops`): a pill says "1 card file couldn't be read" and the app keeps working.
 6. Theme: switch theme, quit, relaunch: same theme. Edit `workspace.json` `"theme": "gold-sky"` while running: the theme switches.
 7. Ghost card: create `cards\01GHOST.md` with `ghost: true` and `source: claude`: it shows "Claude suggests". **Keep** removes the dashed look (file now `ghost: false`); **Dismiss** moves it to `trash\` (file appears there, `trash.json` has reason "deleted").
@@ -69,7 +69,7 @@ Automated: `cargo test` — 20 tests (`custom_themes_roundtrip_and_skip_bad_file
 
 Verified with `npm run tauri dev` against a throwaway workspace: hand-wrote `themes/test-theme.json` into the running workspace from PowerShell; the app kept running with no error in the dev log (the file-watcher's classification of `themes/*` as scope `"themes"` was already covered by a Rust unit test, so this confirms the live path end to end at the filesystem level, not just the UI reaction to it).
 
-Not verified live: opening the Theme editor and dragging its sliders/color pickers, opening the per-project theme picker popover in the title pill, and clicking "Export brief" on a Pitch card inside the actual window. Same native-window GUI-automation gap as steps 4-6 — each of these is built on `saveCustomTheme`/`deleteCustomTheme`/`setProjectTheme`/`exportBrief`, which call straight through to the Rust functions covered by the new unit tests above.
+Not verified live: opening the Theme editor and dragging its sliders/color pickers, opening the per-project theme picker popover in the title pill, and clicking "Export brief" on a Dream card inside the actual window. Same native-window GUI-automation gap as steps 4-6 — each of these is built on `saveCustomTheme`/`deleteCustomTheme`/`setProjectTheme`/`exportBrief`, which call straight through to the Rust functions covered by the new unit tests above.
 
 ## Step 8 checks
 Automated: `cargo test` (20, unchanged), `cargo check`, `npm run build`, `npm run check:themes` — all clean after the undo/drag fix, Esc-to-close, and empty-state additions.
@@ -202,7 +202,7 @@ Automated: `cargo test` gives 44 passing, plus 2 ignored live tests. The new `se
 
 Verified against the real sidecar and real Claude Code. A Node harness sent exactly what Rust and the UI send (`[Project context]` + `[Selected card]` + message), answered each question with its first option, and appended Q/A to the notes like the UI does:
 - **First run:** after Q1 the account hit its usage limit, but Q1 already showed the model writing a made-up "[Answer] …" after asking. The tool result was then fixed.
-- **Second run:** 8 questions, one per turn, covering the 8 items in order. All neutral with no praise, ending in `create_card` "Spec: Clockwork leviathan" (tags spec/boss/water, stage draft, linked "spec of" to the card, one section per item from the answers), and final chat text exactly "Proposed a spec card." The model still streamed a short "The next question is on the card above." after each question, which the UI already hid. The sidecar now drops it.
+- **Second run:** 8 questions, one per turn, covering the 8 items in order. All neutral with no praise, ending in `create_card` "Spec: Clockwork leviathan" (tags spec/boss/water, stage lucid, linked "spec of" to the card, one section per item from the answers), and final chat text exactly "Proposed a spec card." The model still streamed a short "The next question is on the card above." after each question, which the UI already hid. The sidecar now drops it.
 - **Third run:** all 7 checks passed: 8 questions, every turn question-only with no streamed text, no praise, spec proposed, spec linked to the card, the final line only, and a formal general reply with no exclamation marks.
 
 `npm run tauri dev`, run against a throwaway `DREAMER_WORKSPACE`: the app started (the binary was already built) and created `workspace.json`, `inbox/` (cards, media, briefs, trash, canvas.json, project.json), `projects/` and `themes/`. There were no errors or warnings in the dev log.
@@ -248,11 +248,11 @@ Manual:
 ### 4. Stage-based card borders
 Automated: `check:themes` has a 3:1 border row per stage, and all themes pass.
 
-Driven (17/17 pass, two consecutive runs; production build served on the dev origin, real Rust core). Checks: Cloud has the SVG edge and no CSS border, Sketch is dashed, Draft is thin solid, Pitch is solid and thicker than Draft (3px vs 1px), and Ghost is dashed with no cloud edge. At zoom >= 1 in the Inbox the edge animates with `cloud-puff`. Zoomed out below 50%, Cloud uses the dotted fallback and its SVG is hidden. In the 500-card "Perf" project, animation follows the rule (zoom >= 0.5 and at most 60 clouds on screen). Panning frame times: 165fps at zoom 1, 111–129fps at 0.59, and 70–101fps at 0.29 with all 500 cards rendered; p95 <= 18.3ms in every case.
+Driven (17/17 pass, two consecutive runs; production build served on the dev origin, real Rust core). Checks: Mist has the SVG edge and no CSS border, Reverie is dashed, Lucid is thin solid, Dream is solid and thicker than Lucid (3px vs 1px), and Ghost is dashed with no mist edge. At zoom >= 1 in the Inbox the edge animates with `mist-puff`. Zoomed out below 50%, Mist uses the dotted fallback and its SVG is hidden. In the 500-card "Perf" project, animation follows the rule (zoom >= 0.5 and at most 60 clouds on screen). Panning frame times: 165fps at zoom 1, 111–129fps at 0.59, and 70–101fps at 0.29 with all 500 cards rendered; p95 <= 18.3ms in every case.
 Not covered: the subjective look of the wobble, and a real GPU under other load. The frame-time test dispatches wheel events from page script (one per frame), which exercises the same handler as a mouse wheel.
 
 Manual:
-- [ ] Inbox with one card per stage: puffy Cloud, dashed hand-drawn Sketch, thin Draft, thick crisp Pitch, dashed Ghost.
+- [ ] Inbox with one card per stage: puffy Mist, dashed hand-drawn Reverie, thin Lucid, thick crisp Dream, dashed Ghost.
 - [ ] A 500-card project: pan and zoom stay smooth; at zoom < 50% or with many clouds visible, the clouds stop wobbling.
 
 ### 5. Delete project dialog and other modals
@@ -304,7 +304,7 @@ Automated (`cargo test`: 58 passed):
 
 Driven in the real app (all pass in the final runs). The popup was opened with the real global hotkey (Ctrl+Shift+Space sent as OS keyboard input) and driven in its own WebView:
 - Before the fix, calling `hide()` from the popup returned "window.hide not allowed … core:window:allow-hide" (root cause).
-- After: the hotkey opens it with focus in the field; X closes it, and the next open is empty; Esc closes it and discards the text; Enter closes it at once and creates exactly one new Inbox card with stage cloud.
+- After: the hotkey opens it with focus in the field; X closes it, and the next open is empty; Esc closes it and discards the text; Enter closes it at once and creates exactly one new Inbox card with stage mist.
 - A real failure, with the throwaway Inbox's cards folder write-protected via `icacls` and restored afterwards: the popup stays open with the text and shows "Couldn't add it: write …\inbox\cards\….md: Access is denied. (os error 5)", and the card stays inside the window.
 - Giving another window OS focus closes it, and it reopens empty with the error gone.
 
@@ -323,3 +323,104 @@ Driven (9/9 pass): both buttons are curved-arrow icons with aria-labels and `ari
 
 Manual:
 - [ ] Hover each button: the native tooltip shows the shortcut, also while dimmed.
+
+## Round 3, step 6: handoff pack
+- `cargo test`: new `handoff` tests cover version numbering (index, stray `v*` folders, corrupt index, no overwrite, no temp folders left), CLAUDE.md block replacement (absent / empty / no markers / present / idempotent / CRLF / three malformed shapes), the repo copy (only pack files replaced, CLAUDE.md not in docs/design, QUESTIONS.md never overwritten), `write_design_doc` name checks (and `read_doc`), scope resolution (stages, stickies, ghosts, role cards, two-step links, frames, selection) and gap normalization. Storage tests cover `handoff_target` (validation, confirm, clear, unknown keys kept) and the one-per-project `decisions` role.
+- Sidecar driven directly against the installed Claude Code with a harness answering the `handoff_*` tools like Rust (model haiku, 2 cards): gap check reported all items in ~7s; generation wrote all 8 docs in ~20s with the requested roadmap/CLAUDE.md format; cancel 6s in ended with `cancelled` within 0.5s.
+- Driven in the real app (`npm run tauri dev`, throwaway `DREAMER_WORKSPACE`, WebView2 over CDP, real Claude Code with `model_export`/`model_chat` = haiku). The seed project had 7 objects: a Lucid card, a Reverie card linked to it, a Mist card, the Tech card, a sticky, an image and a clip with a saved excerpt.
+  - Summarize chip → dialog: all three scopes, 4 stage toggles on, stickies off, "6 cards in scope" (sticky excluded), model "haiku" shown.
+  - Run gap check: 13 items back in ~15s with notes; "Fill with grill-me" and "Generate anyway" appear.
+  - Repo folder set: the first Generate shows the "Write into this folder?" confirm; the second run (v2) doesn't.
+  - Progress panel steps advance (Reading cards 6/6, Viewing images 0/1, Writing docs n/7, Copying), then "Design v1 is ready" + "Copied to …".
+  - Disk: `design/v1/` has the 7 docs, CHANGELOG ("Initial version"), manifest (cards + updated, 13 gaps) and `assets/<id>.png`; `index.json` lists it. The image is embedded in 01-gdd.md with a description; the clip is in 05-assets.md References with a 2-point takeaway; the roadmap uses `M1-T1` + Acceptance / Relies on / Size; CLAUDE.md is 37 lines.
+  - Repo: the pre-existing CLAUDE.md text was kept and one marker block appended (still one after v2). The existing QUESTIONS.md was untouched, and an unrelated `docs/design/keep-me.txt` was left alone.
+  - v2 via Design › New version after editing the Mist card: CHANGELOG v2 names that edit.
+  - Cancel 7s into a run: the panel closes, the toast says "Cancelled. Nothing was written.", and there's no v3 and no temp folder.
+  - Design view: sidebar row with a version badge, doc tabs, version dropdown, the image rendered from `assets/`, Discuss with Claude → project thread with "About the design doc 01-gdd.md (design v1): " prefilled.
+  - Fill with grill-me: "/grill-me on 11 gaps" in the project thread. Answering the first question created a non-ghost "Project decisions" card (`role: decisions`) holding the Q and A.
+  - After stopping the app, no dreamer/node/claude process from it remained.
+  - Found and fixed in this pass: the sidebar's Design row was squeezed into the project row's flex line, hiding both labels; it now wraps onto its own line. After a gap check with thin/missing items, the primary button now reads "Generate anyway".
+  - Seen once, not reproduced: after the first generation the chat panel showed the sticky's thread although nothing had been clicked on the canvas. Closing the dialog and the progress panel were retried and both kept the project thread.
+- Manual: Open folder (opens Explorer) and Copy Claude Code prompt (clipboard) weren't checked; the native folder picker ("Choose…") wasn't used, the target was set through `update_project`.
+
+## Card editor stays open during chat; thread pin (not yet run in the app)
+
+- Open a card (editor opens, scrim covers canvas + sidebar but not the chat). In the chat panel: click, type, scroll, answer a grill question, Keep a ghost card, click a result chip for the same card. The editor stays open throughout. Esc with the chat input focused only blurs it; Esc elsewhere still closes the editor.
+- Click a result chip / ghost link for another card: with no edits the editor switches to it; with edits an inline "Switch to X? Your edits stay as a draft." appears (Stay keeps editing; Switch saves a draft, opens the other card, and reopening the first restores the draft).
+- Pin: header pill shows "Project" or the card (stage dot); the pin toggle freezes the thread while selecting/opening other cards (pill shows a pin); unpin follows again. The pin survives a reload, per project, and is released when the pinned card is trashed.
+- Window-placement dialogs (e.g. Reset chat, Theme) still cover the whole window.
+
+## Round 3, step 8: project memory (manual, in the app)
+Use a project (not the Inbox). `cargo test` covers parse/render, ops, log, revert, cap, card-decision lines.
+- **Decision in chat:** in the project chat say "No PvP, ever." After the reply a faint line appears: "Memory updated: + Decisions: …" with Undo and Edit memory. `memory.md` has the bullet; `memory.log.jsonl` has an entry with source `auto`. Undo: the bullet is gone, the line says "Memory change undone".
+- **Brainstorm, no decision:** ask "give me ideas for bosses". No memory line, `memory.md` unchanged.
+- **Chips:** /expand, /critique, /describe, /related, Give me 3 takes, a merge: no memory pass (nothing in the log). A grill-me answer you pick: may add a line.
+- **Card chat:** open a card, state a decision about it ("this boss has three phases"). The card shows the Claude-suggests badge; its diff adds a `## Decisions` section with the line. Undo on the chat line removes it (and the proposal). Keep applies it to the card.
+- **Explicit:** "remember: the demo is 10 minutes long" saves immediately (log source `claude`, same chat line). "forget the demo length" removes it. "Remember" in the Inbox: Claude says there is no project memory.
+- **Cap:** set Models > Project memory cap to 30; keep stating decisions: later ones are skipped (not an error in chat); in the modal Save is disabled while over the cap.
+- **Memory modal:** open it from the chat header and from the sidebar row. Edit a section, Save: log source `user`. History tab: Revert on an old entry removes just that entry's lines. Edit memory.md in an editor while the modal is open and untouched: it reloads.
+- **Bootstrap:** a project with 3+ kept cards and no memory.md: on opening it the modal shows a draft (needs Claude signed in). Keep / Edit→Save / Start empty each create memory.md; reopening the app does not ask again. Close without choosing: nothing is written.
+- **Handoff:** with a Decisions line "no multiplayer", run Gap check and Generate: the docs treat it as settled, and `design/vN/manifest.json` has `memory_hash`.
+- **Long session:** keep chatting until the "Earlier messages summarized" divider appears; the memory block is still sent with the next message (and a memory edit made meanwhile arrives as "Project memory updated").
+
+## Live activity: steps, tokens, stalls (browser preview + app)
+Browser (`npm run dev`, mock): any chat message plays a scripted turn; a message containing "stall" goes silent once.
+- **Long multi-tool question** (app: "compare my market cards and look at their images", web on): while it runs, a step list grows under the turn: spinner on the running step, ✓ when done, red dot on an error (mock: the second read). A thinking step reads "Thinking… Ns" and expands on click to the streamed text (collapsed by default). The status line below shows the current step (or "Writing…" while text streams, "Waiting for Claude…" before the first event) · mm:ss · ↑ input (cached part muted) ↓ output, with numbers rising. The reply text streams below it.
+- **Done:** the steps collapse into one faint line above the reply, e.g. "5 steps · 18s · ↑ 12.3k ↓ 640"; clicking it shows the steps again. Reload / reopen the thread: the line is still there (steps, usage and durationMs are in the thread file; thinking text cut at 2,000 chars).
+- **Memory pass:** after a normal turn, "Updating memory… ↑ 1.2k" appears under it and disappears; "Memory updated" still shows when something changed.
+- **Grill-me (quiet):** same steps and status line, no streamed text; then the question card.
+- **Context meter:** after a turn the chat header shows "34k / 200k" with a thin bar; tooltip explains auto-summary. Set Settings › "Summarize a thread after" just above the current count: the meter turns amber (from 80%). Reopen the thread: the meter is read from the thread file.
+- **Compaction:** with that setting low, the next turn first shows "Summarizing earlier messages…" with its own tokens, then the turn's steps.
+- **Stall:** send "stall test" (mock) or, in the app, block the network mid-turn. After 45 s with no event the status line turns amber, "No activity for 45s", with Stop and Retry. Stop ends the turn. Retry stops it (closing its Claude session) and sends the same message again in the same thread; the reply arrives normally.
+- **Errors:** kill the sidecar's node process mid-turn: the turn turns red with Retry right away. An `error` reply also has Retry.
+- **Handoff:** gap check and Generate show the same step list + status line (Read "…", Wrote 01-gdd.md, tokens, elapsed); the stall warning appears after 45 s idle; Cancel still works.
+
+## Start with Windows (release build only)
+
+1. Install the release build (NSIS), then sign out and back in.
+2. Dreamer is in the tray and no window opens. `Ctrl+Shift+Space` opens the capture popup.
+3. Tray menu "Show Dreamer" opens the window; no "still running in the tray" notice appears when you close it.
+4. Launch Dreamer from the Start menu or click its pinned taskbar icon: the existing window is shown and focused (no second instance in Task Manager).
+5. Settings: both toggles are on ("Start Dreamer when Windows starts" mirrors the real `HKCU\...\Run\Dreamer` entry). Turn the first off, sign out and in: Dreamer doesn't start.
+6. Turn "Start hidden in the tray" off, sign out and in: the window opens at sign-in.
+7. A normal launch (Start menu, double-click) always shows the window.
+8. Uninstall: `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\Dreamer` is gone.
+9. `tauri dev` never creates the Run entry on its own (the toggle still works there).
+
+## Packaging 0.2.0 (installed app)
+
+Done this session:
+- `npm run build:sidecar`: `src-tauri/sidecar-dist` is ~11 MB (SDK 0.3.322, zod 4.6.7, no bundled claude.exe). Inside it, `import('@anthropic-ai/claude-agent-sdk')` and `zod/v4` load (`query`, `createSdkMcpServer` are functions).
+- `npm run icons`: source.svg → 1024 PNG → `tauri icon`; the 32px icon and the 16/32px tray pearl are legible.
+
+Not run yet (the session's shell stopped accepting commands before the build):
+1. `npm run release` prints `src-tauri/target/release/bundle/nsis/Dreamer_0.2.0_x64-setup.exe`.
+2. Rename `node_modules` → `node_modules.off`; install the exe; launch from the Start menu; send a chat message (the reply arrives, Dreamer tools work). Rename it back.
+3. Pin to taskbar, close to tray, click the pin: the same window shows, one `dreamer.exe` in Task Manager, one taskbar button (pin, window and autostart launch grouped).
+4. Icon is the pearl in the taskbar, Start menu, tray, Alt+Tab and on the installer exe.
+5. No desktop shortcut after install.
+6. Run the installer again while Dreamer runs: it closes Dreamer, updates, and the workspace (`%USERPROFILE%\Dreamer`) is intact.
+
+## Local chat model (Ollama)
+Automated: `cargo test` (router backend mapping, `ollama::tests` against a fake server, `recent_turns_for_an_escalation`, settings). Browser preview (`npm run dev`): `?ollama=missing|stopped|nomodel` previews the setup states; a message containing "fail" fails on the local model.
+
+Setup (Local model dialog, from the chat header chip):
+1. **Ollama missing** (uninstall it, or `?ollama=missing`): the chip says "Set up local" in amber; the dialog says Ollama isn't installed and "Get Ollama for Windows" opens ollama.com/download/windows. Install it: within ~4 s the dialog moves on without a restart.
+2. **Installed, not running** (quit Ollama from its tray icon): "installed but not running"; start it from the Start menu and the dialog updates.
+3. **Too old** (Ollama < 0.14): "too old … Update Ollama".
+4. **Model missing:** "Download the model" shows a progress bar with GB done/total; Cancel stops it ("Download cancelled."); downloading again resumes. When done, `ollama list` shows both `qwen3.5:35b-a3b` and `dreamer-qwen3.5:35b-a3b`, and `ollama show dreamer-qwen3.5:35b-a3b` lists `num_ctx 65536`.
+5. **Ready:** "Ready: Ollama x.y, qwen3.5:35b-a3b · tools · images · 64k context"; the chip says "Local".
+6. Settings: set Local model to a pulled model without tools: the dialog says it lacks tool calls, and chat turns fall back to Claude with the note. An invalid name ("two words") is refused on Save.
+
+Chat:
+7. **Normal turn, zero Claude usage:** in a card's chat, "give me two related boss ideas as cards". Ghost cards appear; the badge reads `local · qwen3.5:35b-a3b`. sidecar.log: `route … backend=local model=dreamer-qwen3.5:35b-a3b`. Claude usage shows nothing new for the turn itself (the memory pass afterwards is still one Haiku call, by design). Ask it to link two cards: a dashed ghost link appears.
+8. **Think harder:** turn on Think and send. The step list shows "Recapped the thread (local model)", then Claude's steps; the badge reads `Claude · Opus · Think harder · ↑ … ↓ …`. Send a normal message next: it's local again, and the local model still knows the turns from before the Think turn (its session was resumed). The context meter didn't jump from the Claude turn.
+9. **Globe:** turn on web and ask for something to look up: one Claude turn (badge "· web"), "Save as clip" works; the next turn is local.
+10. **Retry with Claude:** make a local turn fail (`ollama stop <model>` during a reply, or a request the model fumbles). The reply shows "The local model couldn't answer." (or "gave no answer" / "A tool call by the local model failed.") with "Retry with Claude", and nothing is retried by itself. Click it: the failed pair is replaced by one Claude turn (badge "· retried with Claude"); the next turn is local.
+11. **Images:** with a model without vision (e.g. `qwen3:30b-a3b-instruct-2507-q4_K_M`), ask about a card's image: the reply says it can't see images and offers Retry with Claude, which then describes the image.
+12. **Ollama goes away:** quit Ollama, send a normal message: Claude answers, with an amber "Local model unavailable: Ollama is installed but not running… This reply used Claude." above the badge. Start Ollama, send again: local.
+13. **Old threads:** open a thread with Claude history from before this change and send a message: the first step is "Summarizing earlier messages…" (local model), then the local reply, which knows the gist of the earlier conversation.
+14. **Compaction:** set "Summarize a thread after" to 3000 and chat locally until the "Earlier messages summarized" divider appears; the summary was written locally. With the setting at 200000, a local thread still compacts by 64k.
+15. **Idle load:** wait more than 5 minutes, send a message: the first reply takes a few extra seconds (model load), then it's normal.
+16. **Local off:** Settings › untick "Chat on a local model": the chip says "Local off", and turns route fast/main/deep to Claude exactly as before (Claude badges, no notes).
+17. Reset chat on a thread that used both backends: the next local and Claude turns both start fresh.
