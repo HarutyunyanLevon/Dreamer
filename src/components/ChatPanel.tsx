@@ -109,6 +109,21 @@ export function ChatPanel({ ws, panels }: { ws: Workspace; panels: Pick<ReturnTy
       .catch(() => {});
   }, []);
   useEffect(loadTierModels, [loadTierModels]);
+  // Startup may find and prepare a local model after the panel loaded its settings.
+  useEffect(() => {
+    let unsub: (() => void) | undefined;
+    let disposed = false;
+    claudeApi
+      .onLocalSetupEvent((e) => {
+        if (e.type === "detected" || e.type === "done") loadTierModels();
+      })
+      .then((u) => (disposed ? u() : (unsub = u)))
+      .catch(() => {});
+    return () => {
+      disposed = true;
+      unsub?.();
+    };
+  }, [loadTierModels]);
   /** A pinned tier's name: with local chat on, fast and main both run on the local model. */
   const tierName = (t: ModelTier) => (localOn && t !== "deep" ? "Local" : modelLabel(tierModels[t]) ?? t);
   const panelRef = useRef<HTMLElement | null>(null);

@@ -87,7 +87,9 @@ export interface LocalStatus {
 
 export type OllamaSetupEvent =
   | { type: "progress"; status: string; completed: number; total: number }
-  | { type: "done"; ok: boolean; cancelled: boolean; message: string };
+  | { type: "done"; ok: boolean; cancelled: boolean; message: string }
+  /** Startup found and prepared a local model; `switched`: it replaced the default, which wasn't downloaded. */
+  | { type: "detected"; model: string; switched: boolean };
 
 export type ClaudeEvent =
   | { type: "delta"; id: string; text: string }

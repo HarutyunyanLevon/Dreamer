@@ -204,6 +204,8 @@ pub fn run() {
                     let _ = ws.update_settings(model::SettingsPatch { tray_notice_shown: Some(true), ..Default::default() });
                 }
             }
+            // Find and prepare a local model (Ollama) if one is installed; never blocks startup.
+            ollama::spawn_auto_setup(app.handle());
             let hidden = is_autostart_launch() && settings.as_ref().is_none_or(|s| s.start_hidden);
             if !hidden {
                 show_main_window(app.handle());

@@ -49,7 +49,7 @@ export function LocalSetup({ onClose, onStatus }: { onClose: () => void; onStatu
         if (e.type === "progress") {
           setPulling(true);
           setProgress({ status: e.status, completed: e.completed, total: e.total });
-        } else {
+        } else if (e.type === "done") {
           setPulling(false);
           setProgress(null);
           if (!e.ok) setError(e.message);

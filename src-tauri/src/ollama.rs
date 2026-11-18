@@ -358,6 +358,140 @@ pub fn start_pull(app: &AppHandle, state: &OllamaState, model: &str) -> Result<(
     Ok(())
 }
 
+// ---------- automatic setup at startup ----------
+
+/// Where Ollama's own launcher lives (the tray app that starts the server), when installed.
+fn ollama_launcher() -> Option<std::path::PathBuf> {
+    let mut c: Vec<std::path::PathBuf> = Vec::new();
+    if let Some(l) = std::env::var_os("LOCALAPPDATA") {
+        let d = std::path::PathBuf::from(l).join("Programs").join("Ollama");
+        c.push(d.join("ollama app.exe"));
+        c.push(d.join("ollama.exe"));
+    }
+    if let Some(p) = std::env::var_os("ProgramFiles") {
+        let d = std::path::PathBuf::from(p).join("Ollama");
+        c.push(d.join("ollama app.exe"));
+        c.push(d.join("ollama.exe"));
+    }
+    if let Some(path) = std::env::var_os("PATH") {
+        for d in std::env::split_paths(&path) {
+            c.push(d.join(if cfg!(windows) { "ollama.exe" } else { "ollama" }));
+        }
+    }
+    c.into_iter().find(|p| p.is_file())
+}
+
+fn server_up(addr: &str) -> bool {
+    matches!(json_call(addr, "GET", "/api/version", None, Duration::from_millis(800)), Ok((200, _)))
+}
+
+/// Starts an installed but stopped Ollama (its tray app, or `ollama serve`) and waits up to 20 s.
+fn start_server(addr: &str) -> bool {
+    let Some(exe) = ollama_launcher() else { return false };
+    let mut cmd = std::process::Command::new(crate::claude_setup::child_path(&exe));
+    if exe.file_name().is_some_and(|n| n.eq_ignore_ascii_case("ollama.exe") || n == "ollama") {
+        cmd.arg("serve");
+    }
+    cmd.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+    crate::claude_setup::hide_window(&mut cmd);
+    if cmd.spawn().is_err() {
+        return false;
+    }
+    let until = Instant::now() + Duration::from_secs(20);
+    while Instant::now() < until {
+        if server_up(addr) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    false
+}
+
+/// The best already-downloaded model Dreamer's chat can use: supports tool calls, not an embedding
+/// model, not one of Dreamer's own 64k copies. Vision first, then the largest.
+fn pick_installed(addr: &str) -> Option<String> {
+    let (code, v) = json_call(addr, "GET", "/api/tags", None, Duration::from_secs(5)).ok()?;
+    if code != 200 {
+        return None;
+    }
+    let mut best: Option<(bool, u64, String)> = None;
+    for m in v.get("models").and_then(Value::as_array).into_iter().flatten() {
+        let Some(name) = m.get("name").or_else(|| m.get("model")).and_then(Value::as_str) else { continue };
+        let family = m.pointer("/details/family").and_then(Value::as_str).unwrap_or("");
+        if name.starts_with("dreamer-") || name.contains("embed") || family.contains("bert") || !valid_model_name(name) {
+            continue;
+        }
+        let Ok(Some(caps)) = capabilities(addr, name) else { continue };
+        if !caps.iter().any(|c| c == "tools") || caps.iter().any(|c| c == "embedding") {
+            continue;
+        }
+        let key = (caps.iter().any(|c| c == "vision"), m.get("size").and_then(Value::as_u64).unwrap_or(0), name.to_string());
+        if best.as_ref().is_none_or(|b| (key.0, key.1) > (b.0, b.1)) {
+            best = Some(key);
+        }
+    }
+    best.map(|b| b.2)
+}
+
+/// What the startup check settled on.
+#[derive(Debug, PartialEq)]
+pub enum AutoSetup {
+    /// Nothing to do (local chat off, no Ollama, or no usable model).
+    Nothing,
+    /// The configured model is ready (its 64k copy now exists).
+    Ready,
+    /// The default model wasn't downloaded; this installed one was chosen instead.
+    Switched(String),
+}
+
+/// Startup: when local chat is on, start an installed Ollama if it's stopped; if the configured
+/// model is the untouched default and isn't downloaded, switch to the best installed model; then
+/// run the full check, which creates the 64k copy. A model the user picked is never replaced.
+pub fn auto_setup_at(addr: &str, model: &str, is_default: bool) -> AutoSetup {
+    if !server_up(addr) && !start_server(addr) {
+        return AutoSetup::Nothing;
+    }
+    if matches!(capabilities(addr, &full_name(model)), Ok(Some(_))) {
+        return if check_at(addr, model).ready { AutoSetup::Ready } else { AutoSetup::Nothing };
+    }
+    if !is_default {
+        return AutoSetup::Nothing;
+    }
+    match pick_installed(addr) {
+        Some(m) if check_at(addr, &m).ready => AutoSetup::Switched(m),
+        _ => AutoSetup::Nothing,
+    }
+}
+
+/// Runs the startup check on a background thread; a switch is saved to settings and announced as
+/// an `ollama-setup` `detected` event so the chat header refreshes.
+pub fn spawn_auto_setup(app: &AppHandle) {
+    let app = app.clone();
+    std::thread::spawn(move || {
+        use tauri::Manager;
+        let state = app.state::<crate::state::AppState>();
+        let Some(settings) = state.ws.lock().ok().and_then(|ws| ws.get_settings().ok()) else { return };
+        if !settings.local_chat {
+            return;
+        }
+        let is_default = settings.local_model == crate::model::DEFAULT_LOCAL_MODEL;
+        let result = auto_setup_at(ADDR, &settings.local_model, is_default);
+        let model = match &result {
+            AutoSetup::Nothing => return,
+            AutoSetup::Ready => settings.local_model.clone(),
+            AutoSetup::Switched(m) => {
+                let saved = state.ws.lock().ok().and_then(|ws| ws.update_settings(crate::model::SettingsPatch { local_model: Some(m.clone()), ..Default::default() }).ok());
+                if saved.is_none() {
+                    return;
+                }
+                m.clone()
+            }
+        };
+        let _ = state.ollama.status(&model); // refreshes the cache chat turns read
+        let _ = app.emit("ollama-setup", json!({ "type": "detected", "model": model, "switched": matches!(result, AutoSetup::Switched(_)) }));
+    });
+}
+
 fn app_state(app: &AppHandle) -> &OllamaState {
     use tauri::Manager;
     &app.state::<crate::state::AppState>().inner().ollama
@@ -445,5 +579,26 @@ mod tests {
         let st = check_at(&ready, "m:1");
         assert!(st.ready, "{:?}", st.error);
         assert_eq!((st.tools, st.vision, st.variant.as_deref()), (Some(true), Some(true), Some("dreamer-m:1")));
+    }
+
+    #[test]
+    fn auto_setup_picks_best_installed_model_only_for_the_default() {
+        let routes = || {
+            vec![
+                ("/api/version", 200, r#"{"version":"0.15.0"}"#.to_string()),
+                (
+                    "/api/tags",
+                    200,
+                    r#"{"models":[{"name":"dreamer-big:1","size":900},{"name":"nomic-embed-text:latest","size":50,"details":{"family":"nomic-bert"}},{"name":"small:1","size":10},{"name":"big:1","size":100},{"name":"chat-only:1","size":500}]}"#.to_string(),
+                ),
+                ("/api/show small:1", 200, r#"{"capabilities":["completion","tools"]}"#.to_string()),
+                ("/api/show big:1", 200, r#"{"capabilities":["completion","tools"]}"#.to_string()),
+                ("/api/show chat-only:1", 200, r#"{"capabilities":["completion"]}"#.to_string()),
+                ("/api/create", 200, r#"{"status":"success"}"#.to_string()),
+            ]
+        };
+        assert_eq!(auto_setup_at(&fake(routes()), "qwen3.5:35b-a3b", true), AutoSetup::Switched("big:1".into()));
+        assert_eq!(auto_setup_at(&fake(routes()), "mine:7b", false), AutoSetup::Nothing);
+        assert_eq!(auto_setup_at(&fake(routes()), "small:1", false), AutoSetup::Ready);
     }
 }
