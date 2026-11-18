@@ -1435,3 +1435,38 @@ input.frame-tab { cursor: text; min-width: 180px; outline: 2px solid var(--accen
 .artifact-type:hover { background: rgba(255, 255, 255, 0.8); }
 .artifact-type.on { border-color: var(--accent); background: var(--accent-soft); color: var(--ink); font-weight: 700; }
 .artifact-brief { min-height: 88px; resize: vertical; font: inherit; }
+.artifact-full { width: min(92vw, 1180px) !important; max-width: none !important; }
+.artifact-full-head { display: flex; align-items: center; gap: 10px; }
+.artifact-full-head .dialog-title { margin: 0; }
+.artifact-type-icon { display: inline-flex; align-items: center; justify-content: center; width: 30px; height: 30px; border-radius: 10px; background: var(--accent-soft); color: var(--accent); }
+.artifact-pill { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 700; color: var(--body); background: rgba(255, 255, 255, 0.6); border: 1px solid rgba(255, 255, 255, 0.9); white-space: nowrap; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+.artifact-pill.mode { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 40%, transparent); }
+.artifact-full-bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 12px 0; }
+.artifact-select { min-height: 36px; padding: 0 10px; border-radius: 12px; border: 1px solid rgba(255, 255, 255, 0.9); background: rgba(255, 255, 255, 0.6); color: var(--ink); font: inherit; font-size: 13px; max-width: 260px; }
+.artifact-full-main { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 16px; align-items: start; }
+.artifact-notes { font-size: 13px; color: var(--body); max-height: 70vh; overflow: auto; }
+.artifact-notes h4 { margin: 12px 0 4px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
+.artifact-meta { margin-top: 12px; }
+.artifact-version-body { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.artifact-frame { width: 100%; border: 1px solid rgba(255, 255, 255, 0.9); border-radius: 14px; background: #fff; display: block; }
+.artifact-frame.big { height: min(68vh, 760px); }
+.artifact-frame.mid { height: 420px; }
+.artifact-gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 10px; }
+.artifact-gallery.small { grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); }
+.artifact-tile { margin: 0; display: flex; flex-direction: column; gap: 4px; }
+.artifact-tile img, .artifact-tile video { width: 100%; aspect-ratio: 1; object-fit: contain; border-radius: 12px; background: repeating-conic-gradient(rgba(0, 0, 0, 0.04) 0 25%, transparent 0 50%) 0 0 / 16px 16px, rgba(255, 255, 255, 0.6); image-rendering: auto; }
+.artifact-tile figcaption { font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.artifact-compare { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.artifact-compare-head { margin-bottom: 8px; }
+.artifact-empty, .artifact-loading { display: flex; align-items: center; justify-content: center; min-height: 120px; border-radius: 14px; border: 1px dashed color-mix(in srgb, var(--muted) 40%, transparent); color: var(--muted); font-size: 13px; text-align: center; padding: 12px; }
+.artifact-run { display: flex; flex-direction: column; gap: 4px; margin: 6px 0; }
+.artifact-run-label { font-size: 12px; color: var(--body); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.artifact-run-bar { position: relative; height: 4px; border-radius: 2px; background: color-mix(in srgb, var(--accent) 15%, transparent); overflow: hidden; }
+.artifact-run-bar > span { position: absolute; inset: 0 auto 0 0; background: var(--accent); border-radius: 2px; transition: width 0.4s ease; }
+.artifact-run-bar.indeterminate > span { width: 35%; animation: artifact-indeterminate 1.4s ease-in-out infinite; }
+@keyframes artifact-indeterminate { 0% { left: -35%; } 100% { left: 100%; } }
+.theme-spec { margin-bottom: 8px; }
+.theme-swatches { display: flex; flex-wrap: wrap; gap: 6px; }
+.theme-swatch { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; color: var(--body); }
+.theme-swatch i { width: 14px; height: 14px; border-radius: 4px; border: 1px solid rgba(0, 0, 0, 0.12); display: inline-block; }
+@media (prefers-reduced-motion: reduce) { .artifact-run-bar.indeterminate > span { animation: none; width: 100%; opacity: 0.5; } }

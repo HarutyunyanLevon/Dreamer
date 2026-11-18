@@ -27,6 +27,7 @@ import { ProposalView } from "./ProposalView";
 import { DuskStrip, useDuskGlass } from "./DuskGlass";
 import { OrganizePreviewLayer, TidyNudge } from "./OrganizePlan";
 import { NewArtifactDialog } from "./artifacts/NewArtifact";
+import { ArtifactFullView } from "./artifacts/ArtifactView";
 import { briefFromCard } from "./artifacts/prompts";
 
 /** Cards loose on one canvas (outside every frame) before "Tidy this folder?" shows. */
@@ -62,6 +63,8 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
   const [ask, setAsk] = useState<Parameters<MenuEnv["askText"]>[0] | null>(null);
   /** Add › New artifact… (at a point, or the centre of the view). */
   const [newArtifact, setNewArtifact] = useState<null | { at?: { x: number; y: number } }>(null);
+  /** The artifact open in the full-size view (double-click, Enter, menu Open). */
+  const [artifactView, setArtifactView] = useState<string | null>(null);
   /** An attachment opened from a card on the canvas: an image in the lightbox, or a clip's popover. */
   const [viewer, setViewer] = useState<{ cardId: string; attId: string; anchor: DOMRect } | null>(null);
   const onAttachment = useCallback((cardId: string, attId: string, anchor: DOMRect) => setViewer({ cardId, attId, anchor }), []);
@@ -550,6 +553,12 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
         }
         return;
       }
+      // An artifact: a click selects it and opens its thread in the chat (double-click: full view).
+      if (card.kind === "artifact" && !card.ghost) {
+        setSelection(new Set([card.id]));
+        ws.setContextCard(card.id);
+        return;
+      }
       setEditing(card.id);
       ws.setContextCard(card.id);
     },
@@ -923,10 +932,13 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
     (c: Card) => {
       const att = c.ghost ? undefined : c.kind === "image" ? c.attachments.find(isImage) : c.kind === "clip" ? c.attachments.find(isClip) : undefined;
       const el = document.querySelector(`.card[data-id="${c.id}"]`);
-      if (att && el) setViewer({ cardId: c.id, attId: att.id, anchor: el.getBoundingClientRect() });
+      if (c.kind === "artifact" && !c.ghost) {
+        ws.setContextCard(c.id);
+        setArtifactView(c.id);
+      } else if (att && el) setViewer({ cardId: c.id, attId: att.id, anchor: el.getBoundingClientRect() });
       else openEditor(c);
     },
-    [openEditor],
+    [openEditor, ws],
   );
   const openRef = useRef(openCard);
   openRef.current = openCard;
@@ -1056,7 +1068,7 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
       void ws.createArtifact({ type, title: c.title, brief: briefFromCard(c, type), sourceCard: c.id, ...(pos ? { x: pos.x + (pos.w ?? CARD_W) + 60, y: pos.y } : {}) });
     },
     newArtifact: (point) => setNewArtifact({ at: { x: point.x - CARD_W / 2, y: point.y - CARD_H / 2 } }),
-    openArtifact: (id) => ws.setContextCard(id),
+    openArtifact: (id) => setArtifactView(id),
     selectAll: () => {
       setSelection(new Set(visibleRef.current.map((c) => c.id)));
       setFolderSel(new Set(Object.keys(data?.canvas.folders ?? {})));
@@ -1475,6 +1487,7 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
       })()}
       {addMenu && <ContextMenu x={addMenu.x} y={addMenu.y} label="Add" sections={addMenuSections} onClose={() => setAddMenu(null)} />}
       {ask && <AskText {...ask} onClose={() => setAsk(null)} />}
+      {artifactView && ws.active && data?.cards.some((c) => c.id === artifactView) && <ArtifactFullView slug={ws.active} id={artifactView} ws={ws} onClose={() => setArtifactView(null)} />}
       {newArtifact && (
         <NewArtifactDialog
           onClose={() => setNewArtifact(null)}
