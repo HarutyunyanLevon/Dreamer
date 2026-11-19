@@ -340,6 +340,16 @@ impl Workspace {
             }
             s.local_model = if m.is_empty() { crate::model::DEFAULT_LOCAL_MODEL.into() } else { m.into() };
         }
+        if let Some(p) = patch.ollama_path {
+            let p = p.trim();
+            if p.len() > 1000 || p.chars().any(char::is_control) {
+                return Err(AppError::Invalid("not a folder path".into()));
+            }
+            s.ollama_path = p.into();
+        }
+        if let Some(v) = patch.local_cloud_declined {
+            s.local_cloud_declined = v;
+        }
         if let Some(u) = patch.spritecook_url {
             let u = u.trim();
             if !u.is_empty() && (!u.starts_with("https://") || u.len() > 300 || u.chars().any(char::is_whitespace)) {

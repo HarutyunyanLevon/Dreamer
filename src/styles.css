@@ -1082,6 +1082,11 @@ input.frame-tab { cursor: text; min-width: 180px; outline: 2px solid var(--accen
 .local-setup { display: flex; flex-direction: column; gap: 10px; }
 .local-progress { width: 100%; height: 8px; border-radius: 4px; background: color-mix(in srgb, var(--ink) 10%, transparent); overflow: hidden; }
 .local-progress > span { display: block; height: 100%; background: var(--accent); transition: width 0.2s ease; }
+.local-progress.indeterminate > span { width: 35%; animation: local-indeterminate 1.4s ease-in-out infinite; }
+@keyframes local-indeterminate { from { transform: translateX(-100%); } to { transform: translateX(290%); } }
+@media (prefers-reduced-motion: reduce) { .local-progress.indeterminate > span { animation: none; width: 100%; opacity: 0.5; } }
+.local-pick { display: flex; align-items: center; gap: 10px; font-size: 13px; font-weight: 600; }
+.local-pick select { flex: 1; max-width: none; }
 
 /* ---------- Dusk glass: Claude suggestions (sky painted by DuskGlass.tsx) ---------- */
 /* Frosted pearl over the sky; dark text on it stays >= 4.5:1 over the brightest (peach + star) spot. */

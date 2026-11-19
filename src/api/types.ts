@@ -361,6 +361,10 @@ export interface Settings {
   local_chat: boolean;
   /** Ollama model for local turns. */
   local_model: string;
+  /** Folder picked with "Locate ollama.exe…" (searched first); "" = none. */
+  ollama_path?: string;
+  /** The cloud model was declined on a weak-GPU PC: chat stays on Claude. */
+  local_cloud_declined?: boolean;
   /** SpriteCook's remote MCP server (artifact images); the key is in the OS credential store. */
   spritecook_url: string;
   /** Paid SpriteCook calls an artifact turn makes before it asks. */
@@ -398,6 +402,8 @@ export interface SettingsPatch {
   local_chat?: boolean;
   /** Empty string restores the default. */
   local_model?: string;
+  ollama_path?: string;
+  local_cloud_declined?: boolean;
   /** Empty string restores the default. */
   spritecook_url?: string;
   /** 0 restores the default. */

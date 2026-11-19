@@ -645,6 +645,12 @@ pub struct Settings {
     /// The Ollama model for local turns (Dreamer runs a 64k-context copy of it, see ollama.rs).
     #[serde(default = "default_local_model")]
     pub local_model: String,
+    /// The folder picked with "Locate ollama.exe…" (searched first); empty = none.
+    #[serde(default)]
+    pub ollama_path: String,
+    /// The cloud model was declined on a PC whose GPU is too small for a local one: chat stays on Claude.
+    #[serde(default)]
+    pub local_cloud_declined: bool,
     /// SpriteCook's remote MCP server (artifact images). The API key is in the OS credential store.
     #[serde(default = "default_spritecook_url")]
     pub spritecook_url: String,
@@ -729,6 +735,8 @@ impl Default for Settings {
             memory_cap: default_memory_cap(),
             local_chat: true,
             local_model: default_local_model(),
+            ollama_path: String::new(),
+            local_cloud_declined: false,
             spritecook_url: default_spritecook_url(),
             credit_cap: DEFAULT_CREDIT_CAP,
             extra: BTreeMap::new(),
@@ -767,6 +775,9 @@ pub struct SettingsPatch {
     pub local_chat: Option<bool>,
     /// Empty string restores the default.
     pub local_model: Option<String>,
+    /// Empty string clears it.
+    pub ollama_path: Option<String>,
+    pub local_cloud_declined: Option<bool>,
     /// Empty string restores the default; must be https.
     pub spritecook_url: Option<String>,
     /// 0 restores the default.

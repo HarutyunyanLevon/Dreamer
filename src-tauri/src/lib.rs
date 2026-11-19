@@ -9,6 +9,7 @@ mod handoff;
 mod memory;
 mod model;
 mod ollama;
+mod ollama_install;
 mod organize;
 mod proc_guard;
 mod questions;
@@ -250,6 +251,13 @@ pub fn run() {
             commands::claude_open_login_url,
             commands::claude_send,
             commands::ollama_status,
+            commands::ollama_check,
+            commands::ollama_install,
+            commands::ollama_install_cancel,
+            commands::ollama_recommend,
+            commands::ollama_use_model,
+            commands::ollama_decline_cloud,
+            commands::ollama_locate,
             commands::ollama_pull,
             commands::ollama_cancel,
             commands::ollama_open_installer,

@@ -9,6 +9,7 @@ import { ScrollArea } from "../ui/Scroll";
 import { Modal } from "../ui/Modal";
 import { DECISIONS_TITLE, TECH_TEMPLATE, TECH_TITLE } from "./kinds";
 import { ActivitySummary, LiveActivity, Tokens, fmtTokens, modelLabel } from "./Activity";
+import { isCloudModel } from "../api/claude";
 import type { LocalStatus, ModelTier } from "../api/claude";
 import type { SpritecookKeyStatus } from "../api";
 import { claudeApi } from "../api/claudeIndex";
@@ -918,8 +919,8 @@ function ModelBadge({ message: m }: { message: ChatMessage }) {
   if (!m.backend) return null;
   if (m.backend === "local") {
     return (
-      <div className="model-badge local" title="Answered by the local model through Ollama (no Claude usage)">
-        local · {m.model}
+      <div className="model-badge local" title={m.model && isCloudModel(m.model) ? "Answered by an Ollama cloud model through Ollama (no Claude usage)" : "Answered by the local model through Ollama (no Claude usage)"}>
+        local · {m.model && isCloudModel(m.model) ? `${m.model} (cloud)` : m.model}
       </div>
     );
   }

@@ -75,21 +75,62 @@ export interface LocalStatus {
   version?: string | null;
   versionOk: boolean;
   installed: boolean;
+  /** Where ollama.exe was found (server down). */
+  exe?: string | null;
+  /** Address checked (`host:port`, from OLLAMA_HOST); a note when OLLAMA_HOST was unusable. */
+  host?: string;
+  hostNote?: string | null;
+  /** Something other than Ollama answers on that port. */
+  foreign?: boolean;
   model: string;
+  /** An Ollama cloud model (`name:cloud`). */
+  cloud?: boolean;
+  /** Cloud model, but Ollama isn't signed in (`ollama signin`). */
+  needsSignin?: boolean;
+  /** The cloud model was declined on a weak-GPU PC: chat uses Claude. */
+  declined?: boolean;
   pulled: boolean;
   tools?: boolean | null;
   vision?: boolean | null;
   variant?: string | null;
   ready: boolean;
   pulling: boolean;
+  /** Ollama's installer is downloading or running. */
+  installing?: boolean;
   error?: string | null;
 }
 
+export interface ModelChoice {
+  model: string;
+  label: string;
+  minVramGb: number;
+  /** Download size in bytes (0 for a cloud model). */
+  size: number;
+  cloud: boolean;
+}
+
+/** The GPU found at setup and the model recommended for it. */
+export interface LocalRecommendation {
+  gpu: { name: string; vram?: number | null; source: string } | null;
+  recommended: ModelChoice;
+  choices: ModelChoice[];
+  current: string;
+  /** The model in settings isn't the untouched default. */
+  userPicked: boolean;
+}
+
+export type InstallPhase = "download" | "verify" | "run" | "start";
+
 export type OllamaSetupEvent =
   | { type: "progress"; status: string; completed: number; total: number }
+  /** Installing Ollama itself; then the model download's progress/done follow. */
+  | { type: "install"; phase: InstallPhase; completed: number; total: number }
   | { type: "done"; ok: boolean; cancelled: boolean; message: string }
   /** Startup found and prepared a local model; `switched`: it replaced the default, which wasn't downloaded. */
   | { type: "detected"; model: string; switched: boolean };
+
+/** `gemma4:cloud`, `gemma4:31b-cloud`: runs on Ollama's servers. */
+export const isCloudModel = (m: string) => /:(?:.*-)?cloud$/i.test(m.trim());
 
 export type ClaudeEvent =
   | { type: "delta"; id: string; text: string }
@@ -156,8 +197,21 @@ export interface ClaudeApi {
   /** Downloads the configured local model; progress via onLocalSetupEvent. */
   pullLocal(): Promise<void>;
   cancelPullLocal(): Promise<void>;
-  /** Opens Ollama's Windows download page. */
+  /** Opens Ollama's Windows download page (the manual route). */
   openOllamaInstaller(): Promise<void>;
+  /** "Check again": starts an installed but stopped Ollama (up to 20 s), then checks. */
+  checkLocal(): Promise<LocalStatus>;
+  /** Downloads, verifies and runs Ollama's installer, then starts it and the model download; progress via onLocalSetupEvent. */
+  installOllama(): Promise<void>;
+  cancelInstallOllama(): Promise<void>;
+  /** The detected GPU and the recommended model. */
+  localRecommend(): Promise<LocalRecommendation>;
+  /** Saves the setup screen's model choice; `download` starts its download (not for cloud models). */
+  useLocalModel(model: string, download: boolean): Promise<LocalStatus>;
+  /** Declines the cloud model: chat stays on Claude. */
+  declineLocalCloud(): Promise<LocalStatus>;
+  /** "Locate ollama.exe…": file picker; null when cancelled. */
+  locateOllama(): Promise<LocalStatus | null>;
   onLocalSetupEvent(cb: (event: OllamaSetupEvent) => void): Promise<() => void>;
   /** Answers a paused artifact turn's "Generate N more?" (credit_confirm). */
   creditAnswer(reqId: string, allow: boolean): Promise<void>;

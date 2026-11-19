@@ -444,17 +444,26 @@ pub fn claude_send(
     crate::sidecar::send_message(&app, &state, turn)
 }
 
+fn local_cfg(state: &State<AppState>) -> Result<crate::ollama::LocalCfg> {
+    with_ws(state, |ws| Ok(crate::ollama::LocalCfg::from_settings(&ws.get_settings()?)))
+}
+
 /// The local model's state for the setup screen and the chat header (checks Ollama now).
 #[tauri::command(async)]
 pub fn ollama_status(state: State<AppState>) -> Result<crate::ollama::LocalStatus> {
-    let model = with_ws(&state, |ws| Ok(ws.get_settings()?.local_model))?;
-    Ok(state.ollama.status(&model))
+    Ok(state.ollama.status(&local_cfg(&state)?))
+}
+
+/// "Check again": starts an installed but stopped Ollama (waits up to 20 s), then checks.
+#[tauri::command(async)]
+pub fn ollama_check(state: State<AppState>) -> Result<crate::ollama::LocalStatus> {
+    Ok(state.ollama.check_again(&local_cfg(&state)?))
 }
 
 /// Downloads the configured local model; progress arrives as `ollama-setup` events.
 #[tauri::command(async)]
 pub fn ollama_pull(app: AppHandle, state: State<AppState>) -> Result<()> {
-    let model = with_ws(&state, |ws| Ok(ws.get_settings()?.local_model))?;
+    let model = local_cfg(&state)?.model;
     crate::ollama::start_pull(&app, &state.ollama, &model)
 }
 
@@ -463,10 +472,69 @@ pub fn ollama_cancel(state: State<AppState>) {
     state.ollama.cancel_pull();
 }
 
-/// Opens Ollama's Windows download page (fixed URL; nothing is passed in).
+/// Opens Ollama's Windows download page (fixed URL; nothing is passed in). The manual route.
 #[tauri::command(async)]
 pub fn ollama_open_installer() -> Result<()> {
-    crate::claude_setup::open_in_browser(crate::ollama::INSTALLER_URL)
+    crate::claude_setup::open_in_browser(crate::ollama::DOWNLOAD_PAGE)
+}
+
+/// Downloads, verifies and silently runs Ollama's installer, then starts it and the model download.
+#[tauri::command(async)]
+pub fn ollama_install(app: AppHandle, state: State<AppState>) -> Result<()> {
+    crate::ollama_install::start_install(&app, &state.ollama)
+}
+
+#[tauri::command(async)]
+pub fn ollama_install_cancel(state: State<AppState>) {
+    crate::ollama_install::cancel_install(&state.ollama);
+}
+
+/// The detected GPU and the model recommended for it, with the picker's choices.
+#[tauri::command(async)]
+pub fn ollama_recommend(state: State<AppState>) -> Result<crate::ollama_install::Recommendation> {
+    let settings = with_ws(&state, |ws| ws.get_settings())?;
+    Ok(crate::ollama_install::recommend(&state.ollama, &settings))
+}
+
+/// The setup screen's model choice: saved as `local_model` (and un-declines the cloud), then
+/// downloaded unless it's a cloud model (nothing to download) or already there.
+#[tauri::command(async)]
+pub fn ollama_use_model(app: AppHandle, state: State<AppState>, model: String, download: bool) -> Result<crate::ollama::LocalStatus> {
+    let model = model.trim().to_string();
+    if !crate::ollama::valid_model_name(&model) {
+        return Err(AppError::Invalid(format!("\"{model}\" isn't a valid Ollama model name")));
+    }
+    let settings = with_ws(&state, |ws| ws.update_settings(crate::model::SettingsPatch { local_model: Some(model.clone()), local_cloud_declined: Some(false), ..Default::default() }))?;
+    let cfg = crate::ollama::LocalCfg::from_settings(&settings);
+    let st = state.ollama.status(&cfg);
+    if download && !st.pulled && !st.cloud && st.running {
+        crate::ollama::start_pull(&app, &state.ollama, &model)?;
+    }
+    Ok(st)
+}
+
+/// "No thanks" to the cloud model on a weak-GPU PC: local chat stays unusable, chat uses Claude.
+#[tauri::command(async)]
+pub fn ollama_decline_cloud(state: State<AppState>) -> Result<crate::ollama::LocalStatus> {
+    let settings = with_ws(&state, |ws| ws.update_settings(crate::model::SettingsPatch { local_cloud_declined: Some(true), ..Default::default() }))?;
+    Ok(state.ollama.status(&crate::ollama::LocalCfg::from_settings(&settings)))
+}
+
+/// "Locate ollama.exe…": a file picker; the folder of the chosen ollama.exe is saved (searched
+/// first from then on), Ollama is started from it if stopped, and the new status returned.
+/// `None` when the user cancelled.
+#[tauri::command(async)]
+pub fn ollama_locate(app: AppHandle, state: State<AppState>) -> Result<Option<crate::ollama::LocalStatus>> {
+    use tauri_plugin_dialog::DialogExt;
+    let picked = app.dialog().file().set_title("Locate ollama.exe").add_filter("ollama.exe", &["exe"]).blocking_pick_file().and_then(|p| p.into_path().ok());
+    let Some(file) = picked else { return Ok(None) };
+    let name = file.file_name().map(|n| n.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+    if name != "ollama.exe" && name != "ollama app.exe" {
+        return Err(AppError::Invalid("Pick the file named ollama.exe (in Ollama's install folder).".into()));
+    }
+    let dir = file.parent().map(|d| d.display().to_string()).unwrap_or_default();
+    let settings = with_ws(&state, |ws| ws.update_settings(crate::model::SettingsPatch { ollama_path: Some(dir), ..Default::default() }))?;
+    Ok(Some(state.ollama.check_again(&crate::ollama::LocalCfg::from_settings(&settings))))
 }
 
 #[tauri::command(async)]

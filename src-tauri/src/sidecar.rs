@@ -1047,7 +1047,7 @@ pub fn send_message(app: &AppHandle, state: &AppState, turn: Turn) -> Result<()>
         let mut map = state.claude.router.lock().map_err(|_| AppError::Invalid("router lock poisoned".into()))?;
         crate::router::route(map.entry(key.clone()).or_default(), &turn.text, turn.think, turn.pin, settings.model_router)
     };
-    let local = settings.local_chat.then(|| state.ollama.for_turn(&settings.local_model));
+    let local = settings.local_chat.then(|| state.ollama.for_turn(&crate::ollama::LocalCfg::from_settings(&settings)));
     let local_ready = local.as_ref().is_some_and(|l| l.ready);
     let mut route = crate::router::backend(tier, turn.web, turn.retry_with_claude, settings.local_chat, local_ready);
     // Artifacts always run on Claude, in the artifact thread's own (resumable) Claude session.
@@ -1230,7 +1230,7 @@ pub fn send_message(app: &AppHandle, state: &AppState, turn: Turn) -> Result<()>
     });
     if is_local {
         let vision = local.as_ref().and_then(|l| l.vision).unwrap_or(false);
-        msg["local"] = json!({ "baseUrl": crate::ollama::BASE_URL, "vision": vision });
+        msg["local"] = json!({ "baseUrl": crate::ollama::base_url(), "vision": vision });
     }
     // A router-picked fast Claude turn that fails or comes back empty is retried once on the main
     // model. Never for local turns: those offer "Retry with Claude" instead.
@@ -1244,7 +1244,7 @@ pub fn send_message(app: &AppHandle, state: &AppState, turn: Turn) -> Result<()>
     }
     if recap_job {
         let t = source_transcript.clone().unwrap_or_else(|| transcript.clone());
-        msg["recap"] = json!({ "transcript": t, "model": local_model, "baseUrl": crate::ollama::BASE_URL });
+        msg["recap"] = json!({ "transcript": t, "model": local_model, "baseUrl": crate::ollama::base_url() });
     }
     if let Some(a) = &turn.artifact {
         msg["artifact"] = json!({ "id": a, "cap": settings.credit_cap, "spritecookUrl": settings.spritecook_url });

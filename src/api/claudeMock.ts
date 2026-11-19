@@ -1,9 +1,12 @@
-import type { ActivityStep, ClaudeApi, ClaudeEvent, ClaudeStatus, LocalStatus, OllamaSetupEvent, SetupEvent, SetupJob } from "./claude";
+import { isCloudModel } from "./claude";
+import type { ActivityStep, ClaudeApi, ClaudeEvent, ClaudeStatus, LocalRecommendation, LocalStatus, ModelChoice, OllamaSetupEvent, SetupEvent, SetupJob } from "./claude";
 
 /**
  * A scripted stand-in for `npm run dev` in a plain browser, where there is no sidecar to talk to.
  * `?claude=missing` or `?claude=signedout` starts in that setup state, to preview the setup screen.
- * `?ollama=missing` / `?ollama=stopped` / `?ollama=nomodel` preview the local-model setup states (default: ready).
+ * `?ollama=missing` / `?ollama=stopped` / `?ollama=nomodel` / `?ollama=foreign` preview the local-model setup states (default: ready).
+ * `?gpu=24` / `?gpu=16` / `?gpu=8` / `?gpu=2` / `?gpu=none` sets the detected VRAM in GB (default 16); 2 and none get the cloud model.
+ * `?installer=badsig` / `?installer=offline` makes "Install Ollama" fail at the signature check / the download.
  * A message containing "fail" fails on the local model (shows "Retry with Claude").
  */
 export function createClaudeMockApi(): ClaudeApi {
@@ -23,9 +26,34 @@ export function createClaudeMockApi(): ClaudeApi {
   let turnTimers: number[] = [];
   const localListeners = new Set<(e: OllamaSetupEvent) => void>();
   const ollamaMode = typeof location !== "undefined" ? new URLSearchParams(location.search).get("ollama") : null;
-  let ollama: "missing" | "stopped" | "nomodel" | "ready" = ollamaMode === "missing" || ollamaMode === "stopped" || ollamaMode === "nomodel" ? ollamaMode : "ready";
+  let ollama: "missing" | "stopped" | "nomodel" | "foreign" | "ready" = ollamaMode === "missing" || ollamaMode === "stopped" || ollamaMode === "nomodel" || ollamaMode === "foreign" ? ollamaMode : "ready";
   let pullTimers: number[] = [];
-  const localModel = "qwen3.5:35b-a3b";
+  let installTimers: number[] = [];
+  let localModel = "qwen3.5:35b-a3b";
+  let signedIn = false;
+  let declined = false;
+  const query = typeof location !== "undefined" ? new URLSearchParams(location.search) : new URLSearchParams();
+  const gpuParam = query.get("gpu") ?? "16";
+  const gpuGb = gpuParam === "none" ? null : Number(gpuParam) || 16;
+  const installerMode = query.get("installer");
+  const CHOICES: ModelChoice[] = [
+    { model: "qwen3.5:35b-a3b", label: "Qwen 3.5 35B-A3B (best)", minVramGb: 20, size: 22e9, cloud: false },
+    { model: "qwen3.5:9b", label: "Qwen 3.5 9B", minVramGb: 10, size: 6.6e9, cloud: false },
+    { model: "qwen3.5:4b", label: "Qwen 3.5 4B", minVramGb: 6, size: 3.3e9, cloud: false },
+    { model: "gemma4:cloud", label: "Gemma 4 (Ollama cloud)", minVramGb: 0, size: 0, cloud: true },
+  ];
+  const recommended = () => CHOICES.find((c) => !c.cloud && gpuGb !== null && gpuGb >= c.minVramGb * 0.95) ?? CHOICES[3];
+  const emitL = (e: OllamaSetupEvent) => localListeners.forEach((l) => l(e));
+  const startPull = (total: number) => {
+    pullTimers = Array.from({ length: 20 }, (_, i) => window.setTimeout(() => emitL({ type: "progress", status: "pulling 154688af885e", completed: (total * (i + 1)) / 20, total }), 250 * (i + 1)));
+    pullTimers.push(
+      window.setTimeout(() => {
+        pullTimers = [];
+        ollama = "ready";
+        emitL({ type: "done", ok: true, cancelled: false, message: "" });
+      }, 250 * 22),
+    );
+  };
   const stalledOnce = new Set<string>();
 
   const runJob = (kind: SetupJob, lines: string[], finish: () => void) => {
@@ -40,7 +68,7 @@ export function createClaudeMockApi(): ClaudeApi {
     );
   };
 
-  return {
+  const api: ClaudeApi = {
     status: async (): Promise<ClaudeStatus> =>
       installed
         ? { installed, version: "mock", path: fakePath, loggedIn, authMethod: loggedIn ? "claude.ai" : null, job }
@@ -182,34 +210,123 @@ export function createClaudeMockApi(): ClaudeApi {
       return () => listeners.delete(cb);
     },
     localStatus: async (): Promise<LocalStatus> => {
-      const running = ollama !== "missing" && ollama !== "stopped";
+      const running = ollama !== "missing" && ollama !== "stopped" && ollama !== "foreign";
+      const cloud = isCloudModel(localModel);
+      const needsSignin = running && cloud && !signedIn;
+      const ready = cloud ? running && signedIn : ollama === "ready";
       return {
         running,
-        version: running ? "0.15.2" : null,
+        version: running ? "0.40.16" : null,
         versionOk: running,
         installed: ollama !== "missing",
+        exe: ollama === "stopped" ? String.raw`C:\Users\you\AppData\Local\Programs\Ollama\ollama.exe` : null,
+        host: "127.0.0.1:11434",
+        hostNote: null,
+        foreign: ollama === "foreign",
         model: localModel,
-        pulled: ollama === "ready",
-        tools: ollama === "ready" ? true : null,
-        vision: ollama === "ready" ? true : null,
-        variant: ollama === "ready" ? `dreamer-${localModel}` : null,
-        ready: ollama === "ready",
+        cloud,
+        needsSignin,
+        declined: declined && !ready,
+        pulled: cloud ? running && signedIn : ollama === "ready",
+        tools: ready ? true : null,
+        vision: ready ? true : null,
+        variant: ready ? (cloud ? localModel : `dreamer-${localModel}`) : null,
+        ready,
         pulling: pullTimers.length > 0,
-        error: ollama === "missing" ? "Ollama isn't installed." : ollama === "stopped" ? "Ollama is installed but not running. Start Ollama from the Start menu." : ollama === "nomodel" ? `The model ${localModel} isn't downloaded yet.` : null,
+        installing: installTimers.length > 0,
+        error:
+          ollama === "missing"
+            ? "Ollama isn't installed."
+            : ollama === "stopped"
+              ? "Ollama is installed but not running. Check again starts it."
+              : ollama === "foreign"
+                ? "Another program is using 127.0.0.1:11434, and it isn't Ollama. (mock)"
+                : needsSignin
+                  ? `${localModel} runs on Ollama's servers and needs an Ollama account. Run \`ollama signin\` in a terminal, then press Check again.`
+                  : declined && !ready
+                    ? "No local model on this PC: its GPU is too small for one and the cloud model was declined, so chat uses Claude."
+                    : !ready
+                      ? `The model ${localModel} isn't downloaded yet.`
+                      : null,
       };
     },
-    pullLocal: async () => {
-      const total = 22_000_000_000;
-      const emitL = (e: OllamaSetupEvent) => localListeners.forEach((l) => l(e));
-      pullTimers = Array.from({ length: 20 }, (_, i) => window.setTimeout(() => emitL({ type: "progress", status: "pulling 154688af885e", completed: (total * (i + 1)) / 20, total }), 250 * (i + 1)));
-      pullTimers.push(
-        window.setTimeout(() => {
-          pullTimers = [];
-          ollama = "ready";
-          emitL({ type: "done", ok: true, cancelled: false, message: "" });
-        }, 250 * 22),
-      );
+    checkLocal: async () => {
+      if (ollama === "stopped") {
+        await new Promise((r) => window.setTimeout(r, 1500));
+        ollama = "nomodel";
+      }
+      // The mock "signs in" on the first Check again after a cloud model is chosen.
+      if (isCloudModel(localModel)) signedIn = true;
+      return api.localStatus();
     },
+    installOllama: async () => {
+      const total = 1.86e9;
+      if (installerMode === "offline") {
+        installTimers = [
+          window.setTimeout(() => {
+            installTimers = [];
+            emitL({ type: "done", ok: false, cancelled: false, message: "No internet connection: Dreamer couldn't reach github.com to download Ollama. Check the connection and press Install again." });
+          }, 600),
+        ];
+        return;
+      }
+      const steps: [number, OllamaSetupEvent][] = Array.from({ length: 10 }, (_, i): [number, OllamaSetupEvent] => [200 * (i + 1), { type: "install", phase: "download", completed: (total * (i + 1)) / 10, total }]);
+      steps.push([2400, { type: "install", phase: "verify", completed: 0, total: 0 }]);
+      if (installerMode === "badsig") {
+        steps.push([3200, { type: "done", ok: false, cancelled: false, message: "The installer's signature didn't check out, so Dreamer didn't run it." }]);
+      } else {
+        steps.push([3000, { type: "install", phase: "run", completed: 0, total: 0 }], [4500, { type: "install", phase: "start", completed: 0, total: 0 }]);
+      }
+      installTimers = steps.map(([ms, e]) =>
+        window.setTimeout(() => {
+          if (e.type === "done") installTimers = [];
+          emitL(e);
+        }, ms),
+      );
+      if (installerMode !== "badsig")
+        installTimers.push(
+          window.setTimeout(() => {
+            installTimers = [];
+            ollama = "nomodel";
+            const rec = recommended();
+            const untouched = localModel === CHOICES[0].model;
+            if (untouched && rec.cloud) {
+              emitL({ type: "done", ok: true, cancelled: false, message: "" });
+              return;
+            }
+            if (untouched) localModel = rec.model;
+            startPull(CHOICES.find((c) => c.model === localModel)?.size || 22e9);
+          }, 5500),
+        );
+    },
+    cancelInstallOllama: async () => {
+      installTimers.forEach(clearTimeout);
+      installTimers = [];
+      emitL({ type: "done", ok: false, cancelled: true, message: "Install cancelled." });
+    },
+    localRecommend: async (): Promise<LocalRecommendation> => ({
+      gpu: gpuGb === null ? null : { name: gpuGb >= 20 ? "NVIDIA GeForce RTX 4090" : gpuGb >= 10 ? "NVIDIA GeForce RTX 4080 SUPER" : gpuGb >= 6 ? "NVIDIA GeForce RTX 4060" : "Intel(R) UHD Graphics", vram: gpuGb * 2 ** 30, source: "mock" },
+      recommended: recommended(),
+      choices: CHOICES,
+      current: localModel,
+      userPicked: localModel !== CHOICES[0].model,
+    }),
+    useLocalModel: async (model, download) => {
+      localModel = model;
+      declined = false;
+      if (!isCloudModel(model) && ollama === "ready") ollama = "nomodel";
+      if (download && !isCloudModel(model)) startPull(CHOICES.find((c) => c.model === model)?.size || 5e9);
+      return api.localStatus();
+    },
+    declineLocalCloud: async () => {
+      declined = true;
+      return api.localStatus();
+    },
+    locateOllama: async () => {
+      if (ollama === "missing") ollama = "stopped";
+      return api.checkLocal();
+    },
+    pullLocal: async () => startPull(CHOICES.find((c) => c.model === localModel)?.size || 22e9),
     cancelPullLocal: async () => {
       pullTimers.forEach(clearTimeout);
       pullTimers = [];
@@ -217,7 +334,6 @@ export function createClaudeMockApi(): ClaudeApi {
     },
     openOllamaInstaller: async () => {
       window.open("https://ollama.com/download/windows", "_blank", "noopener");
-      if (ollama === "missing") ollama = "nomodel";
     },
     onLocalSetupEvent: async (cb) => {
       localListeners.add(cb);
@@ -235,4 +351,5 @@ export function createClaudeMockApi(): ClaudeApi {
       window.setTimeout(() => emit({ type: "spritecook_balance", credits: balance, error: null }), 200);
     },
   };
+  return api;
 }

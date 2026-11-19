@@ -369,3 +369,54 @@ Reproduced first, on the unchanged code, in the real app against a throwaway wor
 - **Handoff.** Only approved versions: their files go to `design/v<N>/assets/<artifact-slug>/`, and Dreamer itself (not Claude) appends "Artifacts (approved)" and "Style guide: <active theme>" sections to 05-assets.md, so they can be neither forgotten nor invented. The style guide uses the active theme's approved version, else its current one (and says which). Artifact cards never enter the card scope. Claude's generation prompt lists the approved artifacts so the GDD can refer to them.
 - **Trash.** Trashing an artifact card keeps its folder (restore works); emptying the Trash deletes the folders of artifacts whose card is gone.
 - **UI.** Card: type icon, title, theme pill (+ art-mode pill when overridden), preview (image, video or HTML thumbnail), version picker + Approved badge + credits, chips, and a running state with the SpriteCook progress bar (indeterminate unless a job reports progress). A click selects it and opens its thread; double-click or Enter opens the full view (version picker, Approve, Compare two versions side by side, theme and art-mode overrides, Set as active theme, brief, design notes, model, credits).
+
+## Local model: in-app Ollama install, GPU-based model, smarter Check again
+- **Install in the app.** "Install Ollama" (also "Update Ollama" for a too-old one) downloads `https://github.com/ollama/ollama/releases/latest/download/OllamaSetup.exe` with reqwest into `%TEMP%\dreamer-ollama-<ulid>\`. That is where ollama.com/download/OllamaSetup.exe redirects; v0.40.16 is 1.86 GB. Every redirect must stay on https. Dreamer checks the signature, runs `OllamaSetup.exe /VERYSILENT /NORMAL /SUPPRESSMSGBOXES /NOCANCEL` and waits for it (15 min cap). It deletes the folder in every case, then waits for the server. Ollama's `ollama.iss` sets `PrivilegesRequired=lowest` (per-user, no UAC) and `{localappdata}\Programs\Ollama`. Its `[Run]` entry starts `ollama app.exe` even in a silent install (no `skipifsilent`), so Dreamer waits 8 s for that before starting it itself (20 s). Code in `ollama_install.rs`. "Get Ollama for Windows" stays as a small link for the manual route, next to "Locate ollama.exe…".
+- **Signature.** `Get-AuthenticodeSignature` runs through PowerShell, with the path passed in an env var (never in the script text). The status must be `Valid` and the certificate's `O=` exactly `Ollama Inc.`. Checked on 2026-11-19: the real v0.40.16 installer is `CN=Ollama Inc., O=Ollama Inc., L=Toronto, …`, issued by DigiCert G5 CS ECC SHA384 2021 CA1, and a copy with one byte flipped reads `HashMismatch`. On a failure the file is deleted and nothing runs. `verify_and_run` takes the verifier and the runner as parameters, so tests can inject them.
+- **Events.** `ollama-setup` `{type:"install", phase:"download"|"verify"|"run"|"start", completed, total}`, then the existing `progress`/`done` of the model pull. A failure is a `done` with `ok:false` and a plain message for each case: no internet, interrupted download (length mismatch or stream error), bad signature, installer exit code (Inno codes in words), server not up, disk full (ERROR_DISK_FULL / ENOSPC / StorageFull, plus Ollama's "no space" during a pull), port used by something else. `LocalStatus.installing` lets a reopened dialog show an install that is still running.
+- **Model by VRAM** (`ollama::MODEL_TIERS`, one table). Checked against the Ollama library on 2026-11-19; every entry lists tools:
+  - ≥ 20 GB: `qwen3.5:35b-a3b` (22 GB, the old default).
+  - 10–20 GB: `qwen3.5:9b` (6.6 GB, tools + vision).
+  - 6–10 GB: `qwen3.5:4b` (3.3 GB, tools + vision).
+  - Below that, or no or unknown GPU: `gemma4:cloud` (tools + vision, the library's "Low usage" cloud tier, and the example name in Ollama's cloud docs).
+
+  Thresholds have 5% slack because cards report a little under their nominal size (a 4090 reports 23.99 GiB). Qwen 3.5 beats qwen3:8b/14b here: it has vision and a 256K native context.
+
+  GPU detection, in order:
+  1. `nvidia-smi`.
+  2. The display driver's registry entries (`HardwareInformation.qwMemorySize` + `DriverDesc` under the display class key). This is the same 64-bit number DXGI reports as dedicated memory, read without COM code.
+  3. `Win32_VideoController.AdapterRAM`. A value of about 4 GB or more is the 32-bit cap, so it counts as unknown.
+
+  The GPU is detected once per run. The dev PC (RTX 4080 SUPER, 16376 MiB) gets `qwen3.5:9b`.
+- **Who picks.** The dialog shows the GPU, its VRAM, the recommendation with its size, and a picker. The choice is saved as `local_model` (`ollama_use_model`). After an install, Dreamer picks for the GPU only while `local_model` is the untouched default (the same rule as `auto_setup_at`). A cloud recommendation never starts on its own: it needs a yes in the dialog and `ollama signin`. Limitation: someone who picked the default model by hand in Settings counts as untouched.
+- **Cloud models** (`is_cloud`: tag `cloud` or `*-cloud`).
+  - Dreamer never signs in or creates keys. The dialog says "Run `ollama signin` in a terminal, then press Check again" and has a button that copies the command.
+  - No 64k copy: `variant_name` returns the cloud name itself, `create_variant` skips it, and the sidecar runs the cloud model directly. Ollama's servers set its context.
+  - When `/api/show` returns 404, a non-streamed `/api/pull` registers the manifest. Ollama's docs say cloud models need no download.
+  - Ollama's docs have no endpoint for sign-in status (no `/api/me`). So the check sends one `/api/generate` with `num_predict: 1`; a 401/403 or "unauthorized" means not signed in. A success is remembered for the run, and Check again probes again.
+  - **Not verified against a real Ollama** (there's none on the dev PC): what `/api/show` returns for a cloud model. If its capabilities list is empty, Dreamer assumes tools, since the library lists them.
+  - Badge: `local · gemma4:cloud (cloud)`.
+- **Declining cloud** sets `local_cloud_declined`. `local_chat` stays on but has no usable model, so turns go to Claude with the existing amber note ("No local model on this PC: … chat uses Claude."). Choosing any model clears the flag. Turning `local_chat` off instead would have hidden that note.
+- **Check again** (`ollama_check`, and `auto_setup_at` at startup) starts an installed but stopped Ollama first and waits up to 20 s. It runs the tray app next to ollama.exe if there is one, else `ollama serve`. The 4 s poll is still a plain status read.
+- **OLLAMA_HOST.** `ollama::parse_host` accepts `host`, `host:port`, `:port` and `[v6]:port`, with or without `http://`. Defaults: 127.0.0.1 and port 11434; a bind-all address is reached through loopback. https, other schemes, a bad port or a bad host fall back to the default, and the dialog shows a note. Dreamer reads the variable from its own environment at each check. The sidecar's local `ANTHROPIC_BASE_URL` and the recap's base URL both come from `ollama::base_url()`, and a server Dreamer starts inherits the variable. Hostnames resolve through `ToSocketAddrs`.
+- **Port taken.** When the TCP connect works but `/api/version` returns no Ollama JSON, the status is `foreign`, with a message naming the address.
+- **Finding ollama.exe** (`exe_candidates`; the order is tested):
+  1. The folder picked with "Locate ollama.exe…" (setting `ollama_path`).
+  2. `%LOCALAPPDATA%\Programs\Ollama`.
+  3. `%ProgramFiles%\Ollama`.
+  4. This process's PATH, then the user and machine PATH from the registry (catches an install made after Dreamer started).
+  5. InstallLocation from the installer's uninstall key `{44E83376-CE68-45EB-8FC1-393500EB558C}_is1` (HKCU, HKLM, WOW6432Node).
+  6. scoop (`%SCOOP%` or `~\scoop`: `apps\ollama\current`, `shims`).
+  7. winget (`Packages\Ollama.Ollama_*`, `Links`).
+  8. `where ollama`, as the last resort.
+
+  The file picker accepts only `ollama.exe` or `ollama app.exe`.
+- **Verified:**
+  - `cargo test`: all pass, including the 14 Ollama tests.
+  - The ignored live test against the real installer: the genuine file is accepted, tampered and unsigned copies are refused, and the GPU is read through nvidia-smi.
+  - `tsc`, `vite build`, `npm run check:themes`.
+
+  **Not verified:**
+  - A real end-to-end install in the app (Ollama's installer was not run on the dev PC).
+  - The real cloud `/api/show` and sign-in responses.
+  - The dialog in a browser (the Chrome extension wasn't connected). The mock covers each state for a manual look.

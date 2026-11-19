@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { ClaudeApi, ClaudeEvent, ClaudeStatus, LocalStatus, OllamaSetupEvent, SetupEvent } from "./claude";
+import type { ClaudeApi, ClaudeEvent, ClaudeStatus, LocalRecommendation, LocalStatus, OllamaSetupEvent, SetupEvent } from "./claude";
 
 export const claudeTauriApi: ClaudeApi = {
   status: () => invoke<ClaudeStatus>("claude_status"),
@@ -17,6 +17,13 @@ export const claudeTauriApi: ClaudeApi = {
   pullLocal: () => invoke("ollama_pull"),
   cancelPullLocal: () => invoke("ollama_cancel"),
   openOllamaInstaller: () => invoke("ollama_open_installer"),
+  checkLocal: () => invoke<LocalStatus>("ollama_check"),
+  installOllama: () => invoke("ollama_install"),
+  cancelInstallOllama: () => invoke("ollama_install_cancel"),
+  localRecommend: () => invoke<LocalRecommendation>("ollama_recommend"),
+  useLocalModel: (model, download) => invoke<LocalStatus>("ollama_use_model", { model, download }),
+  declineLocalCloud: () => invoke<LocalStatus>("ollama_decline_cloud"),
+  locateOllama: () => invoke<LocalStatus | null>("ollama_locate"),
   onLocalSetupEvent: async (cb) => listen<OllamaSetupEvent>("ollama-setup", (e) => cb(e.payload)),
   creditAnswer: (reqId, allow) => invoke("claude_credit_answer", { reqId, allow }),
   spritecookBalance: () => invoke("spritecook_balance"),
