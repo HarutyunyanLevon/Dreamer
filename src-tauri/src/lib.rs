@@ -6,6 +6,8 @@ mod credentials;
 mod ctx;
 mod error;
 mod handoff;
+#[doc(hidden)]
+pub mod harness;
 mod memory;
 mod model;
 mod ollama;
@@ -140,6 +142,11 @@ fn show_main_window(app: &AppHandle) {
             }
         }
     });
+}
+
+/// The app's compiled config and assets (shared with the headless reliability harness).
+pub(crate) fn context() -> tauri::Context<tauri::Wry> {
+    tauri::generate_context!()
 }
 
 /// Launched by the Windows Run entry (not by the user opening the app).
@@ -304,7 +311,7 @@ pub fn run() {
             commands::spritecook_key_status,
             commands::spritecook_set_key,
         ])
-        .build(tauri::generate_context!())
+        .build(context())
         .expect("error while building Dreamer")
         .run(|app, event| {
             // However the app ends (tray Quit, app.exit, last window gone), the sidecar tree goes too.

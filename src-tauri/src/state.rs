@@ -56,6 +56,20 @@ impl AppState {
         Ok(state)
     }
 
+    /// An AppState on a given workspace folder, without the hotkey or the saved config (the
+    /// reliability harness runs the real chat pipeline on a temp copy of a workspace).
+    pub fn headless(root: PathBuf) -> Result<AppState> {
+        let ws = Workspace::open(&root)?;
+        Ok(AppState {
+            ws: Mutex::new(ws),
+            claude: crate::sidecar::ClaudeState::default(),
+            ollama: Default::default(),
+            search: Arc::new(Mutex::new(crate::search::SearchIndex::default())),
+            watcher: Mutex::new(None),
+            config_path: root.join(".harness-config.json"),
+        })
+    }
+
     /// Stops the file watcher (dropping it releases its handle on the workspace folder), runs `f`,
     /// then starts a fresh watcher on the current root. Used around deleting a project folder.
     /// `f` may lock `self.ws`; this function only locks it again after `f` has returned.

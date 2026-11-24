@@ -109,7 +109,11 @@ fn sidecar_script_path(app: &AppHandle) -> Result<PathBuf> {
     // Dev only: the repo's `sidecar/` folder (uses the repo's node_modules).
     #[cfg(debug_assertions)]
     {
-        let dev = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("sidecar").join("claude-sidecar.mjs");
+        // The reliability harness can run a frozen copy of an older sidecar (before/after runs).
+        if let Some(p) = std::env::var_os("DREAMER_SIDECAR_SCRIPT").map(PathBuf::from).filter(|p| p.is_file()) {
+            return Ok(p);
+        }
+        let dev =PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("sidecar").join("claude-sidecar.mjs");
         if dev.is_file() {
             return Ok(dev);
         }
@@ -397,6 +401,7 @@ fn handle_sidecar_message(app: &AppHandle, msg: Value) {
         let req_id = msg.get("reqId").and_then(Value::as_str).unwrap_or_default().to_string();
         let tool = msg.get("tool").and_then(Value::as_str).unwrap_or_default();
         let input = msg.get("input").cloned().unwrap_or(Value::Null);
+        crate::harness::fault_tool_delay(tool);
         // Artifact tools write into the artifact of the turn's thread (a download may take a while,
         // so they run off the thread that reads the sidecar's output).
         if tool.starts_with("artifact_") {
@@ -1274,6 +1279,11 @@ pub fn spritecook_balance(app: &AppHandle, state: &AppState) -> Result<()> {
     ensure_started(app, state)?;
     write_line(state, &json!({ "type": "spritecook_balance" }));
     Ok(())
+}
+
+/// The running sidecar's process id (the reliability harness finds its Claude Code children by it).
+pub fn sidecar_pid(state: &AppState) -> Option<u32> {
+    state.claude.sidecar.lock().ok()?.as_ref().map(|s| s.child.id())
 }
 
 /// `hard`: also close the thread's Claude session (Retry after a stall); its next message resumes it.

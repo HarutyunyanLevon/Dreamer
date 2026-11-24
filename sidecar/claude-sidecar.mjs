@@ -67,6 +67,13 @@ const CLAUDE_EXE = process.env.DREAMER_CLAUDE_EXE || "";
 const query = (args) =>
   sdkQuery({ ...args, options: { ...(CLAUDE_EXE ? { pathToClaudeCodeExecutable: CLAUDE_EXE } : {}), ...args.options } });
 
+// ---- Fault injection for the reliability harness (scripts/reliability). Inert unless set. ----
+// DREAMER_FAKE_CLAUDE_URL: Claude sessions talk to this fake Anthropic server instead (stall tests,
+// no real usage). DREAMER_FAKE_LOCAL_URL: local sessions talk to it instead of Ollama.
+const FAKE_CLAUDE_URL = process.env.DREAMER_FAKE_CLAUDE_URL || "";
+const FAKE_LOCAL_URL = process.env.DREAMER_FAKE_LOCAL_URL || "";
+const claudeEnv = () => (FAKE_CLAUDE_URL ? { ...process.env, ANTHROPIC_BASE_URL: FAKE_CLAUDE_URL, ANTHROPIC_AUTH_TOKEN: "fake", ANTHROPIC_API_KEY: "" } : process.env);
+
 // ---- SpriteCook (artifact images), through its remote MCP server ----
 // URL from Settings, key from the OS credential store (both passed by the app at spawn). The key is
 // removed from our env at once, so no Claude Code process inherits it; it only goes into the MCP
@@ -1370,7 +1377,7 @@ const thinkingOption = (think) => (think ? { type: "enabled", budgetTokens: THIN
 function localEnv(baseUrl, model) {
   return {
     ...process.env,
-    ANTHROPIC_BASE_URL: baseUrl,
+    ANTHROPIC_BASE_URL: FAKE_LOCAL_URL || baseUrl,
     ANTHROPIC_AUTH_TOKEN: "ollama",
     ANTHROPIC_API_KEY: "",
     ANTHROPIC_MODEL: model,
@@ -1409,7 +1416,7 @@ function openSession(key, resume, model, think = false, local = null, artifact =
       // Claude Code's own auto-compact is a % of the model's window (~800k+ on a 1M model, i.e. never).
       // Pin the window it computes against to a fixed budget, so it also compacts mid-turn.
       env: {
-        ...(local ? localEnv(local.baseUrl, model) : process.env),
+        ...(local ? localEnv(local.baseUrl, model) : claudeEnv()),
         CLAUDE_CODE_AUTO_COMPACT_WINDOW: String(AUTO_COMPACT_TOKENS),
         ENABLE_CLAUDEAI_MCP_SERVERS: "false",
       },

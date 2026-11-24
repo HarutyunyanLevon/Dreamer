@@ -24,6 +24,10 @@ static SINK: Mutex<Option<Sink>> = Mutex::new(None);
 
 /// `%LOCALAPPDATA%\Dreamer\logs` (Windows), or the platform's local data dir elsewhere.
 pub fn dir() -> PathBuf {
+    // The reliability harness logs into its own run folder, never the app's.
+    if let Some(d) = std::env::var_os("DREAMER_LOG_DIR").filter(|d| !d.is_empty()) {
+        return PathBuf::from(d);
+    }
     let base = std::env::var_os("LOCALAPPDATA")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("XDG_STATE_HOME").map(PathBuf::from))
