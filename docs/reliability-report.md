@@ -154,4 +154,87 @@ Close GPU-heavy apps first (section 1). Each run writes a folder under `%TEMP%`
 
 ## 5. Before / after
 
-RESULTS_PLACEHOLDER
+Both runs on the same machine and the same evening (the GPU was fast enough then: ~35 tok/s),
+same harness, same scenarios. TTFE = time from send to the first event after the route; a
+"spinner" is a turn with no end at all within the harness cap (180 s before, 600 s after). Success
+criteria: S1/S4 an answer; S2 a ghost card created; S3 a valid plan covering every non-pinned card
+with frames, retags, an explicit non-overlapping layout and no folder ops; S5 the retry after a
+Stop answers with no stray events; S6 all 5 turns answer and the thread compacts; S7 the Claude
+turn answers; S8 a clear end (anything but a spinner).
+
+### Before (old pipeline; S1–S6 ×5, fake-server faults ×2)
+
+| Scenario | Success | TTFE median | TTFE p95 | Turn median | Turn p95 | End reasons (all turns) | Spinners |
+|---|---|---|---|---|---|---|---|
+| S1 | 5/5 | 0.7s | 2.1s | 2.5s | 3.7s | done 5 | 0 |
+| S2 | 5/5 | 1.8s | 26.7s | 5.2s | 34.2s | done 5 | 0 |
+| S3 | 0/5 | 0.8s | 1.7s | 51.5s | 86.2s | done/tool 5 | 0 |
+| S4 | 5/5 | 5.0s | 5.2s | 7.3s | 7.6s | done 5 | 0 |
+| S5 | 5/5 | 0.4s | 1.9s | 3.7s | 10.3s | done 5, error/error 5 | 0 |
+| S6 | 1/5 | 0.1s | 1.8s | 3.5s | 7.6s | done 24, done/tool 1 | 0 |
+| S8-error-claude | 1/2 | 179.2s | 179.2s | 179.2s | 180.2s | error 1, spinner 1 | 1 |
+| S8-silent-claude | 0/2 | - | - | 180.1s | 180.2s | spinner 2 | 2 |
+| S8-silent-local | 0/2 | - | - | 180.1s | 180.2s | spinner 2 | 2 |
+| S8-stall-local | 0/2 | 0.9s | 0.9s | 180.1s | 180.2s | spinner 2 | 2 |
+
+### After (new pipeline; S1–S6 ×10, S7 ×2 each, S8 ×3 each)
+
+| Scenario | Success | TTFE median | TTFE p95 | Turn median | Turn p95 | End reasons (all turns) | Spinners |
+|---|---|---|---|---|---|---|---|
+| S1 | 10/10 | 0.7s | 1.9s | 1.2s | 2.3s | done 10 | 0 |
+| S2 | 10/10 | 2.5s | 2.7s | 2.8s | 3.3s | done 10 | 0 |
+| S3 | 9/10 | 0.0s | 0.0s | 19.5s | 20.5s | done 10 | 0 |
+| S4 | 10/10 | 4.7s | 11.5s | 5.1s | 12.2s | done 10 | 0 |
+| S5 | 10/10 | 1.7s | 2.8s | 5.6s | 10.3s | done 10, interrupted 10 | 0 |
+| S6 | 10/10 | 0.1s | 1.8s | 0.8s | 4.6s | done 50 | 0 |
+| S7-chat | 2/2 | 2.8s | 3.3s | 3.0s | 3.5s | done 2 | 0 |
+| S7-retry | 2/2 | 1.7s | 2.2s | 9.8s | 47.9s | done 2, error/error+retry 2 | 0 |
+| S7-think | 2/2 | 0.9s | 2.2s | 4.3s | 5.3s | done 4 | 0 |
+| S8-error-claude | 3/3 | 3.4s | 3.5s | 3.4s | 3.5s | error 3 | 0 |
+| S8-kill-claude-code | 3/3 | 1.6s | 1.7s | 2.7s | 3.2s | done 3 | 0 |
+| S8-kill-ollama | 3/3 | 4.5s | 4.5s | 6.4s | 6.5s | error/error+retry 3 | 0 |
+| S8-silent-claude | 3/3 | 60.7s | 60.9s | 60.7s | 60.9s | stalled 3 | 0 |
+| S8-silent-local | 3/3 | 91.4s | 94.9s | 182.0s | 185.0s | stalled/stalled+retry 3 | 0 |
+| S8-stall-local | 3/3 | 1.1s | 1.3s | 93.3s | 93.4s | stalled/stalled+retry 3 | 0 |
+| S8-tool-delay | 3/3 | 2.3s | 2.3s | 18.0s | 18.1s | done/tool 3 | 0 |
+
+Notes:
+- **Zero spinners after**, faults included; 7 before.
+- Local S1–S6 after: 10, 10, 9, 10, 10, 10 out of 10. S3's one failure is a plan with frames, a
+  clean layout and every card placed, but no tag changes (the check requires retags).
+- S3 before: 0/5. The old agent turn produced folder plans (11–26 folder ops, which the new rule
+  forbids) or no plan at all (2 of 5), always ending in the "tool" fallback. The old S3 fixture
+  had 25 live cards and no pinned card (ghost cards were not converted yet); after: 37 cards,
+  2 pinned. S3 after takes ~20 s for 37 cards (4 model calls).
+- S6 before 1/5: the old harness's compaction threshold was too high to be crossed, so most runs
+  never compacted (all turns answered). The after numbers use the corrected threshold (7,600).
+- S8 after: a silent local server ends at ~182 s (90 s, the automatic local retry, 90 s), a stall
+  mid-stream at ~93 s (45 s ×2), a silent Claude server at 61 s (no automatic retry), a Claude
+  server error in 3.4 s (before: 179 s, 22 requests). Killing Ollama mid-turn: a clear error with
+  "Retry with Claude" in ~6 s. A Rust tool reply 20 s late: the tool times out at 15 s and the
+  model answers anyway. Killing the Claude Code child: the turns ended normally, but in these short
+  turns the kill often landed after the answer was complete, so this case is weaker evidence than
+  the fake-server stalls.
+- **Claude usage:** 6 real Claude turns in total (S7-chat 2, S7-retry 2, S7-think 2; Haiku and
+  Sonnet). The "claude" turns in the fake-server rows went to the fake server and cost nothing.
+- S1, S2, S4 and S5 were already fine before *on a free GPU*. The old failures cluster in long
+  turns (organize), slow or wedged models (no watchdog), escalations (the local recap) and GPU
+  contention (section 1). Short local turns also got faster (S1 median 2.5 s → 1.2 s, S2 p95
+  34 s → 3.3 s), because Qwen no longer thinks first.
+
+### Model / config used
+
+`dreamer-qwen3.5:9b` (Qwen 3.5 9B Q4_K_M, `num_ctx` 65,536, fully on the GPU), Ollama 0.40.16,
+thinking off, temperature 0.7 / top_p 0.8 / top_k 20 for chat, 0.2 for the organize steps,
+`max_tokens` 8,192, `keep_alive` 30 min after Dreamer's own requests.
+
+**Model swap: not recommended.** Local reached ≥ 9/10 on every scenario after tuning, so the 2–3
+alternative-model benchmark was not needed. For local chat while a game holds the GPU, the only
+real options are a smaller model (`qwen3.5:4b`, ~3.3 GB) or Claude for those sessions; nothing
+was changed there.
+
+### Open points for you
+- When the local model is *not ready* (Ollama down), the router still sends turns to Claude
+  automatically (reason "unavailable"), as before. That predates this work; say if it should ask first.
+- The memory pass after each chat turn runs on Claude (Haiku), local turns included, as before.
+
