@@ -850,7 +850,7 @@ fn s5(d: &mut Driver, run: usize) -> RunRecord {
 fn s6(d: &mut Driver, run: usize) -> RunRecord {
     d.reset_thread("project");
     // A low compaction budget so a short thread crosses it (the real one is 50k tokens).
-    let _ = d.state().ws.lock().unwrap().update_settings(SettingsPatch { compact_tokens: Some(9_000), ..Default::default() });
+    let _ = d.state().ws.lock().unwrap().update_settings(SettingsPatch { compact_tokens: Some(7_600), ..Default::default() });
     let asks = [
         "Summarize the core loop of this game in three sentences.",
         "What are the two biggest open design questions? One sentence each.",
