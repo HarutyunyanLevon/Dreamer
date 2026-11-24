@@ -27,7 +27,7 @@ use tauri::{AppHandle, Emitter};
 
 /// First Ollama release with the Anthropic Messages API (tools and streaming included).
 pub const MIN_VERSION: (u32, u32, u32) = (0, 14, 0);
-/// Context window of the variant Dreamer creates (threads compact at 64k, see ctx::local_compact_tokens).
+/// Context window of the variant Dreamer creates (threads compact at 40k, see ctx::local_compact_tokens).
 pub const NUM_CTX: u64 = 65_536;
 /// Ollama's download page, for the manual route ("Get Ollama for Windows").
 pub const DOWNLOAD_PAGE: &str = "https://ollama.com/download/windows";

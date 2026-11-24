@@ -12,3 +12,4 @@ tsconfig.node.tsbuildinfo
 vite.config.js
 vite.config.d.ts
 .reliability-baseline/
+src-tauri/target-h/

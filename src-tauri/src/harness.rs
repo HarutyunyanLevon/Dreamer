@@ -228,6 +228,15 @@ fn build_flat_fixture(dir: &Path) -> std::io::Result<usize> {
         .map(|n| n.trim_end_matches(".md").to_string())
         .collect();
     ids.sort();
+    // Unkept suggestions become normal cards here, so the canvas is the full ~40-card case.
+    for id in &ids {
+        let f = dir.join("cards").join(format!("{id}.md"));
+        if let Ok(t) = std::fs::read_to_string(&f) {
+            if t.contains("\nghost: true") {
+                std::fs::write(&f, t.replacen("\nghost: true", "\nghost: false", 1))?;
+            }
+        }
+    }
     let _ = std::fs::remove_dir_all(dir.join("canvases"));
     std::fs::write(dir.join("folders.json"), "{\"folders\": []}")?;
     let mut canvas = Canvas::default();
@@ -693,7 +702,13 @@ pub fn check_plan(state: &AppState, slug: &str, folder: Option<&str>, plan: &Val
     c.covered = need.iter().filter(|id| covered.contains(id.as_str())).count();
     c.unplaced = plan.get("unplaced").and_then(Value::as_array).map_or(0, Vec::len);
     if !placed.is_empty() {
-        let size = |id: &str| canvas.cards.get(id).map(|p| (p.w.unwrap_or(CARD_W), p.h.unwrap_or(CARD_H))).unwrap_or((CARD_W, CARD_H));
+        // The same height estimate the layout uses for cards without a fixed height (the rendered
+        // height of a card depends on its content).
+        let size = |id: &str| {
+            let w = canvas.cards.get(id).and_then(|p| p.w).unwrap_or(CARD_W);
+            let est = p.cards.iter().find(|c| c.meta.id == id).map(|c| crate::organize::estimate_card_h(c, w)).unwrap_or(CARD_H);
+            (w, canvas.cards.get(id).and_then(|p| p.h).unwrap_or(est))
+        };
         let mut rects: Vec<(f64, f64, f64, f64)> = placed.iter().map(|(id, (x, y))| {
             let (w, h) = size(id);
             (*x, *y, w, h)
@@ -753,7 +768,9 @@ pub struct RunRecord {
 }
 
 fn rec(scenario: &str, run: usize, ok: bool, note: impl Into<String>, turns: Vec<TurnResult>) -> RunRecord {
-    let claude_turns = turns.iter().filter(|t| t.backend.as_deref() == Some("claude")).count();
+    // Turns that went to the fake Anthropic server cost nothing.
+    let fake = scenario.ends_with("-claude") && scenario.starts_with("S8-");
+    let claude_turns = if fake { 0 } else { turns.iter().filter(|t| t.backend.as_deref() == Some("claude")).count() };
     RunRecord { scenario: scenario.into(), run, ok, note: note.into(), turns, plan_check: None, claude_turns }
 }
 
@@ -797,7 +814,12 @@ fn s3(d: &mut Driver, run: usize, slug: &str) -> RunRecord {
     let check = t.plan.as_ref().map(|p| check_plan(&d.state(), &d.slug, None, p));
     d.slug = prev;
     let ok = t.end == End::Done && check.as_ref().is_some_and(|c| c.ok);
-    let note = format!("{:?} {}", t.end, check.as_ref().map(|c| c.problems.join("; ")).unwrap_or_else(|| "no plan".into()));
+    let note = format!(
+        "{:?} {} {}",
+        t.end,
+        check.as_ref().map(|c| format!("cards={} pinned={} covered={} frames={} retags={} folder_ops={} overlaps={:?} unplaced={}", c.cards, c.pinned, c.covered, c.frames, c.retags, c.folder_ops, c.overlaps, c.unplaced)).unwrap_or_default(),
+        check.as_ref().map(|c| c.problems.join("; ")).unwrap_or_else(|| "no plan".into())
+    );
     let mut r = rec("S3", run, ok, note, vec![t]);
     r.plan_check = check;
     r

@@ -11,7 +11,9 @@
     "release": "node scripts/release.mjs",
     "preview": "vite preview",
     "tauri": "tauri",
-    "check:themes": "tsx scripts/check-themes.ts"
+    "check:themes": "tsx scripts/check-themes.ts",
+    "reliability": "node scripts/reliability/run.mjs",
+    "test:reliability": "tsx scripts/reliability/last-resort.test.ts"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.3.322",
