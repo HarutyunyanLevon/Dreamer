@@ -13,6 +13,7 @@ mod model;
 mod ollama;
 mod ollama_install;
 mod organize;
+mod organize_pipeline;
 mod proc_guard;
 mod questions;
 mod router;
@@ -125,6 +126,11 @@ fn show_main_window(app: &AppHandle) {
     // tray behaviour is discoverable; a second X while it's showing just hides.
     let handle = w.clone();
     w.on_window_event(move |event| {
+        // Coming back to Dreamer: get the local model loaded before the next message (at most every 5 min).
+        if let WindowEvent::Focused(true) = event {
+            let app = handle.app_handle().clone();
+            std::thread::spawn(move || ollama::warm_if_stale(&app, std::time::Duration::from_secs(300)));
+        }
         if let WindowEvent::CloseRequested { api, .. } = event {
             api.prevent_close();
             let seen = handle

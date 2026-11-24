@@ -411,6 +411,9 @@ pub fn claude_send(
     folder: Option<String>,
     organize: Option<String>,
     organize_backend: Option<String>,
+    organize_instruction: Option<String>,
+    organize_prior: Option<serde_json::Value>,
+    organize_rest: Option<bool>,
     artifact: Option<String>,
     recap_from: Option<String>,
 ) -> Result<()> {
@@ -438,6 +441,9 @@ pub fn claude_send(
             };
             (if s == "project" { "project".to_string() } else { "folder".to_string() }, backend)
         }),
+        organize_instruction,
+        organize_prior: organize_prior.filter(|v| v.is_object()),
+        organize_rest: organize_rest.unwrap_or(false),
         artifact: artifact.filter(|a| !a.is_empty()),
         recap_from: recap_from.filter(|a| !a.is_empty()),
     };

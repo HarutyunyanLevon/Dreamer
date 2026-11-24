@@ -133,8 +133,6 @@ pub enum Reason {
     Retry,
     /// Local chat is on but Ollama isn't usable right now.
     Unavailable,
-    /// An organize plan over more cards than the local model handles well.
-    Size,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

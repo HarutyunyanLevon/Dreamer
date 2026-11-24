@@ -112,6 +112,20 @@ fn fake_conn(mut s: TcpStream, mode: FakeMode, stop: Arc<AtomicBool>, requests: 
         return;
     }
     *requests.lock().unwrap() += 1;
+    // HARNESS_DUMP_DIR: keep the request's shape (what Claude Code sends to the model server).
+    if let Some(dir) = std::env::var_os("HARNESS_DUMP_DIR") {
+        if let Ok(v) = serde_json::from_slice::<Value>(&body) {
+            let tools: Vec<String> = v.get("tools").and_then(Value::as_array).map(|a| a.iter().filter_map(|t| t.get("name").and_then(Value::as_str)).map(str::to_string).collect()).unwrap_or_default();
+            let shape = json!({
+                "path": first.trim(), "model": v.get("model"), "max_tokens": v.get("max_tokens"), "temperature": v.get("temperature"),
+                "thinking": v.get("thinking"), "stream": v.get("stream"), "tools": tools, "toolsChars": v.get("tools").map(|t| t.to_string().len()),
+                "systemChars": v.get("system").map(|t| t.to_string().len()), "messagesChars": v.get("messages").map(|t| t.to_string().len()),
+                "keys": v.as_object().map(|o| o.keys().cloned().collect::<Vec<_>>()),
+            });
+            let n = *requests.lock().unwrap();
+            let _ = std::fs::write(PathBuf::from(dir).join(format!("request-{n}.json")), serde_json::to_string_pretty(&shape).unwrap());
+        }
+    }
     let hold = |stop: &AtomicBool| {
         while !stop.load(Ordering::SeqCst) {
             std::thread::sleep(Duration::from_millis(200));
@@ -352,10 +366,12 @@ impl Driver {
             resume_local,
             retry_with_claude: o.retry_with_claude,
             organize: o.organize.clone(),
+            organize_instruction: o.organize.as_ref().map(|_| String::new()),
+            organize_prior: o.organize_extra.clone(),
+            organize_rest: o.organize_extra.is_some(),
             artifact: None,
             recap_from: None,
         };
-        let _ = &o.organize_extra;
         let started = Instant::now();
         let ms = |at: Instant| at.saturating_duration_since(started).as_millis() as u64;
         let mut r = TurnResult {
@@ -425,6 +441,9 @@ impl Driver {
                 if self.ended.contains(&tid) {
                     r.foreign_events += 1;
                 }
+                continue;
+            }
+            if matches!(kind.as_str(), "alive" | "turn_ended") {
                 continue;
             }
             if kind != "route" && kind != "stderr" && r.ttfe_ms.is_none() {

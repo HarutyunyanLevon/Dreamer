@@ -58,6 +58,8 @@
 //        {type:"memory_done", job, ok}                   -- the memory pass ended
 //        (remember / forget are chat tools: tool_request with the running turn id attached)
 import { createInterface } from "node:readline";
+import { spawn as spawnChild } from "node:child_process";
+import { createServer as createHttpServer, request as httpRequest } from "node:http";
 import { createSdkMcpServer, query as sdkQuery, tool } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod/v4";
 
@@ -119,119 +121,50 @@ process.stdout.on("error", () => process.exit(1));
 // message resumes it from the saved session id.
 function onFatal(kind, e) {
   console.error(`[sidecar] ${kind}: ${e?.stack ?? e}`);
-  const s = currentSession;
-  if (currentId) {
-    send({ type: "error", id: currentId, message: `Claude's helper hit an internal error (${e?.message ?? e}). Retry to continue.` });
-    currentId = null;
-    currentSession = null;
-  }
-  if (s && !s.closed) {
+  const t = current;
+  if (t && !t.ended) {
     try {
-      closeSession(s);
-    } catch {
-      /* already gone */
+      failTurn(t, "error", `Claude's helper hit an internal error (${e?.message ?? e}). Retry to continue.`, { noRetry: true });
+    } catch (e2) {
+      console.error(`[sidecar] could not fail the turn: ${e2?.stack ?? e2}`);
+      current = null;
     }
   }
 }
 process.on("uncaughtException", (e) => onFatal("uncaughtException", e));
 process.on("unhandledRejection", (e) => onFatal("unhandledRejection", e));
 
-function requestTool(tool_, input, timeoutMs = 15000) {
+/**
+ * Asks Rust for something and waits for its tool_response. `t`: the turn this belongs to; while the
+ * request is out, the turn's watchdog waits for this request's own timeout instead of its idle limit.
+ */
+function requestTool(tool_, input, timeoutMs = 15000, t = null) {
   const reqId = `r${++reqSeq}`;
+  const startedAt = Date.now();
   return new Promise((resolve, reject) => {
+    const settle = () => t?.waits.delete(reqId);
     const timer = setTimeout(() => {
       pendingToolReplies.delete(reqId);
+      settle();
+      dlog(`tool_timeout turn=${t?.id ?? "-"} tool=${tool_} req=${reqId} after_ms=${timeoutMs}`);
       reject(new Error("timed out waiting for the app"));
     }, timeoutMs);
-    pendingToolReplies.set(reqId, { resolve, reject, timer });
+    pendingToolReplies.set(reqId, {
+      resolve: (v) => {
+        settle();
+        if (Date.now() - startedAt > 2000) dlog(`tool_slow turn=${t?.id ?? "-"} tool=${tool_} req=${reqId} ms=${Date.now() - startedAt}`);
+        resolve(v);
+      },
+      reject: (e) => {
+        settle();
+        reject(e);
+      },
+      timer,
+    });
+    t?.waits.set(reqId, Date.now() + timeoutMs + 5000);
     send({ type: "tool_request", reqId, tool: tool_, input });
   });
 }
-
-const createCardTool = tool(
-  "create_card",
-  "Propose a new idea card on the user's canvas. It is always created as a ghost suggestion (dashed outline) " +
-    "that the user must explicitly Keep before it counts; never claim it is final. You cannot delete cards.",
-  {
-    title: z.string().describe("Short card title"),
-    body: z.string().optional().describe("Markdown notes for the card body"),
-    tags: z.array(z.string()).optional(),
-    stage: z.enum(["mist", "reverie", "lucid", "dream"]).optional(),
-    links: z.array(z.object({ to: z.string(), label: z.string().optional() })).optional(),
-    linked_from: z
-      .object({ id: z.string(), label: z.string().max(40).optional() })
-      .optional()
-      .describe("Propose a link from this existing card to the new one (shown as a ghost link the user keeps or dismisses)"),
-    kind: z.enum(["card", "sticky", "checklist"]).optional().describe("Object kind (default 'card'). Use 'checklist' with items for a list of points or questions."),
-    items: z
-      .array(z.object({ text: z.string(), question: z.boolean().optional().describe("true when the item is an open question") }))
-      .optional()
-      .describe("Checklist items (kind 'checklist' only)"),
-    branch_group: z.string().optional().describe("When proposing several alternative takes together (e.g. '3 takes'), use the exact same branch_group value on every one of them so Dreamer can group and compare them."),
-    variant_of: z.string().optional().describe("The id of the card these takes branch from, if any."),
-  },
-  async (args) => {
-    {
-      const lim = hitLimit("any");
-      if (lim) return lim;
-    }
-    try {
-      const { linked_from, ...rest } = args;
-      const card = await requestTool("create_card", rest);
-      let note = "";
-      if (linked_from) {
-        try {
-          const ok = await requestTool("propose_link", { from: linked_from.id, to: card.id });
-          send({ type: "link_proposal", id: currentId, slug: ok.slug, from: linked_from.id, to: card.id, label: linked_from.label });
-          note = ` Proposed a ghost link from "${ok.fromTitle}".`;
-        } catch (e) {
-          note = ` (Could not propose the link: ${e.message})`;
-        }
-      }
-      return { content: [{ type: "text", text: `Created ghost card "${card.title}" (id ${card.id}). It awaits the user's Keep/Dismiss.${note}` }] };
-    } catch (e) {
-      return { content: [{ type: "text", text: `Could not create the card: ${e.message}` }], isError: true };
-    }
-  },
-);
-
-const askQuestionTool = tool(
-  "ask_question",
-  "Ask the user exactly one multiple-choice question (used for /grill-me). Present 2-5 short, neutral, concrete " +
-    "choices. The question is shown to the user as a card with buttons, so do not also write it as text. Wait for " +
-    "their answer as the next message before asking another question.",
-  {
-    question: z.string(),
-    choices: z.array(z.string()).min(2).max(5),
-    handoff_item: z
-      .string()
-      .optional()
-      .describe("Only in the handoff gap interview: the exact checklist item this question is about. Omit otherwise."),
-  },
-  async (args) => {
-    {
-      const lim = hitLimit("any");
-      if (lim) return lim;
-    }
-    // turnId ties the question to the reply it belongs to, so the UI shows it once, as the
-    // question card, instead of also showing any streamed text for that turn. `item` tells the UI
-    // where the answer goes (handoff gap interview: Tech card or Project decisions card).
-    send({ type: "question", id: `q${++reqSeq}`, turnId: currentId, question: args.question, choices: args.choices, item: args.handoff_item || undefined });
-    // Anything the model writes after asking is noise ("the question is above"): drop it, so the
-    // turn is the question card and nothing else.
-    if (currentSession) currentSession.questionAsked = true;
-    // Observed live: without a firm stop here the model sometimes kept going and wrote a guessed
-    // "[Answer] ..." itself. The real answer only ever comes as the user's next message.
-    return {
-      content: [
-        {
-          type: "text",
-          text: "The question is now shown to the user as buttons. END YOUR TURN NOW: write nothing more, do not guess or state an answer. The user's real answer will arrive as their next message.",
-        },
-      ],
-    };
-  },
-);
 
 // Nothing Claude reads (tool results included) may be bigger than this; the app trims too, this is the backstop.
 const MAX_TOOL_CHARS = 8000;
@@ -249,331 +182,439 @@ const fail = (e) => ({ content: [{ type: "text", text: `Error: ${e.message}` }],
 // read_card / view_attachment, and at most 4 calls of any kind. Search and listing are not tools
 // any more: Rust attaches related cards to each message. ----
 const LIMIT_MSG = "limit reached, answer with what you have";
-let turnLimits = { calls: 0, reads: 0, maxCalls: 4, maxReads: 1, hit: false };
-const resetTurnLimits = (text = "", artifact = false) => {
+function makeLimits(text = "", artifact = false) {
   // /merge and /describe read several cards / images by design: larger allowance.
   const merge = /^[/](merge|describe)/.test(text);
-  // /organize: list_tree, then propose_organize, with room to fix a rejected plan a few times.
+  // /organize (Claude agent path): list_tree, then propose_organize, with room to fix a rejected plan.
   const organize = /^[/]organize/.test(text);
   // An artifact turn saves files, notes and suggestions (SpriteCook calls are not counted here).
-  turnLimits = artifact
-    ? { calls: 0, reads: 0, maxCalls: 40, maxReads: 6, hit: false }
-    : { calls: 0, reads: 0, maxCalls: merge ? 16 : organize ? 8 : 4, maxReads: merge ? 12 : 1, hit: false };
-};
-/** An error result when this call would pass a limit; otherwise counts the call and returns null. */
-function hitLimit(kind) {
-  const t = turnLimits;
-  if (t.calls >= t.maxCalls || (kind === "read" && t.reads >= t.maxReads)) {
-    t.hit = true;
-    return fail(new Error(LIMIT_MSG));
+  return artifact
+    ? { calls: 0, reads: 0, maxCalls: 40, maxReads: 6, hit: false, hits: 0 }
+    : { calls: 0, reads: 0, maxCalls: merge ? 16 : organize ? 8 : 4, maxReads: merge ? 12 : 1, hit: false, hits: 0 };
+}
+/**
+ * An error result when this call would pass a limit, or when the session's turn is already over
+ * (a late call from a stopped turn must not act on the next one); otherwise counts the call.
+ */
+function turnGate(s, kind) {
+  const t = s.turn;
+  if (!t || t.ended || t.s !== s) return fail(new Error("this turn has ended; stop now and write nothing more"));
+  const l = t.limits;
+  if (l.calls >= l.maxCalls || (kind === "read" && l.reads >= l.maxReads)) {
+    l.hit = true;
+    l.hits++;
+    // Seen live: a local model that got "limit reached" kept calling the same tool 6 more times,
+    // then hung. The third refused call ends the turn instead.
+    if (l.hits >= 3) {
+      dlog(`limit_loop turn=${t.id} hits=${l.hits}`);
+      setImmediate(() => failTurn(t, "limit", "The model kept calling tools after its limit and was stopped."));
+    }
+    return fail(new Error(l.hits >= 2 ? `${LIMIT_MSG}. Do not call any more tools: write your answer now.` : LIMIT_MSG));
   }
-  t.calls++;
-  if (kind === "read") t.reads++;
+  l.calls++;
+  if (kind === "read") l.reads++;
   return null;
 }
 
-const readCardTool = tool(
-  "read_card",
-  "Read one card in full by id: title, kind, stage, tags, fields, body, checklist items, role, its links (with the " +
-    "linked cards' titles) and its attachments (id, type, caption; for web clips also title, url and has_excerpt). " +
-    "Use view_attachment to look at an image or read a clip's saved text.",
-  { id: z.string() },
-  async (args) => {
-    {
-      const lim = hitLimit("read");
-      if (lim) return lim;
-    }
-    try {
-      return text(await requestTool("read_card", { id: args.id }));
-    } catch (e) {
-      return fail(e);
-    }
-  },
-);
+const requestToolT = requestTool;
+const sendRaw = send;
 
-const proposeLinkTool = tool(
-  "propose_link",
-  "Propose a link between two cards in the open project. It appears as a dashed ghost link the user must Keep " +
-    "or Dismiss; it is NOT created. Only propose links you can justify from the cards' content.",
-  {
-    from: z.string().describe("Card id the link starts from"),
-    to: z.string().describe("Card id the link points to"),
-    label: z.string().max(40).optional().describe("2-4 word label for the line, e.g. 'same boss', 'inverts'"),
-    reason: z.string().optional().describe("One sentence on why they connect"),
-  },
-  async (args) => {
+/** Dreamer's chat tools for one session: every call belongs to the turn that session is answering. */
+function chatTools(s) {
+  const T = () => s.turn;
+  const tid = () => s.turn?.id ?? null;
+  const live = () => !!s.turn && !s.turn.ended && s.turn.s === s;
+  const hitLimit = (kind) => turnGate(s, kind);
+  const requestTool = (name, input, ms = 15000) => requestToolT(name, input, ms, T());
+  // Sent only while the turn is live: a late call of a stopped turn changes nothing.
+  const send = (o) => {
+    if (live()) {
+      touch(s.turn);
+      sendRaw(o);
+    }
+  };
+  const createCardTool = tool(
+    "create_card",
+    "Propose a new idea card on the user's canvas. It is always created as a ghost suggestion (dashed outline) " +
+      "that the user must explicitly Keep before it counts; never claim it is final. You cannot delete cards.",
     {
-      const lim = hitLimit("any");
-      if (lim) return lim;
-    }
-    try {
-      const ok = await requestTool("propose_link", { from: args.from, to: args.to });
-      send({ type: "link_proposal", id: currentId, slug: ok.slug, from: args.from, to: args.to, label: args.label, reason: args.reason });
-      return text(`Proposed a ghost link "${ok.fromTitle}" → "${ok.toTitle}". It awaits the user's Keep/Dismiss.`);
-    } catch (e) {
-      return fail(e);
-    }
-  },
-);
-
-const mergeCardsTool = tool(
-  "merge_cards",
-  "Propose merging 2+ cards of the open project into ONE card. Read every card with read_card first, then write " +
-    "one synthesized title and a markdown body that keeps every distinct idea from the originals (no filler). " +
-    "Dreamer creates it as a ghost card; stage and links are taken from the originals automatically. Only if the " +
-    "user Keeps it are the originals moved to Trash, by the app. You cannot delete cards.",
-  {
-    ids: z.array(z.string()).min(2).describe("Ids of the cards to merge"),
-    title: z.string().describe("Synthesized title"),
-    body: z.string().describe("Synthesized markdown body"),
-    tags: z.array(z.string()).optional(),
-  },
-  async (args) => {
-    {
-      const lim = hitLimit("any");
-      if (lim) return lim;
-    }
-    try {
-      const card = await requestTool("merge_cards", args);
-      return text(`Proposed merged ghost card "${card.title}" (id ${card.id}). It awaits the user's Keep/Dismiss.`);
-    } catch (e) {
-      return fail(e);
-    }
-  },
-);
-
-const viewAttachmentTool = tool(
-  "view_attachment",
-  "Look at one attachment of a card in the open project (ids come from read_card). An image is returned as " +
-    "an image (downscaled); a web clip returns the page text saved when it was clipped, or 'no excerpt'.",
-  {
-    card_id: z.string(),
-    attachment_id: z.string(),
-  },
-  async (args) => {
-    {
-      const lim = hitLimit("read");
-      if (lim) return lim;
-    }
-    try {
-      const r = await requestTool("view_attachment", args);
-      const ls = currentSession;
-      if (r.kind === "image" && ls?.local && !ls.vision) {
-        ls.visionBlocked = true;
-        return fail(new Error("the local model can't look at images. Tell the user in one sentence that this needs Claude (Retry with Claude) and answer from the text you have"));
+      title: z.string().describe("Short card title"),
+      body: z.string().optional().describe("Markdown notes for the card body"),
+      tags: z.array(z.string()).optional(),
+      stage: z.enum(["mist", "reverie", "lucid", "dream"]).optional(),
+      links: z.array(z.object({ to: z.string(), label: z.string().optional() })).optional(),
+      linked_from: z
+        .object({ id: z.string(), label: z.string().max(40).optional() })
+        .optional()
+        .describe("Propose a link from this existing card to the new one (shown as a ghost link the user keeps or dismisses)"),
+      kind: z.enum(["card", "sticky", "checklist"]).optional().describe("Object kind (default 'card'). Use 'checklist' with items for a list of points or questions."),
+      items: z
+        .array(z.object({ text: z.string(), question: z.boolean().optional().describe("true when the item is an open question") }))
+        .optional()
+        .describe("Checklist items (kind 'checklist' only)"),
+      branch_group: z.string().optional().describe("When proposing several alternative takes together (e.g. '3 takes'), use the exact same branch_group value on every one of them so Dreamer can group and compare them."),
+      variant_of: z.string().optional().describe("The id of the card these takes branch from, if any."),
+    },
+    async (args) => {
+      {
+        const lim = hitLimit("any");
+        if (lim) return lim;
       }
-      if (r.kind === "image") {
-        return {
-          content: [
-            { type: "text", text: `Image ${args.attachment_id}${r.caption ? ` (caption: ${r.caption})` : " (no caption)"}:` },
-            { type: "image", data: r.data, mimeType: r.mime },
-          ],
-        };
+      try {
+        const { linked_from, ...rest } = args;
+        const card = await requestTool("create_card", rest);
+        let note = "";
+        if (linked_from) {
+          try {
+            const ok = await requestTool("propose_link", { from: linked_from.id, to: card.id });
+            send({ type: "link_proposal", id: tid(), slug: ok.slug, from: linked_from.id, to: card.id, label: linked_from.label });
+            note = ` Proposed a ghost link from "${ok.fromTitle}".`;
+          } catch (e) {
+            note = ` (Could not propose the link: ${e.message})`;
+          }
+        }
+        return { content: [{ type: "text", text: `Created ghost card "${card.title}" (id ${card.id}). It awaits the user's Keep/Dismiss.${note}` }] };
+      } catch (e) {
+        return { content: [{ type: "text", text: `Could not create the card: ${e.message}` }], isError: true };
       }
-      const head = `Web clip ${args.attachment_id}: ${r.title ? `"${r.title}" ` : ""}<${r.url}>${r.caption ? ` (caption: ${r.caption})` : ""}`;
-      return text(`${head}\n\n${r.text}`);
-    } catch (e) {
-      return fail(e);
-    }
-  },
-);
+    },
+  );
 
-const proposeEditTool = tool(
-  "propose_edit",
-  "Propose changes to an existing card: a new title, body, tags (the full new list), stage, and/or captions " +
-    "for its attachments. Nothing changes until the user keeps it: the card shows a 'Claude suggests changes' " +
-    "badge and a diff. One pending proposal per card; a new one replaces the previous. Only include the fields " +
-    "you change. The body replaces the whole body, so keep everything the user wrote unless asked otherwise.",
-  {
-    card_id: z.string(),
-    title: z.string().optional(),
-    body: z.string().optional().describe("The complete new markdown body"),
-    tags: z.array(z.string().max(40)).optional().describe("The complete new tag list"),
-    stage: z.enum(["mist", "reverie", "lucid", "dream"]).optional(),
-    captions: z.record(z.string(), z.string().max(200)).optional().describe("New captions keyed by attachment id"),
-    reason: z.string().describe("One sentence on why, shown to the user"),
-  },
-  async (args) => {
+  const askQuestionTool = tool(
+    "ask_question",
+    "Ask the user exactly one multiple-choice question (used for /grill-me). Present 2-5 short, neutral, concrete " +
+      "choices. The question is shown to the user as a card with buttons, so do not also write it as text. Wait for " +
+      "their answer as the next message before asking another question.",
     {
-      const lim = hitLimit("any");
-      if (lim) return lim;
-    }
-    try {
-      const ok = await requestTool("propose_edit", args);
-      send({ type: "edit_proposal", id: currentId, slug: ok.slug, card: args.card_id, title: ok.title });
-      return text(`Proposed changes to "${ok.title}". The card shows them for the user to Keep or Dismiss; nothing has changed yet.`);
-    } catch (e) {
-      return fail(e);
-    }
-  },
-);
+      question: z.string(),
+      choices: z.array(z.string()).min(2).max(5),
+      handoff_item: z
+        .string()
+        .optional()
+        .describe("Only in the handoff gap interview: the exact checklist item this question is about. Omit otherwise."),
+    },
+    async (args) => {
+      {
+        const lim = hitLimit("any");
+        if (lim) return lim;
+      }
+      // turnId ties the question to the reply it belongs to, so the UI shows it once, as the
+      // question card, instead of also showing any streamed text for that turn. `item` tells the UI
+      // where the answer goes (handoff gap interview: Tech card or Project decisions card).
+      send({ type: "question", id: `q${++reqSeq}`, turnId: tid(), question: args.question, choices: args.choices, item: args.handoff_item || undefined });
+      // Anything the model writes after asking is noise ("the question is above"): drop it, so the
+      // turn is the question card and nothing else.
+      if (T()) T().questionAsked = true;
+      // Observed live: without a firm stop here the model sometimes kept going and wrote a guessed
+      // "[Answer] ..." itself. The real answer only ever comes as the user's next message.
+      return {
+        content: [
+          {
+            type: "text",
+            text: "The question is now shown to the user as buttons. END YOUR TURN NOW: write nothing more, do not guess or state an answer. The user's real answer will arrive as their next message.",
+          },
+        ],
+      };
+    },
+  );
 
-// ---- Organize: read the tree, then propose one reviewable plan (Rust validates it whole) ----
-const listTreeTool = tool(
-  "list_tree",
-  "List the folders, frames and cards in scope, compactly: ids, titles, tags, stage, folder, position, pinned " +
-    "and links. Call it once before propose_organize.",
-  { scope: z.enum(["folder", "project"]).optional().describe("folder (default): the open folder and below; project: everything") },
-  async (args) => {
+  const readCardTool = tool(
+    "read_card",
+    "Read one card in full by id: title, kind, stage, tags, fields, body, checklist items, role, its links (with the " +
+      "linked cards' titles) and its attachments (id, type, caption; for web clips also title, url and has_excerpt). " +
+      "Use view_attachment to look at an image or read a clip's saved text.",
+    { id: z.string() },
+    async (args) => {
+      {
+        const lim = hitLimit("read");
+        if (lim) return lim;
+      }
+      try {
+        return text(await requestTool("read_card", { id: args.id }));
+      } catch (e) {
+        return fail(e);
+      }
+    },
+  );
+
+  const proposeLinkTool = tool(
+    "propose_link",
+    "Propose a link between two cards in the open project. It appears as a dashed ghost link the user must Keep " +
+      "or Dismiss; it is NOT created. Only propose links you can justify from the cards' content.",
     {
-      const lim = hitLimit("any");
-      if (lim) return lim;
-    }
-    try {
-      return text(await requestTool("list_tree", { scope: args.scope ?? "folder" }), 30000);
-    } catch (e) {
-      return fail(e);
-    }
-  },
-);
+      from: z.string().describe("Card id the link starts from"),
+      to: z.string().describe("Card id the link points to"),
+      label: z.string().max(40).optional().describe("2-4 word label for the line, e.g. 'same boss', 'inverts'"),
+      reason: z.string().optional().describe("One sentence on why they connect"),
+    },
+    async (args) => {
+      {
+        const lim = hitLimit("any");
+        if (lim) return lim;
+      }
+      try {
+        const ok = await requestTool("propose_link", { from: args.from, to: args.to });
+        send({ type: "link_proposal", id: tid(), slug: ok.slug, from: args.from, to: args.to, label: args.label, reason: args.reason });
+        return text(`Proposed a ghost link "${ok.fromTitle}" → "${ok.toTitle}". It awaits the user's Keep/Dismiss.`);
+      } catch (e) {
+        return fail(e);
+      }
+    },
+  );
 
-const organizeOp = z.object({
-  op: z.enum(["create_folder", "rename", "move", "create_frame", "arrange", "retag"]),
-  tempId: z.string().optional().describe("create_folder / create_frame: your id for the new item, usable by later ops"),
-  id: z.string().optional().describe("rename: folder or frame id; retag: card id"),
-  ids: z.array(z.string()).optional().describe("move: card / folder ids; arrange: card ids"),
-  title: z.string().optional().describe("create_folder / rename / create_frame"),
-  parent: z.string().optional().describe("create_folder: folder id, tempId or \"root\""),
-  to: z.string().optional().describe("move: folder id, tempId or \"root\""),
-  folder: z.string().optional().describe("create_frame / arrange: folder id, tempId or \"root\""),
-  color: z.string().optional(),
-  x: z.number().optional(),
-  y: z.number().optional(),
-  rect: z.object({ x: z.number(), y: z.number(), w: z.number(), h: z.number() }).optional().describe("create_frame"),
-  layout: z.enum(["grid", "cluster-by-tag", "flow-by-links", "stage-columns"]).optional().describe("arrange"),
-  add: z.array(z.string()).optional().describe("retag: tags to add"),
-  remove: z.array(z.string()).optional().describe("retag: tags to remove"),
-});
-
-const proposeOrganizeTool = tool(
-  "propose_organize",
-  "Propose ONE reorganization plan: ordered ops the user reviews, previews on the canvas and applies or discards. " +
-    "Nothing changes until they apply it. Ops: create_folder {tempId, title, parent, color?}, rename {id, title} " +
-    "(folders/frames only), move {ids, to, x?, y?}, create_frame {tempId, folder, title, rect}, arrange {folder, ids, " +
-    "layout}, retag {id, add, remove}. Never deletes and never edits card text. Pinned items keep their position: " +
-    "leave them out unless the user explicitly asked to move pinned items (then set move_pinned). If it returns an " +
-    "error, fix every listed op and call it again with the whole plan.",
-  {
-    scope: z.enum(["folder", "project"]).describe("The scope you listed with list_tree"),
-    rationale: z.string().describe("One paragraph: the idea behind the plan"),
-    ops: z.array(organizeOp),
-    move_pinned: z.boolean().optional().describe("Only when the user explicitly asked to move pinned items into another folder"),
-  },
-  async (args) => {
+  const mergeCardsTool = tool(
+    "merge_cards",
+    "Propose merging 2+ cards of the open project into ONE card. Read every card with read_card first, then write " +
+      "one synthesized title and a markdown body that keeps every distinct idea from the originals (no filler). " +
+      "Dreamer creates it as a ghost card; stage and links are taken from the originals automatically. Only if the " +
+      "user Keeps it are the originals moved to Trash, by the app. You cannot delete cards.",
     {
-      const lim = hitLimit("any");
-      if (lim) return lim;
-    }
-    try {
-      const plan = await requestTool("propose_organize", args);
-      send({ type: "organize_proposal", id: currentId, plan });
-      const kept = plan.kept?.length ? ` ${plan.kept.length} pinned item(s) are kept in place.` : "";
-      return text(`Showed the plan (${plan.ops.length} ops) to the user; nothing has changed yet.${kept} Reply with one short sentence; do not repeat the plan.`);
-    } catch (e) {
-      return fail(e);
-    }
-  },
-);
+      ids: z.array(z.string()).min(2).describe("Ids of the cards to merge"),
+      title: z.string().describe("Synthesized title"),
+      body: z.string().describe("Synthesized markdown body"),
+      tags: z.array(z.string()).optional(),
+    },
+    async (args) => {
+      {
+        const lim = hitLimit("any");
+        if (lim) return lim;
+      }
+      try {
+        const card = await requestTool("merge_cards", args);
+        return text(`Proposed merged ghost card "${card.title}" (id ${card.id}). It awaits the user's Keep/Dismiss.`);
+      } catch (e) {
+        return fail(e);
+      }
+    },
+  );
 
-// Explicit memory edits ("remember ...", "forget ..."). Rust applies them to memory.md (source
-// "claude") and tells the chat; the automatic memory pass handles everything else.
-const rememberTool = tool(
-  "remember",
-  "Save one line to the project's memory. Use ONLY when the user explicitly asks you to remember something " +
-    "(\"remember ...\"). Otherwise a separate automatic pass keeps the memory; never call this on your own.",
-  {
-    text: z.string().describe("One short, durable line in the user's words"),
-    section: z.enum(["Pitch", "Pillars", "Decisions", "Rejected", "Glossary", "How to work with me"]).optional().describe("Default: Decisions"),
-  },
-  async (args) => {
+  const viewAttachmentTool = tool(
+    "view_attachment",
+    "Look at one attachment of a card in the open project (ids come from read_card). An image is returned as " +
+      "an image (downscaled); a web clip returns the page text saved when it was clipped, or 'no excerpt'.",
     {
-      const lim = hitLimit("any");
-      if (lim) return lim;
-    }
-    try {
-      return text(await requestTool("remember", { ...args, turn: currentId }));
-    } catch (e) {
-      return fail(e);
-    }
-  },
-);
+      card_id: z.string(),
+      attachment_id: z.string(),
+    },
+    async (args) => {
+      {
+        const lim = hitLimit("read");
+        if (lim) return lim;
+      }
+      try {
+        const r = await requestTool("view_attachment", args);
+        const ls = s;
+        if (r.kind === "image" && ls?.local && !ls.vision) {
+          if (T()) T().visionBlocked = true;
+          return fail(new Error("the local model can't look at images. Tell the user in one sentence that this needs Claude (Retry with Claude) and answer from the text you have"));
+        }
+        if (r.kind === "image") {
+          return {
+            content: [
+              { type: "text", text: `Image ${args.attachment_id}${r.caption ? ` (caption: ${r.caption})` : " (no caption)"}:` },
+              { type: "image", data: r.data, mimeType: r.mime },
+            ],
+          };
+        }
+        const head = `Web clip ${args.attachment_id}: ${r.title ? `"${r.title}" ` : ""}<${r.url}>${r.caption ? ` (caption: ${r.caption})` : ""}`;
+        return text(`${head}\n\n${r.text}`);
+      } catch (e) {
+        return fail(e);
+      }
+    },
+  );
 
-const forgetTool = tool(
-  "forget",
-  "Remove a line from the project's memory. Use ONLY when the user explicitly asks (\"forget ...\", \"that's no " +
-    "longer true\"). Pass the text of the line (or enough of it to identify it).",
-  { text: z.string() },
-  async (args) => {
+  const proposeEditTool = tool(
+    "propose_edit",
+    "Propose changes to an existing card: a new title, body, tags (the full new list), stage, and/or captions " +
+      "for its attachments. Nothing changes until the user keeps it: the card shows a 'Claude suggests changes' " +
+      "badge and a diff. One pending proposal per card; a new one replaces the previous. Only include the fields " +
+      "you change. The body replaces the whole body, so keep everything the user wrote unless asked otherwise.",
     {
-      const lim = hitLimit("any");
-      if (lim) return lim;
-    }
-    try {
-      return text(await requestTool("forget", { ...args, turn: currentId }));
-    } catch (e) {
-      return fail(e);
-    }
-  },
-);
+      card_id: z.string(),
+      title: z.string().optional(),
+      body: z.string().optional().describe("The complete new markdown body"),
+      tags: z.array(z.string().max(40)).optional().describe("The complete new tag list"),
+      stage: z.enum(["mist", "reverie", "lucid", "dream"]).optional(),
+      captions: z.record(z.string(), z.string().max(200)).optional().describe("New captions keyed by attachment id"),
+      reason: z.string().describe("One sentence on why, shown to the user"),
+    },
+    async (args) => {
+      {
+        const lim = hitLimit("any");
+        if (lim) return lim;
+      }
+      try {
+        const ok = await requestTool("propose_edit", args);
+        send({ type: "edit_proposal", id: tid(), slug: ok.slug, card: args.card_id, title: ok.title });
+        return text(`Proposed changes to "${ok.title}". The card shows them for the user to Keep or Dismiss; nothing has changed yet.`);
+      } catch (e) {
+        return fail(e);
+      }
+    },
+  );
 
-const ARTIFACT_TYPES = ["theme", "character", "concept", "mockup"];
+  // ---- Organize: read the tree, then propose one reviewable plan (Rust validates it whole) ----
+  const listTreeTool = tool(
+    "list_tree",
+    "List the folders, frames and cards in scope, compactly: ids, titles, tags, stage, folder, position, pinned " +
+      "and links. Call it once before propose_organize.",
+    { scope: z.enum(["folder", "project"]).optional().describe("folder (default): the open folder and below; project: everything") },
+    async (args) => {
+      {
+        const lim = hitLimit("any");
+        if (lim) return lim;
+      }
+      try {
+        return text(await requestTool("list_tree", { scope: args.scope ?? "folder" }), 30000);
+      } catch (e) {
+        return fail(e);
+      }
+    },
+  );
 
-// Chat sessions (local or Claude) never make images: an artifact request is handed to an artifact
-// turn on Claude, in the new artifact's own thread. The app creates the artifact card and sends it.
-const escalateArtifactTool = tool(
-  "escalate_artifact",
-  "Hand a request for a visual artifact to Claude, who makes it with SpriteCook in a new artifact card: a theme " +
-    "(style guide: palette, fonts, mood, key art), a character design, a concept art piece, or an interactive HTML " +
-    "mockup. Call it once when the user asks for one; you cannot make images yourself. The brief says exactly what " +
-    "the user asked for (no extras) plus the relevant facts from the conversation and cards.",
-  {
-    type: z.enum(ARTIFACT_TYPES),
-    brief: z.string().describe("What to make, in the user's terms, with the relevant context"),
-    title: z.string().max(80).optional().describe("Short card title, e.g. 'Fish priest'"),
-  },
-  async (args) => {
+  const organizeOp = z.object({
+    op: z.enum(["create_frame", "rename", "arrange", "place", "retag"]),
+    tempId: z.string().optional().describe("create_frame: your id for the new frame, usable by later ops"),
+    id: z.string().optional().describe("rename: frame id; retag: card id"),
+    ids: z.array(z.string()).optional().describe("arrange: card ids"),
+    title: z.string().optional().describe("create_frame / rename"),
+    color: z.string().optional(),
+    rect: z.object({ x: z.number(), y: z.number(), w: z.number(), h: z.number() }).optional().describe("create_frame"),
+    layout: z.enum(["grid", "cluster-by-tag", "flow-by-links", "stage-columns"]).optional().describe("arrange"),
+    positions: z.record(z.string(), z.object({ x: z.number(), y: z.number() })).optional().describe("place: card id -> new top-left position"),
+    add: z.array(z.string()).optional().describe("retag: tags to add"),
+    remove: z.array(z.string()).optional().describe("retag: tags to remove"),
+  });
+
+  const proposeOrganizeTool = tool(
+    "propose_organize",
+    "Propose ONE reorganization plan: ordered ops the user reviews, previews on the canvas and applies or discards. " +
+      "Nothing changes until they apply it. It works inside the open folder only, with frames, layout and tags: " +
+      "folders are project versions and a plan never creates, renames or moves folders or moves cards between them. " +
+      "Ops: create_frame {tempId, title, rect}, rename {id, title} (frames only), arrange {ids, layout}, place " +
+      "{positions: {card id: {x, y}}}, retag {id, add, remove}. Never deletes and never edits card text. Pinned cards " +
+      "keep their position: leave them out. If it returns an error, fix every listed op and call it again with the whole plan.",
     {
-      const lim = hitLimit("any");
-      if (lim) return lim;
-    }
-    send({ type: "artifact_escalate", id: currentId, artifactType: args.type, brief: args.brief, title: args.title });
-    if (currentSession) currentSession.escalatedArtifact = true;
-    return text("Handed over: Dreamer is creating the artifact card and Claude is making it now in that card's thread. END YOUR TURN with one short sentence saying so.");
-  },
-);
+      scope: z.enum(["folder", "project"]).describe("The scope you listed with list_tree"),
+      rationale: z.string().describe("One paragraph: the idea behind the plan"),
+      ops: z.array(organizeOp),
+    },
+    async (args) => {
+      {
+        const lim = hitLimit("any");
+        if (lim) return lim;
+      }
+      try {
+        const plan = await requestTool("propose_organize", args);
+        send({ type: "organize_proposal", id: tid(), plan });
+        const kept = plan.kept?.length ? ` ${plan.kept.length} pinned item(s) are kept in place.` : "";
+        return text(`Showed the plan (${plan.ops.length} ops) to the user; nothing has changed yet.${kept} Reply with one short sentence; do not repeat the plan.`);
+      } catch (e) {
+        return fail(e);
+      }
+    },
+  );
 
-// Deepen / grill: Claude may propose an artifact as a ghost card (a brief only, nothing spent).
-const proposeArtifactTool = tool(
-  "propose_artifact",
-  "Propose a visual artifact as a ghost card (a brief only: nothing is generated or spent until the user keeps it; " +
-    "keeping it makes Claude generate it). Use sparingly, in /grill-me or /expand, when seeing something would settle " +
-    "a design question (a character's look, a place's mood, a screen's layout, the game's style).",
-  {
-    type: z.enum(ARTIFACT_TYPES),
-    title: z.string().max(80),
-    brief: z.string().describe("What to make and which question it answers"),
-    source_card: z.string().optional().describe("The card it visualizes (id)"),
-  },
-  async (args) => {
+  // Explicit memory edits ("remember ...", "forget ..."). Rust applies them to memory.md (source
+  // "claude") and tells the chat; the automatic memory pass handles everything else.
+  const rememberTool = tool(
+    "remember",
+    "Save one line to the project's memory. Use ONLY when the user explicitly asks you to remember something " +
+      "(\"remember ...\"). Otherwise a separate automatic pass keeps the memory; never call this on your own.",
     {
-      const lim = hitLimit("any");
-      if (lim) return lim;
-    }
-    try {
-      const r = await requestTool("propose_artifact", args);
-      return text(`Proposed the ${args.type} "${r.title}" as a ghost card; nothing is generated until the user keeps it.`);
-    } catch (e) {
-      return fail(e);
-    }
-  },
-);
+      text: z.string().describe("One short, durable line in the user's words"),
+      section: z.enum(["Pitch", "Pillars", "Decisions", "Rejected", "Glossary", "How to work with me"]).optional().describe("Default: Decisions"),
+    },
+    async (args) => {
+      {
+        const lim = hitLimit("any");
+        if (lim) return lim;
+      }
+      try {
+        return text(await requestTool("remember", { ...args, turn: tid() }));
+      } catch (e) {
+        return fail(e);
+      }
+    },
+  );
+
+  const forgetTool = tool(
+    "forget",
+    "Remove a line from the project's memory. Use ONLY when the user explicitly asks (\"forget ...\", \"that's no " +
+      "longer true\"). Pass the text of the line (or enough of it to identify it).",
+    { text: z.string() },
+    async (args) => {
+      {
+        const lim = hitLimit("any");
+        if (lim) return lim;
+      }
+      try {
+        return text(await requestTool("forget", { ...args, turn: tid() }));
+      } catch (e) {
+        return fail(e);
+      }
+    },
+  );
+
+
+  // Chat sessions (local or Claude) never make images: an artifact request is handed to an artifact
+  // turn on Claude, in the new artifact's own thread. The app creates the artifact card and sends it.
+  const escalateArtifactTool = tool(
+    "escalate_artifact",
+    "Hand a request for a visual artifact to Claude, who makes it with SpriteCook in a new artifact card: a theme " +
+      "(style guide: palette, fonts, mood, key art), a character design, a concept art piece, or an interactive HTML " +
+      "mockup. Call it once when the user asks for one; you cannot make images yourself. The brief says exactly what " +
+      "the user asked for (no extras) plus the relevant facts from the conversation and cards.",
+    {
+      type: z.enum(ARTIFACT_TYPES),
+      brief: z.string().describe("What to make, in the user's terms, with the relevant context"),
+      title: z.string().max(80).optional().describe("Short card title, e.g. 'Fish priest'"),
+    },
+    async (args) => {
+      {
+        const lim = hitLimit("any");
+        if (lim) return lim;
+      }
+      send({ type: "artifact_escalate", id: tid(), artifactType: args.type, brief: args.brief, title: args.title });
+      if (T()) T().escalatedArtifact = true;
+      return text("Handed over: Dreamer is creating the artifact card and Claude is making it now in that card's thread. END YOUR TURN with one short sentence saying so.");
+    },
+  );
+
+  // Deepen / grill: Claude may propose an artifact as a ghost card (a brief only, nothing spent).
+  const proposeArtifactTool = tool(
+    "propose_artifact",
+    "Propose a visual artifact as a ghost card (a brief only: nothing is generated or spent until the user keeps it; " +
+      "keeping it makes Claude generate it). Use sparingly, in /grill-me or /expand, when seeing something would settle " +
+      "a design question (a character's look, a place's mood, a screen's layout, the game's style).",
+    {
+      type: z.enum(ARTIFACT_TYPES),
+      title: z.string().max(80),
+      brief: z.string().describe("What to make and which question it answers"),
+      source_card: z.string().optional().describe("The card it visualizes (id)"),
+    },
+    async (args) => {
+      {
+        const lim = hitLimit("any");
+        if (lim) return lim;
+      }
+      try {
+        const r = await requestTool("propose_artifact", args);
+        return text(`Proposed the ${args.type} "${r.title}" as a ghost card; nothing is generated until the user keeps it.`);
+      } catch (e) {
+        return fail(e);
+      }
+    },
+  );
+
+  return [createCardTool, askQuestionTool, readCardTool, proposeLinkTool, mergeCardsTool, viewAttachmentTool, proposeEditTool, rememberTool, forgetTool, listTreeTool, proposeOrganizeTool, escalateArtifactTool, proposeArtifactTool];
+}
 
 // A fresh MCP server instance per session: an SDK server object binds to one transport.
-const makeServer = () => createSdkMcpServer({
-  name: "dreamer",
-  version: "1.0.0",
-  tools: [createCardTool, askQuestionTool, readCardTool, proposeLinkTool, mergeCardsTool, viewAttachmentTool, proposeEditTool, rememberTool, forgetTool, listTreeTool, proposeOrganizeTool, escalateArtifactTool, proposeArtifactTool],
-});
+const makeServer = (s) => createSdkMcpServer({ name: "dreamer", version: "1.0.0", tools: chatTools(s) });
+
+const ARTIFACT_TYPES = ["theme", "character", "concept", "mockup"];
 
 // The checklist /grill-me works through, in order. Kept here so the prompt and any future UI
 // progress indicator agree on what "every item covered" means.
@@ -640,15 +681,14 @@ const SYSTEM_PROMPT = [
     "kind 'checklist', title 'Critique: <card title>', items listing its risks, weak spots and open questions " +
     "(question: true where the item is a question), and a link to the card labelled 'critique of'. Then reply " +
     "with one sentence naming the most serious issue.",
-  "Organizing (/organize, or any request to group, file, move, re-layout or tidy cards and folders, e.g. 'put " +
-    "these into a folder called Bosses'): call list_tree once (scope as the message says; default folder), then " +
-    "propose_organize once with the whole plan. Never describe moves as done; the user reviews and applies the plan. " +
-    "Group by what the user asked for (by mechanic, by stage, core vs side ideas); otherwise by theme. Prefer few, " +
-    "well-named folders (3-8 cards or more each) over many tiny ones, keep cards that already sit well where they are, " +
-    "use arrange for the cards of each new or changed folder, and never touch pinned items' positions. Use the ids " +
-    "from list_tree exactly. If propose_organize returns an error, fix the listed ops and call it again. For " +
-    "'/organize revise', the message carries the previous plan: propose the whole revised plan. Then reply with one " +
-    "short sentence.",
+  "Organizing (/organize, or any request to group, re-layout, frame, tag or tidy cards): it happens inside the open " +
+    "folder only, with frames, layout and tags. Folders are project versions: never create, rename or move folders, " +
+    "and never move cards between folders. Call list_tree once, then propose_organize once with the whole plan. Never " +
+    "describe changes as done; the user reviews and applies the plan. Group by what the user asked for (by mechanic, " +
+    "by stage, core vs side ideas); otherwise by theme, into 3-8 well-named frames. Retag to reuse and merge existing " +
+    "tags. Never touch pinned cards' positions. Use the ids from list_tree exactly. If propose_organize returns an " +
+    "error, fix the listed ops and call it again. For '/organize revise', the message carries the previous plan: " +
+    "propose the whole revised plan. Then reply with one short sentence.",
   "Artifacts: you cannot make images, style guides or mockups in chat. When the user asks for a theme / style " +
     "guide, a character design or sheet, concept art, or an interactive mockup, call escalate_artifact once (type + " +
     "a brief with only what they asked for and the relevant context), then end your turn with one short sentence.",
@@ -797,6 +837,12 @@ function makeTracker(out, label = "") {
     calls: callList,
     /** Tool calls of this turn that came back as errors (malformed input, failed request). */
     toolErrors: () => [...steps.values()].filter((s) => s.kind === "tool" && s.status === "error").length,
+    /** Tool calls still running (each keeps its own time limit in the watchdog). */
+    running: () => [...steps.values()].filter((s) => s.kind === "tool" && s.status === "running"),
+    /** Calls that did the turn's job (a ghost card, a question, a proposal): no local retry after them. */
+    actions: () => [...steps.values()].filter((s) => s.kind === "tool" && s.status === "done" && ACTION_TOOLS.has(s.tool)).length,
+    /** Every tool call: name, duration, outcome (diagnostics). */
+    toolLog: () => [...steps.values()].filter((s) => s.kind === "tool").map((s) => ({ tool: s.tool, status: s.status, ms: (s.endedAt ?? Date.now()) - s.startedAt })),
     on(msg) {
       if (msg.parent_tool_use_id) return;
       if (msg.type === "stream_event") {
@@ -940,13 +986,16 @@ function makeTurnQueue() {
 // MAX_LIVE sessions run at once (each is a Claude Code process); the least recently used idle one
 // is closed and simply resumed later. "Reset chat" drops the thread's session so its next message
 // starts a fresh one.
+//
+// A session answers ONE turn at a time (s.turn). A new turn never queues behind one that has not
+// finished (a stopped or wedged one): that session is closed and the thread continues in a new
+// process, resumed from the saved session id. So the head of a queue can never block the next turn.
 
 const MAX_LIVE = 3;
 /** Fixed token budget for a chat session's context (not a % of the model's window). */
 const AUTO_COMPACT_TOKENS = Number(process.env.DREAMER_COMPACT_TOKENS) || 60000;
 const sessions = new Map();
-let currentId = null; // the turn being answered (one at a time; the UI gates on "busy")
-let currentSession = null;
+let sessionSeq = 0;
 
 const WEB_TOOLS = ["WebSearch", "WebFetch"];
 
@@ -977,8 +1026,26 @@ const BASE_OPTIONS = {
   includePartialMessages: true,
 };
 
-function closeSession(s) {
-  sessions.delete(s.key);
+/** Ends a Claude Code process for sure (and what it started): a stalled one may ignore stdin EOF. */
+function killChild(s) {
+  const c = s.child;
+  if (!c || c.exitCode != null || c.killed) return;
+  dlog(`kill_child session=${s.sid} pid=${c.pid}`);
+  try {
+    if (process.platform === "win32" && c.pid) spawnChild("taskkill", ["/F", "/T", "/PID", String(c.pid)], { windowsHide: true, stdio: "ignore" }).on("error", () => {});
+    else c.kill("SIGKILL");
+  } catch {
+    /* already gone */
+  }
+}
+
+/**
+ * Closes a session. `why` other than "close" (a stall, a wedged or superseded session) also kills
+ * its Claude Code process at once and drops its model connections, so nothing keeps generating.
+ */
+function closeSession(s, why = "close") {
+  if (sessions.get(s.key) === s) sessions.delete(s.key);
+  if (s.closed) return;
   s.closed = true;
   s.turns.end();
   try {
@@ -986,11 +1053,16 @@ function closeSession(s) {
   } catch {
     /* already gone */
   }
+  if (why !== "close") {
+    dlog(`session_close session=${s.sid} key=${s.key} why=${why}`);
+    proxyAbort(s.sid);
+    killChild(s);
+  }
 }
 
 function evictIfNeeded() {
   while (sessions.size >= MAX_LIVE) {
-    const idle = [...sessions.values()].filter((s) => s !== currentSession).sort((a, b) => a.lastUsed - b.lastUsed)[0];
+    const idle = [...sessions.values()].filter((s) => !s.busy && s.turn !== current).sort((a, b) => a.lastUsed - b.lastUsed)[0];
     if (!idle) break;
     closeSession(idle);
   }
@@ -1007,9 +1079,7 @@ function webGate(s) {
     if (!s.web) {
       return { behavior: "deny", message: "Web access is off for this message. The user can switch it on with the globe button next to the chat input." };
     }
-    if (toolName === "WebFetch" && typeof input.url === "string" && currentSession === s && currentId) {
-      send({ type: "web_fetch", id: currentId, url: input.url });
-    }
+    if (toolName === "WebFetch" && typeof input.url === "string") emit(s.turn?.s === s ? s.turn : null, { type: "web_fetch", url: input.url });
     return { behavior: "allow", updatedInput: input };
   };
 }
@@ -1018,8 +1088,8 @@ function webGate(s) {
 // The artifact's own Dreamer tools (artifactTools, defined below) plus SpriteCook's MCP server. Free
 // SpriteCook calls are in allowedTools; paid ones pass through artifactGate (the per-turn credit cap).
 
-/** Dreamer's artifact tools (filled in further down; one array so the server and allowedTools agree). */
-const artifactTools = [];
+/** Dreamer's artifact tools (filled in further down; one list so the server and allowedTools agree). */
+const artifactSpecs = [];
 const ARTIFACT_SYSTEM_PARTS = [
   "You are Claude, embedded in Dreamer, a desktop app for developing game ideas. In this thread you make and " +
     "iterate one visual artifact for the user's game project: a theme (style guide), a character design, a concept " +
@@ -1073,7 +1143,26 @@ const ARTIFACT_SYSTEM_PARTS = [
     "pretend an image exists.",
 ];
 const artifactSystem = () => ARTIFACT_SYSTEM_PARTS.join("\n\n");
-const makeArtifactServer = () => createSdkMcpServer({ name: "dreamer", version: "1.0.0", tools: artifactTools });
+/** The artifact tools for one session: each call writes into the artifact of the turn that session answers. */
+const makeArtifactServer = (s) =>
+  createSdkMcpServer({
+    name: "dreamer",
+    version: "1.0.0",
+    tools: artifactSpecs.map((spec) =>
+      tool(spec.name, spec.description, spec.schema, async (args) => {
+        {
+          const lim = turnGate(s, "any");
+          if (lim) return lim;
+        }
+        const call = (name, input, timeoutMs = 20000) => requestTool(`artifact_${name}`, { ...input, turn: s.turn?.id ?? null }, timeoutMs, s.turn);
+        try {
+          return await spec.run(args, call);
+        } catch (e) {
+          return fail(e);
+        }
+      }),
+    ),
+  });
 
 /** Permission callback of an artifact session: SpriteCook calls only (paid ones count against the cap). */
 function artifactGate(s) {
@@ -1090,22 +1179,9 @@ function artifactGate(s) {
   };
 }
 
-/** An artifact tool: asks Rust, which writes into the artifact of this turn's thread. */
-const artifactCall = (name, input, timeoutMs = 20000) => requestTool(`artifact_${name}`, { ...input, turn: currentId }, timeoutMs);
+/** Registers an artifact tool; `run(args, call)` asks Rust through `call` (bound to the session's turn). */
 const artifactTool = (name, description, schema, run) => {
-  const t = tool(name, description, schema, async (args) => {
-    {
-      const lim = hitLimit("any");
-      if (lim) return lim;
-    }
-    try {
-      return await run(args);
-    } catch (e) {
-      return fail(e);
-    }
-  });
-  artifactTools.push(t);
-  return t;
+  artifactSpecs.push({ name, description, schema, run });
 };
 
 artifactTool(
@@ -1119,8 +1195,8 @@ artifactTool(
     brief: z.string(),
     prompts: z.array(z.string()).optional(),
   },
-  async (a) => {
-    const r = await artifactCall("start_version", a);
+  async (a, call) => {
+    const r = await call("start_version", a);
     return text(`Writing into v${r.version} (${r.mode}).`);
   },
 );
@@ -1137,8 +1213,8 @@ artifactTool(
     name: z.string(),
     role: z.string().optional().describe("hero, turnaround, expression, pose, animation, concept, key-art, ui-kit, sprite"),
   },
-  async (a) => {
-    const r = await artifactCall("save_image", a, 150000);
+  async (a, call) => {
+    const r = await call("save_image", a, 150000);
     return text(`Saved ${r.file} in v${r.version}.`);
   },
 );
@@ -1152,8 +1228,8 @@ artifactTool(
     content: z.string(),
     role: z.string().optional().describe("notes, html, style, script"),
   },
-  async (a) => {
-    const r = await artifactCall("write_file", a);
+  async (a, call) => {
+    const r = await call("write_file", a);
     return text(`Wrote ${r.file} in v${r.version}.`);
   },
 );
@@ -1167,8 +1243,8 @@ artifactTool(
     file: z.string(),
     name: z.string().optional().describe("new file name, default the same"),
   },
-  async (a) => {
-    const r = await artifactCall("copy_asset", a);
+  async (a, call) => {
+    const r = await call("copy_asset", a);
     return text(`Copied to ${r.file} in v${r.version}. Reference it as "${r.file}".`);
   },
 );
@@ -1177,8 +1253,8 @@ artifactTool(
   "set_spritecook_project",
   "Record the SpriteCook project that mirrors this Dreamer project (after create_project, once per project).",
   { project_id: z.string() },
-  async (a) => {
-    await artifactCall("set_spritecook_project", a);
+  async (a, call) => {
+    await call("set_spritecook_project", a);
     return text("Recorded.");
   },
 );
@@ -1201,8 +1277,8 @@ artifactTool(
     key_art_asset_id: z.string().optional(),
     preset_id: z.string().optional(),
   },
-  async (a) => {
-    const r = await artifactCall("set_theme", a);
+  async (a, call) => {
+    const r = await call("set_theme", a);
     return text(`Theme spec of v${r.version} saved.`);
   },
 );
@@ -1217,8 +1293,8 @@ artifactTool(
     artifact_id: z.string().optional(),
     suggestions: z.array(z.object({ label: z.string().max(40), prompt: z.string(), estCredits: z.number().optional() })).min(2).max(5),
   },
-  async (a) => {
-    await artifactCall("suggest_next", { suggestions: a.suggestions });
+  async (a, call) => {
+    await call("suggest_next", { suggestions: a.suggestions });
     return text("Chips set. End the turn with one or two sentences on what you made.");
   },
 );
@@ -1247,12 +1323,15 @@ async function creditCheck(s, tool_) {
     const more = s.artifact?.cap ?? DEFAULT_CREDIT_CAP;
     const pc = perCall();
     const reqId = `cc${++reqSeq}`;
-    const turn = currentId;
-    send({ type: "credit_confirm", id: turn, reqId, tool: tool_, used: c.units, cap: c.allowed, more, estCredits: pc == null ? null : Math.round(pc * more * 10) / 10 });
-    dlog(`credit_confirm turn=${turn} tool=${tool_} used=${c.units} cap=${c.allowed}`);
+    const t = s.turn;
+    emit(t, { type: "credit_confirm", reqId, tool: tool_, used: c.units, cap: c.allowed, more, estCredits: pc == null ? null : Math.round(pc * more * 10) / 10 });
+    dlog(`credit_confirm turn=${t?.id ?? "-"} tool=${tool_} used=${c.units} cap=${c.allowed}`);
+    // Waiting for the user: the turn's watchdog pauses until they answer.
+    if (t) t.userWait++;
     const ok = await new Promise((resolve) => pendingCredit.set(reqId, resolve));
+    if (t) t.userWait--;
     pendingCredit.delete(reqId);
-    send({ type: "credit_answered", id: turn, reqId, allow: ok });
+    emit(t, { type: "credit_answered", reqId, allow: ok });
     if (!ok) {
       return {
         ok: false,
@@ -1297,7 +1376,7 @@ function readCredits(obj) {
  * A SpriteCook tool result arrived in an artifact turn: count what it cost, keep its job ids, and
  * show progress on the card (the artifact's running state).
  */
-function onSpritecookResult(s, turn, name, content, isError) {
+function onSpritecookResult(s, t, name, content, isError) {
   const short = name.replace(/^mcp__spritecook__/, "");
   const txt = resultText(content);
   const info = readCredits(parseJson(txt));
@@ -1317,7 +1396,7 @@ function onSpritecookResult(s, turn, name, content, isError) {
     }
   }
   const label = isError ? `SpriteCook: ${short} failed` : info.status && info.status !== "completed" && info.status !== "succeeded" ? `SpriteCook: ${info.status.replace(/_/g, " ")}` : `SpriteCook: ${short.replace(/_/g, " ")}`;
-  send({ type: "artifact_progress", id: turn, artifact: s.artifact?.id ?? null, label, progress: info.progress, credits: c?.spent ?? 0 });
+  emit(t, { type: "artifact_progress", artifact: s.artifact?.id ?? null, label, progress: info.progress, credits: c?.spent ?? 0 });
 }
 
 // ---- A direct MCP call to SpriteCook, without Claude (the chat header's credit balance) ----
@@ -1369,15 +1448,143 @@ async function sendBalance() {
 const THINK_BUDGET = 4000;
 const thinkingOption = (think) => (think ? { type: "enabled", budgetTokens: THINK_BUDGET } : { type: "disabled" });
 
+// ---- The local model's connection: a small rewriting proxy between Claude Code and Ollama ----
+//
+// Claude Code sends no `thinking` field when thinking is off, `max_tokens: 64000` and no
+// temperature (seen in a captured request). Ollama then runs Qwen 3.5 in thinking mode at its
+// default temperature 1.0: long hidden reasoning, turns that end with no text, slow answers. Every
+// local session talks to Ollama through this proxy, which turns thinking off, caps max_tokens,
+// sets sampling for tool use, logs each call's size (never content), and can cut a session's
+// connection when its turn stalls (Ollama stops generating when the client goes away).
+
+/** Sampling for tool use with Qwen 3.5 in non-thinking mode (its model card's recommendation). */
+const LOCAL_SAMPLING = { temperature: 0.7, top_p: 0.8, top_k: 20 };
+const LOCAL_MAX_TOKENS = 8192;
+const proxyConns = new Map(); // session sid -> Set of {up, res}
+let proxyPort = 0;
+let proxySeq = 0;
+const proxyServer = createHttpServer(onProxy);
+const proxyReady = new Promise((resolve) => {
+  proxyServer.on("error", (e) => {
+    console.error(`[sidecar] local proxy failed: ${e?.stack ?? e}`);
+    resolve();
+  });
+  proxyServer.listen(0, "127.0.0.1", () => {
+    proxyPort = proxyServer.address().port;
+    resolve();
+  });
+});
+proxyServer.unref?.();
+
+/** The proxy URL a session's Claude Code uses for `upstream` (Ollama, or a fake server in the harness). */
+const proxyUrl = (sid, upstream) => (proxyPort ? `http://127.0.0.1:${proxyPort}/p/${sid}/${Buffer.from(upstream).toString("base64url")}` : upstream);
+
+/** Estimated tokens of a request (chars / 3.5, the same rough rate the diagnostics use). */
+const estTokens = (chars) => Math.round(chars / 3.5);
+
+function tuneLocalRequest(buf, sid) {
+  let body;
+  try {
+    body = JSON.parse(buf.toString("utf8"));
+  } catch {
+    return buf;
+  }
+  if (!body || typeof body !== "object") return buf;
+  body.thinking = { type: "disabled" };
+  for (const [k, v] of Object.entries(LOCAL_SAMPLING)) if (body[k] == null) body[k] = v;
+  body.max_tokens = Math.min(Number(body.max_tokens) || LOCAL_MAX_TOKENS, LOCAL_MAX_TOKENS);
+  const sys = JSON.stringify(body.system ?? "").length;
+  const tools = JSON.stringify(body.tools ?? []).length;
+  const msgs = JSON.stringify(body.messages ?? []).length;
+  const s = [...sessions.values()].find((x) => x.sid === sid);
+  const t = s?.turn && !s.turn.ended ? s.turn : null;
+  const est = estTokens(sys + tools + msgs);
+  if (t) t.diag.maxEstTokens = Math.max(t.diag.maxEstTokens ?? 0, est);
+  dlog(`local_call session=${sid} turn=${t?.id ?? "-"} est_prompt_tokens=${est} num_ctx=${t?.numCtx ?? "?"} system_chars=${sys} tools_chars=${tools} messages_chars=${msgs} tools=${body.tools?.length ?? 0}`);
+  return Buffer.from(JSON.stringify(body));
+}
+
+function onProxy(req, res) {
+  const m = /^\/p\/([^/]+)\/([^/]+)(\/.*)?$/.exec(req.url ?? "");
+  if (!m) {
+    res.writeHead(404).end();
+    return;
+  }
+  const [, sid, enc, rest = "/"] = m;
+  let target;
+  try {
+    target = new URL(rest, Buffer.from(enc, "base64url").toString("utf8"));
+  } catch {
+    res.writeHead(400).end();
+    return;
+  }
+  const chunks = [];
+  req.on("data", (c) => chunks.push(c));
+  req.on("end", () => {
+    let body = Buffer.concat(chunks);
+    const isMessages = req.method === "POST" && /^\/v1\/messages(\?|$)/.test(rest);
+    if (isMessages) body = tuneLocalRequest(body, sid);
+    const headers = { ...req.headers, host: target.host, "content-length": String(body.length) };
+    delete headers["accept-encoding"];
+    const n = ++proxySeq;
+    const t0 = Date.now();
+    let bytes = 0;
+    let first = 0;
+    const up = httpRequest(target, { method: req.method, headers }, (ur) => {
+      res.writeHead(ur.statusCode ?? 502, ur.headers);
+      ur.on("data", (c) => {
+        if (!first) first = Date.now();
+        bytes += c.length;
+        res.write(c);
+      });
+      ur.on("end", () => {
+        res.end();
+        if (isMessages) dlog(`local_http #${n} session=${sid} status=${ur.statusCode} ttfb_ms=${first ? first - t0 : -1} ms=${Date.now() - t0} bytes=${bytes}`);
+      });
+      ur.on("error", () => res.destroy());
+    });
+    up.on("error", (e) => {
+      dlog(`local_http #${n} session=${sid} failed after ${Date.now() - t0}ms: ${e?.code ?? e?.message}`);
+      if (!res.headersSent) {
+        res.writeHead(502, { "content-type": "application/json" });
+        res.end(JSON.stringify({ type: "error", error: { type: "api_error", message: `The local model server did not answer (${e?.code ?? e?.message}).` } }));
+      } else res.destroy();
+    });
+    const conn = { up, res };
+    let set = proxyConns.get(sid);
+    if (!set) proxyConns.set(sid, (set = new Set()));
+    set.add(conn);
+    // Claude Code went away (closed, killed): stop the upstream generation too.
+    res.on("close", () => {
+      set.delete(conn);
+      up.destroy();
+    });
+    up.end(body);
+  });
+}
+
+/** Cuts every model connection of a session. */
+function proxyAbort(sid) {
+  const set = proxyConns.get(sid);
+  if (!set) return;
+  for (const { up, res } of set) {
+    up.destroy();
+    res.destroy();
+  }
+  proxyConns.delete(sid);
+}
+
 /**
  * Env for a Claude Code process that talks to Ollama instead of Anthropic (Ollama >= 0.14 serves the
  * Anthropic Messages API). Every model alias Claude Code might use for side calls points at the
  * local model, and non-essential traffic is off, so nothing from this process reaches Anthropic.
+ * `baseUrl` is the session's proxy URL. Claude Code's own retries are cut to one: a local server
+ * that is down or wedged should fail fast, and the turn gets one fresh local retry of its own.
  */
 function localEnv(baseUrl, model) {
   return {
     ...process.env,
-    ANTHROPIC_BASE_URL: FAKE_LOCAL_URL || baseUrl,
+    ANTHROPIC_BASE_URL: baseUrl,
     ANTHROPIC_AUTH_TOKEN: "ollama",
     ANTHROPIC_API_KEY: "",
     ANTHROPIC_MODEL: model,
@@ -1387,6 +1594,8 @@ function localEnv(baseUrl, model) {
     ANTHROPIC_SMALL_FAST_MODEL: model,
     CLAUDE_CODE_SUBAGENT_MODEL: model,
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
+    CLAUDE_CODE_MAX_RETRIES: "1",
+    API_TIMEOUT_MS: "300000",
     DISABLE_TELEMETRY: "1",
     DISABLE_ERROR_REPORTING: "1",
   };
@@ -1395,14 +1604,24 @@ function localEnv(baseUrl, model) {
 /** Session key: one session per thread and backend (env is fixed per Claude Code process). */
 const sessionKey = (thread, backend, escalated) => `${thread}#${backend === "local" ? "local" : escalated ? "claude-x" : "claude"}`;
 
+/** Starts Claude Code ourselves (same command the SDK would run) so a stalled one can be killed by pid. */
+const spawner = (s) => (opts) => {
+  const child = spawnChild(opts.command, opts.args, { cwd: opts.cwd, env: opts.env, signal: opts.signal, stdio: ["pipe", "pipe", "ignore"], windowsHide: true });
+  s.child = child;
+  child.on("error", (e) => dlog(`child_error session=${s.sid} ${e?.code ?? e?.message}`));
+  child.on("exit", (code, sig) => {
+    if (!s.closed) dlog(`child_exit session=${s.sid} pid=${child.pid} code=${code} signal=${sig}`);
+  });
+  return child;
+};
+
 /** `local` = {baseUrl, vision} for a local-model session, else null. `artifact` = {id, cap} for an artifact thread. */
 function openSession(key, resume, model, think = false, local = null, artifact = null) {
   evictIfNeeded();
   const turns = makeTurnQueue();
-  // queue: turn ids pushed and not yet answered, oldest first. A session answers in order, so the
-  // head is the turn its events belong to; an interrupted turn's late events and result are dropped
-  // there instead of landing on the next turn.
-  const s = { key, artifact: artifact ? { ...artifact } : null, local: local ? { ...local } : null, vision: !!local?.vision, q: null, turns, resume: resume || null, model: model || null, think: !!think, retryModel: null, retried: false, turnText: "", tier: null, web: false, lastUsed: Date.now(), text: "", answered: false, pending: null, closed: false, queue: [], tracker: null };
+  const sid = `s${++sessionSeq}`;
+  const s = { sid, key, artifact: artifact ? { ...artifact } : null, local: local ? { ...local } : null, vision: !!local?.vision, q: null, turns, resume: resume || null, model: model || null, think: !!think, web: false, lastUsed: Date.now(), answered: false, pending: null, closed: false, busy: false, turn: null, tracker: null, child: null, sessionId: resume || null };
+  const upstream = local ? FAKE_LOCAL_URL || local.baseUrl : null;
   s.q = query({
     prompt: turns,
     options: {
@@ -1412,22 +1631,23 @@ function openSession(key, resume, model, think = false, local = null, artifact =
       ...(local ? { tools: [] } : {}),
       thinking: thinkingOption(local ? false : think),
       canUseTool: webGate(s),
-      mcpServers: { dreamer: makeServer() },
+      mcpServers: { dreamer: makeServer(s) },
       // Claude Code's own auto-compact is a % of the model's window (~800k+ on a 1M model, i.e. never).
       // Pin the window it computes against to a fixed budget, so it also compacts mid-turn.
       env: {
-        ...(local ? localEnv(local.baseUrl, model) : claudeEnv()),
+        ...(local ? localEnv(proxyUrl(sid, upstream), model) : { ...claudeEnv(), CLAUDE_CODE_MAX_RETRIES: "2" }),
         CLAUDE_CODE_AUTO_COMPACT_WINDOW: String(AUTO_COMPACT_TOKENS),
         ENABLE_CLAUDEAI_MCP_SERVERS: "false",
       },
+      spawnClaudeCodeProcess: spawner(s),
       // An artifact thread: its own prompt and tools, SpriteCook included (when a key is set).
       ...(artifact
         ? {
             systemPrompt: { type: "custom", prompt: artifactSystem() },
-            allowedTools: [...artifactTools.map((t) => `mcp__dreamer__${t.name}`), ...FREE_TOOLS.map((t) => `mcp__spritecook__${t}`)],
+            allowedTools: [...artifactSpecs.map((t) => `mcp__dreamer__${t.name}`), ...FREE_TOOLS.map((t) => `mcp__spritecook__${t}`)],
             tools: [],
             canUseTool: artifactGate(s),
-            mcpServers: { dreamer: makeArtifactServer(), ...(spritecookServer() ? { spritecook: spritecookServer() } : {}) },
+            mcpServers: { dreamer: makeArtifactServer(s), ...(spritecookServer() ? { spritecook: spritecookServer() } : {}) },
           }
         : {}),
       // Only Dreamer's own tools (and SpriteCook in artifact threads): never the user's other MCP
@@ -1442,142 +1662,377 @@ function openSession(key, resume, model, think = false, local = null, artifact =
   return s;
 }
 
-/** Fails the turn being answered (if any) so the UI never waits forever. */
-function failTurn(message) {
-  if (!currentId) return;
-  send({ type: "error", id: currentId, message });
-  currentId = null;
-  currentSession = null;
+// ---- Turns ----
+//
+// One object per chat turn. Everything the sidecar sends about a turn goes through emit(t, ...),
+// which drops it once the turn has ended (so a late event of a stopped or stalled turn never lands
+// on the next one) and feeds the turn's watchdog. `current` is the turn the UI is waiting for.
+
+let current = null;
+
+/** Watchdog limits: the first model event (a model load plus reading a big context), then between events. */
+const FIRST_EVENT_MS = { local: Number(process.env.DREAMER_FIRST_EVENT_LOCAL_MS) || 90000, claude: Number(process.env.DREAMER_FIRST_EVENT_CLAUDE_MS) || 60000 };
+const IDLE_MS = Number(process.env.DREAMER_IDLE_MS) || 45000;
+/** A running tool keeps its own limit (a SpriteCook generation or a web fetch takes longer than a model pause). */
+const toolLimitMs = (name) => (SPRITECOOK_TOOLS.includes(name) ? 300000 : WEB_TOOLS.includes(name) ? 120000 : 60000);
+/** Budgets of the steps before the model runs: the thread summary (compaction) and an escalation's recap. */
+const SUMMARY_MS = { local: 150000, claude: 120000 };
+const RECAP_MS = 60000;
+const HEARTBEAT_MS = 10000;
+/** Tools whose success means the turn did its job even without text (no local retry after them: no duplicates). */
+const ACTION_TOOLS = new Set(["create_card", "ask_question", "propose_link", "merge_cards", "propose_edit", "propose_organize", "remember", "forget", "escalate_artifact", "propose_artifact"]);
+
+function newTurn(msg, { local, artifact, model }) {
+  const now = Date.now();
+  return {
+    id: msg.id,
+    local: !!local,
+    artifact: !!artifact,
+    model,
+    numCtx: Number(msg.local?.numCtx) || null,
+    userText: msg.text,
+    startedAt: now,
+    phase: "prep",
+    prepUntil: 0,
+    modelStartedAt: 0,
+    firstModelAt: 0,
+    lastAt: now,
+    lastType: "start",
+    ended: false,
+    endReason: null,
+    s: null,
+    attempt: 1,
+    limits: makeLimits(msg.text, !!artifact),
+    waits: new Map(),
+    userWait: 0,
+    text: "",
+    questionAsked: false,
+    visionBlocked: false,
+    escalatedArtifact: false,
+    pendingFull: null,
+    retryFull: null,
+    retryModel: null,
+    retried: false,
+    retriedFrom: null,
+    tier: null,
+    lastInput: null,
+    prepQuery: null,
+    diag: { maxEstTokens: 0, sentChars: 0 },
+  };
 }
 
+const touch = (t) => {
+  if (t && !t.ended) t.lastAt = Date.now();
+};
+
+/** Sends an event of turn `t` (dropped once it has ended). `fromModel`: model output, which ends the first-event wait. */
+function emit(t, obj, fromModel = false) {
+  if (!t || t.ended) return false;
+  const now = Date.now();
+  t.lastAt = now;
+  t.lastType = obj.type;
+  if (fromModel && !t.firstModelAt && t.phase === "model") t.firstModelAt = now;
+  sendRaw({ ...obj, id: t.id });
+  return true;
+}
+
+/** Binds a turn to the session that answers it. */
+function attach(t, s) {
+  t.s = s;
+  s.turn = t;
+  s.busy = true;
+  s.lastUsed = Date.now();
+  s.tracker = null;
+}
+
+/** When the turn counts as stalled (ms epoch), or Infinity while it waits for the user. */
+function turnDeadline(t) {
+  if (t.userWait > 0) return Infinity;
+  let d =
+    t.phase === "prep"
+      ? Math.max(t.prepUntil, t.lastAt + IDLE_MS)
+      : t.firstModelAt
+        ? t.lastAt + IDLE_MS
+        : t.modelStartedAt + (t.local ? FIRST_EVENT_MS.local : FIRST_EVENT_MS.claude);
+  for (const until of t.waits.values()) d = Math.max(d, until);
+  const tr = t.s?.tracker?.turn === t ? t.s.tracker : null;
+  for (const st of tr?.running() ?? []) d = Math.max(d, st.startedAt + toolLimitMs(st.tool));
+  return d;
+}
+
+const stallWhy = (t) =>
+  t.phase === "prep"
+    ? "the thread summary took too long"
+    : !t.firstModelAt
+      ? `no reply from the ${t.local ? "local model" : "model"} within ${Math.round((t.local ? FIRST_EVENT_MS.local : FIRST_EVENT_MS.claude) / 1000)}s`
+      : `no activity for ${Math.round(IDLE_MS / 1000)}s`;
+
+// The watchdog: one tick a second over the turn the UI waits for. A heartbeat (not activity) tells
+// the app the sidecar itself is alive, so its own watchdog only fires when this process is wedged.
+setInterval(() => {
+  const t = current;
+  if (!t || t.ended) return;
+  const now = Date.now();
+  if (now > turnDeadline(t)) {
+    dlog(`turn_stall turn=${t.id} phase=${t.phase} why="${stallWhy(t)}" last=${t.lastType}@${t.lastAt - t.startedAt}ms`);
+    const msg = t.local ? `The local model stopped responding (${stallWhy(t)}).` : `Claude stopped responding (${stallWhy(t)}). Retry to send it again.`;
+    failTurn(t, "stalled", msg);
+    return;
+  }
+  if (now - (t.aliveAt ?? t.startedAt) >= HEARTBEAT_MS) {
+    t.aliveAt = now;
+    sendRaw({ type: "alive", id: t.id, phase: t.phase, idleMs: now - t.lastAt });
+  }
+}, 1000).unref?.();
+
+/** One diagnostics line per turn: sizes, ids and times only. */
+function logTurnEnd(t, reason) {
+  const tr = t.s?.tracker?.turn === t ? t.s.tracker : null;
+  const tools = (tr?.toolLog() ?? []).map((x) => `${x.tool}:${x.ms}ms:${x.status}`).join(",");
+  const ttfe = t.firstModelAt ? t.firstModelAt - t.modelStartedAt : -1;
+  dlog(
+    `turn_end turn=${t.id} backend=${t.local ? "local" : "claude"} model=${t.model ?? "-"} reason=${reason} attempt=${t.attempt} ` +
+      `est_prompt_tokens=${t.diag.maxEstTokens || estTokens(t.diag.sentChars)} num_ctx=${t.numCtx ?? "-"} ttfe_ms=${ttfe} ` +
+      `last_event=${t.lastType}@${t.lastAt - t.startedAt}ms dur_ms=${Date.now() - t.startedAt} tools=[${tools}]`,
+  );
+}
+
+/** Marks a turn over: nothing of it is sent any more. */
+function markEnded(t, reason) {
+  if (t.ended) return;
+  logTurnEnd(t, reason);
+  t.ended = true;
+  t.endReason = reason;
+  try {
+    t.prepQuery?.close?.();
+  } catch {
+    /* gone */
+  }
+  if (current === t) current = null;
+}
+
+/**
+ * The turn failed (`reason`: error | empty | stalled | limit). A local turn that has not done
+ * anything yet gets ONE automatic retry in a fresh local session; after that (or on Claude) it ends
+ * with a clear reason. Never an automatic Claude call: "Retry with Claude" is the user's click.
+ */
+function failTurn(t, reason, message, { noRetry = false } = {}) {
+  if (!t || t.ended) return;
+  const s = t.s;
+  const tr = s?.tracker?.turn === t ? s.tracker : null;
+  if (s && !s.closed) closeSession(s, reason);
+  if (t.local && !noRetry && t.attempt === 1 && (tr?.actions() ?? 0) === 0 && s) return localRetry(t, reason, s);
+  tr?.finish(true);
+  const fallback = reason === "stalled" ? "stalled" : reason === "empty" ? "empty" : reason === "limit" ? "tool" : "error";
+  if (t.local) {
+    emit(t, { type: "message_done", text: message, isError: true, backend: "local", model: t.model ?? undefined, fallback, endReason: reason, attempt: t.attempt, ...(t.attempt > 1 ? { localRetried: true } : {}), durationMs: Date.now() - t.startedAt });
+  } else {
+    emit(t, { type: "error", message, endReason: reason });
+  }
+  markEnded(t, reason);
+}
+
+const RETRY_LABEL = { error: "it failed", empty: "it came back empty", stalled: "it stopped responding", limit: "it looped on tools" };
+
+/** The local turn's one automatic retry: a fresh session (no resume), the full context plus the last messages. */
+function localRetry(t, reason, old) {
+  dlog(`local_retry turn=${t.id} reason=${reason} after_ms=${Date.now() - t.startedAt}`);
+  t.attempt = 2;
+  t.text = "";
+  t.questionAsked = false;
+  t.visionBlocked = false;
+  t.waits.clear();
+  t.limits = makeLimits(t.userText, false);
+  t.phase = "model";
+  t.modelStartedAt = Date.now();
+  t.firstModelAt = 0;
+  emit(t, { type: "text_reset" });
+  const at = Date.now();
+  emit(t, { type: "step", step: { sid: "local_retry", kind: "tool", tool: "local_retry", label: `Retried locally in a fresh session (${RETRY_LABEL[reason] ?? reason})`, status: "done", startedAt: at, endedAt: at } });
+  emit(t, { type: "model_note", model: t.model, localRetry: true, reason });
+  let s;
+  try {
+    s = openSession(old.key, null, old.model, false, old.local, null);
+  } catch (e) {
+    return failTurn(t, "error", `The local model could not start again: ${e?.message ?? e}`, { noRetry: true });
+  }
+  s.web = false;
+  s.escalated = false;
+  attach(t, s);
+  const replay = t.retryFull ?? t.pendingFull;
+  s.pending = replay;
+  s.turns.push(replay);
+}
+
+/** A saved session that can't be resumed (deleted, expired): start the thread afresh and replay the turn. */
 function restartFresh(s) {
-  sessions.delete(s.key);
-  s.closed = true;
+  const t = s.turn;
+  closeSession(s);
+  if (!t || t.ended || t.s !== s) return;
   let fresh;
   try {
     fresh = openSession(s.key, null, s.model, s.think, s.local, s.artifact);
   } catch (e) {
     console.error(`[sidecar] could not start a fresh session after a failed resume: ${e?.stack ?? e}`);
-    if (currentSession === s) failTurn(`Claude could not start a new session: ${e?.message ?? e}`);
-    return;
+    return failTurn(t, "error", `Claude could not start a new session: ${e?.message ?? e}`, { noRetry: true });
   }
   fresh.web = s.web;
-  fresh.retryModel = s.retryModel;
-  fresh.retried = s.retried;
-  fresh.turnText = s.turnText;
-  fresh.tier = s.tier;
   fresh.escalated = s.escalated;
-  if (currentSession === s) {
-    currentSession = fresh;
-    if (currentId) fresh.queue = [currentId];
-  }
+  attach(t, fresh);
   // A fresh session knows nothing: replay the waiting turn with the full context.
-  const replay = s.pendingFull ?? s.pending;
-  if (replay) {
-    fresh.pending = replay;
-    fresh.pendingFull = replay;
-    fresh.turns.push(replay);
-  }
+  const replay = t.pendingFull ?? s.pending;
+  fresh.pending = replay;
+  fresh.turns.push(replay);
 }
 
 /** The turn answered on the fast model gave an error, an empty answer, or ran into a tool limit with no real answer. */
-function shouldRetryOnMain(s, msg) {
-  if (!s.retryModel || s.retried || s.questionAsked || s.closed) return false;
-  const answer = (msg.subtype === "success" ? msg.result : s.text) ?? "";
+function shouldRetryOnMain(t, msg) {
+  if (!t.retryModel || t.retried || t.questionAsked || t.s?.closed) return false;
+  // An error is a failure: no automatic Claude retry (the user gets Retry). Only a thin answer
+  // from the fast model is redone on the main one.
+  if (msg.is_error) return false;
+  const answer = (msg.subtype === "success" ? msg.result : t.text) ?? "";
   const empty = !String(answer).trim();
-  return msg.is_error || empty || (turnLimits.hit && String(answer).trim().length < 40);
+  return empty || (t.limits.hit && String(answer).trim().length < 40);
 }
 
-/** Why a local turn needs "Retry with Claude", or null when it went fine. No automatic retry. */
-function localFallback(s, msg, text, tr) {
-  if (!s.local) return null;
+/** Why a local turn needs "Retry with Claude", or null when it went fine. */
+function localFallback(t, msg, text, tr) {
+  if (!t.local) return null;
   if (msg.is_error) return "error";
-  if (s.visionBlocked) return "vision";
-  if ((tr?.toolErrors() ?? 0) > 0 || turnLimits.hit) return "tool";
-  if (!s.questionAsked && !String(text ?? "").trim()) return "empty";
+  if (t.visionBlocked) return "vision";
+  if ((tr?.toolErrors() ?? 0) > 0 || t.limits.hit) return "tool";
+  if (!t.questionAsked && !String(text ?? "").trim() && (tr?.actions() ?? 0) === 0) return "empty";
   return null;
 }
 
-function retryOnMain(s, head) {
-  s.retriedFrom = s.model;
-  s.retried = true;
-  s.model = s.retryModel;
-  s.q.setModel?.(s.retryModel).catch(() => {});
-  dlog(`retry_on_main turn=${head} from=${s.retriedFrom} to=${s.model}`);
-  s.text = "";
-  s.answered = false;
-  s.lastInput = null;
-  resetTurnLimits(s.turnText);
-  // The result consumed the turn; the same id stays at the head of the queue for the second try.
+function retryOnMain(s, t) {
+  t.retriedFrom = s.model;
+  t.retried = true;
+  s.model = t.retryModel;
+  s.q.setModel?.(t.retryModel).catch(() => {});
+  dlog(`retry_on_main turn=${t.id} from=${t.retriedFrom} to=${s.model}`);
+  t.text = "";
+  t.lastInput = null;
+  t.limits = makeLimits(t.userText);
+  s.busy = true;
+  // The result consumed the turn; the same turn goes in again.
   s.turns.push(s.pending);
-  send({ type: "model_note", id: head, model: s.model, retried: true, from: s.retriedFrom });
+  emit(t, { type: "model_note", model: s.model, retried: true, from: t.retriedFrom });
 }
 
 /**
  * An artifact session started: is SpriteCook there, and does it offer every tool Dreamer relies on?
  * Anything missing is logged; the UI shows a note (with a link to Settings) when images can't be made.
  */
-function checkSpritecook(s, init, turn) {
+function checkSpritecook(s, init, t) {
   const status = (init.mcp_servers ?? []).find((m) => m.name === "spritecook")?.status;
   const tools = new Set(init.tools ?? []);
-  const missing = SPRITECOOK_TOOLS.filter((t) => !tools.has(`mcp__spritecook__${t}`));
+  const missing = SPRITECOOK_TOOLS.filter((x) => !tools.has(`mcp__spritecook__${x}`));
   let reason = null;
   if (!SPRITECOOK.key) reason = "no_key";
   else if (status && status !== "connected") reason = "unreachable";
   else if (missing.length === SPRITECOOK_TOOLS.length) reason = "unreachable";
   s.spritecookOk = !reason;
   dlog(`spritecook key=${SPRITECOOK.key ? "set" : "none"} status=${status ?? "absent"} missing=${missing.length ? missing.join(",") : "none"}`);
-  send({ type: "spritecook_status", id: turn, artifact: s.artifact?.id ?? null, ok: !reason, reason, missing: reason ? [] : missing });
+  emit(t, { type: "spritecook_status", artifact: s.artifact?.id ?? null, ok: !reason, reason, missing: reason ? [] : missing });
+}
+
+/** The result of the turn a session was answering. */
+function finishTurn(s, t, msg) {
+  const tr = s.tracker?.turn === t ? s.tracker : null;
+  const text = t.questionAsked && !msg.is_error ? "" : msg.subtype === "success" ? msg.result : t.text;
+  const fallback = localFallback(t, msg, text, tr);
+  // A local error or empty reply that did nothing yet: one fresh local retry.
+  if (t.local && (fallback === "error" || fallback === "empty") && t.attempt === 1 && (tr?.actions() ?? 0) === 0) {
+    return failTurn(t, fallback, "");
+  }
+  tr?.finish(msg.is_error);
+  const usage = tr?.hasUsage() ? tr.usage() : fromApiUsage(msg.usage);
+  dlog(`turn_done turn=${t.id} calls=${msg.num_turns} sum_input=${usage.input} sum_cacheRead=${usage.cacheRead} sum_cacheCreate=${usage.cacheCreate} output=${usage.output} lastCallContext=${tr?.contextTokens?.() ?? 0} answerChars=${String(text).length}`);
+  const u = msg.usage ?? {};
+  const contextTokens = (tr?.hasUsage() && tr.contextTokens()) || t.lastInput || (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0);
+  if (fallback) dlog(`local_fallback turn=${t.id} reason=${fallback}`);
+  const endReason = msg.is_error ? "error" : fallback === "empty" ? "empty" : "done";
+  const failedText = t.local && msg.is_error && !String(text ?? "").trim() ? `The local model failed${t.attempt > 1 ? " twice" : ""}${msg.subtype && msg.subtype !== "success" ? ` (${msg.subtype})` : ""}.` : text;
+  emit(t, {
+    type: "message_done",
+    text: failedText,
+    sessionId: msg.session_id,
+    isError: msg.is_error,
+    inputTokens: contextTokens,
+    usage: { ...usage, ...(tr?.hasUsage() ? { calls: tr.calls() } : {}) },
+    durationMs: Date.now() - t.startedAt,
+    // The model this turn was routed to. modelUsage also lists Claude Code's own cheap
+    // background calls (Haiku), so its first key is not reliably the answering model.
+    model: s.model || Object.keys(msg.modelUsage ?? {})[0] || undefined,
+    tier: t.tier ?? undefined,
+    backend: s.local ? "local" : "claude",
+    ...(s.escalated ? { escalated: true } : {}),
+    ...(fallback ? { fallback } : {}),
+    endReason,
+    attempt: t.attempt,
+    ...(t.attempt > 1 ? { localRetried: true } : {}),
+    ...(s.artifact ? { artifact: { id: s.artifact.id, credits: s.credits?.spent ?? 0, paidCalls: s.credits?.calls ?? 0, jobs: s.credits?.jobs ?? [], spritecook: s.spritecookOk !== false } } : {}),
+    ...(t.retried ? { retried: true, retriedFrom: t.retriedFrom } : {}),
+    contextTokens,
+    contextWindow: contextWindowOf(msg),
+  });
+  markEnded(t, endReason);
+  s.web = false;
+  // An escalation is one turn: its session is not resumed, the thread goes back to local.
+  if (s.escalated) closeSession(s);
 }
 
 function pump(s) {
   (async () => {
     try {
       for await (const msg of s.q) {
-        // The turn these events belong to; only the one the UI is waiting for is forwarded.
-        const head = s.queue[0] ?? null;
-        const live = !!head && currentSession === s && currentId === head;
+        const t = s.turn;
+        // The turn these events belong to; only a live one is forwarded.
+        const live = !!t && !t.ended && t.s === s;
+        if (msg.type === "system" && msg.subtype === "init") {
+          s.sessionId = msg.session_id;
+          // A resume that worked keeps the saved session id; a different one means the history was not loaded.
+          if (s.artifact && live) checkSpritecook(s, msg, t);
+          dlog(`session_init session=${s.sid} key=${s.key} pid=${s.child?.pid ?? "?"} resumeRequested=${s.resume ? "yes" : "no"} resumed=${s.resume ? msg.session_id === s.resume : "n/a"} session_id=${msg.session_id} model=${msg.model} tools=${msg.tools?.length ?? "?"} mcp=${JSON.stringify((msg.mcp_servers ?? []).map((m) => `${m.name}:${m.status}`))}`);
+        }
         // Artifact turns: SpriteCook results are counted (credits, jobs) and shown as progress.
         if (s.artifact && live && !msg.parent_tool_use_id) {
           if (msg.type === "assistant") {
             for (const b of msg.message?.content ?? []) {
               if (b?.type === "tool_use") {
                 (s.toolNames ??= new Map()).set(b.id, b.name);
-                if (String(b.name).startsWith("mcp__spritecook__")) send({ type: "artifact_progress", id: head, artifact: s.artifact.id, label: `SpriteCook: ${String(b.name).replace(/^mcp__spritecook__/, "").replace(/_/g, " ")}…`, progress: null, credits: s.credits?.spent ?? 0 });
+                if (String(b.name).startsWith("mcp__spritecook__")) emit(t, { type: "artifact_progress", artifact: s.artifact.id, label: `SpriteCook: ${String(b.name).replace(/^mcp__spritecook__/, "").replace(/_/g, " ")}…`, progress: null, credits: s.credits?.spent ?? 0 });
               }
             }
           } else if (msg.type === "user" && Array.isArray(msg.message?.content)) {
             for (const b of msg.message.content) {
               const name = b?.type === "tool_result" && s.toolNames?.get(b.tool_use_id);
-              if (name && String(name).startsWith("mcp__spritecook__")) onSpritecookResult(s, head, name, b.content, !!b.is_error);
+              if (name && String(name).startsWith("mcp__spritecook__")) onSpritecookResult(s, t, name, b.content, !!b.is_error);
             }
           }
         }
         if (live && msg.type !== "result") {
-          if (!s.tracker || s.tracker.id !== head) {
-            s.tracker = makeTracker((o) => send({ ...o, id: head }), `turn=${head}`);
-            s.tracker.id = head;
+          if (!s.tracker || s.tracker.turn !== t) {
+            s.tracker = makeTracker((o) => emit(t, o, true), `turn=${t.id}`);
+            s.tracker.turn = t;
           }
           s.tracker.on(msg);
-        }
-        if (msg.type === "system" && msg.subtype === "init") {
-          // A resume that worked keeps the saved session id; a different one means the history was not loaded.
-          if (s.artifact) checkSpritecook(s, msg, head);
-          dlog(`session_init key=${s.key} resumeRequested=${s.resume ? "yes" : "no"} resumed=${s.resume ? msg.session_id === s.resume : "n/a"} session=${msg.session_id} model=${msg.model} tools=${msg.tools?.length ?? "?"} mcp=${JSON.stringify((msg.mcp_servers ?? []).map((m) => `${m.name}:${m.status}`))}`);
         }
         if (msg.type === "stream_event" && msg.event?.type === "content_block_delta" && msg.event.delta?.type === "text_delta") {
           s.answered = true;
           if (live) {
-            s.text += msg.event.delta.text;
-            if (!s.questionAsked) send({ type: "delta", id: head, text: msg.event.delta.text });
+            t.text += msg.event.delta.text;
+            if (!t.questionAsked) emit(t, { type: "delta", text: msg.event.delta.text }, true);
           }
         } else if (msg.type === "assistant" && !msg.parent_tool_use_id && msg.message?.usage) {
           // The latest model call's input is the thread's real context size (a result's usage adds
           // up every call of a tool-using turn).
           const u = msg.message.usage;
           if (process.env.DREAMER_DEBUG_USAGE) dlog(`raw assistant usage ${JSON.stringify(u)} id=${msg.message.id}`);
-          if (live) s.lastInput = (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0);
-          if (msg.message?.error && live) send({ type: "error", id: head, message: `Claude could not respond (${msg.message.error}).` });
+          if (live) t.lastInput = (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0);
+          if (msg.message?.error && live) dlog(`api_error turn=${t.id} ${String(msg.message.error).slice(0, 120)}`);
         } else if (msg.type === "result") {
           // A resume that can't find its session reports a zero-turn error result (then throws):
           // don't surface it, recover below by starting the thread afresh.
@@ -1586,62 +2041,18 @@ function pump(s) {
             continue;
           }
           s.answered = true;
-          // A router-picked fast turn that failed or came back empty: once more on the main model.
-          if (live && shouldRetryOnMain(s, msg)) {
-            retryOnMain(s, head);
+          s.busy = false;
+          if (!live) {
+            // A stopped turn's result: swallowed, it must not land on the next turn.
+            if (t) dlog(`late_result session=${s.sid} turn=${t.id} ended=${t.endReason ?? "?"}`);
             continue;
           }
-          s.queue.shift();
-          if (live) {
-            const text = s.questionAsked && !msg.is_error ? "" : msg.subtype === "success" ? msg.result : s.text;
-            const tr = s.tracker?.id === head ? s.tracker : null;
-            tr?.finish(msg.is_error);
-            const usage = tr?.hasUsage() ? tr.usage() : fromApiUsage(msg.usage);
-            dlog(`turn_done turn=${head} calls=${msg.num_turns} sum_input=${usage.input} sum_cacheRead=${usage.cacheRead} sum_cacheCreate=${usage.cacheCreate} output=${usage.output} lastCallContext=${tr?.contextTokens?.() ?? 0} answerChars=${String(text).length}`);
-            const u = msg.usage ?? {};
-            const contextTokens = (tr?.hasUsage() && tr.contextTokens()) || s.lastInput || (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0);
-            const fallback = localFallback(s, msg, text, tr);
-            if (fallback) dlog(`local_fallback turn=${head} reason=${fallback}`);
-            send({
-              type: "message_done",
-              id: head,
-              text,
-              sessionId: msg.session_id,
-              isError: msg.is_error,
-              inputTokens: contextTokens,
-              usage: { ...usage, ...(tr?.hasUsage() ? { calls: tr.calls() } : {}) },
-              durationMs: msg.duration_ms ?? (tr ? Date.now() - tr.startedAt : undefined),
-              // The model this turn was routed to. modelUsage also lists Claude Code's own cheap
-              // background calls (Haiku), so its first key is not reliably the answering model.
-              model: s.model || Object.keys(msg.modelUsage ?? {})[0] || undefined,
-              tier: s.tier ?? undefined,
-              backend: s.local ? "local" : "claude",
-              ...(s.escalated ? { escalated: true } : {}),
-              ...(fallback ? { fallback } : {}),
-              ...(s.artifact ? { artifact: { id: s.artifact.id, credits: s.credits?.spent ?? 0, paidCalls: s.credits?.calls ?? 0, jobs: s.credits?.jobs ?? [], spritecook: s.spritecookOk !== false } } : {}),
-              ...(s.retried ? { retried: true, retriedFrom: s.retriedFrom } : {}),
-              contextTokens,
-              contextWindow: contextWindowOf(msg),
-            });
-            currentId = null;
-            currentSession = null;
+          // A router-picked fast turn that came back thin: once more on the main model.
+          if (shouldRetryOnMain(t, msg)) {
+            retryOnMain(s, t);
+            continue;
           }
-          s.text = "";
-          s.lastInput = null;
-          s.tracker = null;
-          s.retried = false;
-          s.retriedFrom = null;
-          s.visionBlocked = false;
-          // Another turn is already queued behind an interrupted one: keep its settings.
-          if (!s.queue.length) {
-            s.pending = null;
-            s.pendingFull = null;
-            s.web = false;
-            // An escalation is one turn: its session is not resumed, the thread goes back to local.
-            if (s.escalated) closeSession(s);
-          }
-        } else if (msg.type === "assistant" && msg.message?.error) {
-          if (live) send({ type: "error", id: head, message: `Claude could not respond (${msg.message.error}).` });
+          finishTurn(s, t, msg);
         }
       }
       if (s.resumeFailed && !s.closed) {
@@ -1651,30 +2062,31 @@ function pump(s) {
       }
       // The stream ended without throwing (Claude Code exited) while a turn was still waiting.
       if (!s.closed) {
-        sessions.delete(s.key);
-        s.closed = true;
-        if (currentSession === s) {
+        closeSession(s);
+        const t = s.turn;
+        if (t && !t.ended && t.s === s) {
           console.error(`[sidecar] Claude session ended without a result`);
-          failTurn("Claude Code stopped without answering. Retry to start a new session.");
+          failTurn(t, "error", t.local ? "The local model's session stopped without answering." : "Claude Code stopped without answering. Retry to start a new session.");
         }
       }
     } catch (e) {
       if (s.closed) return;
       console.error(`[sidecar] session error: ${e?.stack ?? e}`);
+      const t = s.turn;
       // A saved session that can't be resumed (deleted, expired): start that thread afresh and
       // replay the turn that was waiting, instead of failing the user's message.
-      if (s.resume && !s.answered && s.pending) {
+      if (s.resume && !s.answered && t && !t.ended && t.s === s) {
         restartFresh(s);
         return;
       }
-      sessions.delete(s.key);
-      s.closed = true;
-      if (currentSession === s) failTurn(e?.message ?? String(e));
+      closeSession(s, "error");
+      if (t && !t.ended && t.s === s) failTurn(t, "error", e?.message ?? String(e));
     }
   })().catch((e) => {
     // Anything thrown by the recovery itself must not leave the turn pending.
     console.error(`[sidecar] pump failed: ${e?.stack ?? e}`);
-    if (currentSession === s || !currentSession) failTurn(`Claude stopped unexpectedly: ${e?.message ?? e}`);
+    const t = s.turn;
+    if (t && !t.ended) failTurn(t, "error", `Claude stopped unexpectedly: ${e?.message ?? e}`, { noRetry: true });
   });
 }
 
@@ -1991,12 +2403,34 @@ const RECAP_SYSTEM =
   "discussed (by title), and what the user is trying to do now. Do not add anything the conversation does not say.";
 
 /**
- * One-shot summary of a thread's transcript: its own query, no tools. Null on failure. `local` =
- * {baseUrl} runs it on the local model through Ollama (a local thread's compaction, an escalation's recap).
+ * One-shot summary of a thread's transcript: its own query, no tools. Null on failure or when it
+ * runs past `timeoutMs` (it is then cut: a slow or wedged local model must never hold the turn,
+ * least of all a Claude turn waiting for its recap). `local` = {baseUrl} runs it on the local model
+ * through Ollama (a local thread's compaction, an escalation's recap). `turn`: stopping that turn
+ * stops this too.
  */
-async function summarize({ transcript, model, local }, tracker, system = SUMMARY_SYSTEM) {
+async function summarize({ transcript, model, local }, tracker, system = SUMMARY_SYSTEM, { timeoutMs = 120000, turn = null } = {}) {
+  const sid = `sum${++sessionSeq}`;
+  let q = null;
+  let timedOut = false;
+  let child = null;
+  const stop = () => {
+    try {
+      q?.close?.();
+    } catch {
+      /* gone */
+    }
+    proxyAbort(sid);
+    killChild({ sid, child });
+  };
+  const timer = setTimeout(() => {
+    timedOut = true;
+    dlog(`summary_timeout turn=${turn?.id ?? "-"} after_ms=${timeoutMs} local=${!!local}`);
+    stop();
+  }, timeoutMs);
+  if (turn) turn.prepQuery = { close: stop };
   try {
-    const q = query({
+    q = query({
       prompt: `Conversation:
 
 ${transcript}
@@ -2010,18 +2444,24 @@ ${system === RECAP_SYSTEM ? "Recap it." : "Summarize it."}`,
         settingSources: [],
         maxTurns: 1,
         includePartialMessages: true,
+        spawnClaudeCodeProcess: (opts) => (child = spawner({ sid })(opts)),
         ...(model ? { model } : {}),
-        ...(local ? { env: localEnv(local.baseUrl, model) } : {}),
+        ...(local ? { env: localEnv(proxyUrl(sid, FAKE_LOCAL_URL || local.baseUrl), model) } : { env: claudeEnv() }),
       },
     });
     let out = null;
     for await (const m of q) {
+      if (turn?.ended) break;
       tracker?.on(m);
       if (m.type === "result" && m.subtype === "success" && !m.is_error) out = String(m.result ?? "").trim();
     }
-    return out || null;
+    return timedOut ? null : out || null;
   } catch {
     return null;
+  } finally {
+    clearTimeout(timer);
+    if (turn?.prepQuery?.close === stop) turn.prepQuery = null;
+    proxyAbort(sid);
   }
 }
 
@@ -2030,45 +2470,75 @@ async function handleUserMessage(msg) {
   const escalated = !local && msg.escalated === true;
   const key = sessionKey(msg.thread || "default", local ? "local" : "claude", escalated);
   const model = typeof msg.model === "string" && msg.model ? msg.model : null;
-  currentId = msg.id;
+  const artifact = !local && msg.artifact?.id ? { id: String(msg.artifact.id), cap: Number(msg.artifact.cap) || DEFAULT_CREDIT_CAP } : null;
+  await proxyReady;
+  // The UI sends one turn at a time; a new one while another runs means the UI gave up on that one.
+  if (current && !current.ended) {
+    const old = current;
+    dlog(`turn_superseded turn=${old.id} by=${msg.id}`);
+    markEnded(old, "superseded");
+    sendRaw({ type: "turn_ended", id: old.id, reason: "superseded" });
+    if (old.s && !old.s.closed && old.s.busy) closeSession(old.s, "superseded");
+  }
+  const t = newTurn(msg, { local, artifact, model });
+  current = t;
   // An escalation always starts fresh (a leftover from an interrupted one is dropped).
   if (escalated && sessions.get(key)) closeSession(sessions.get(key));
   let s = sessions.get(key);
-  const sessionWasLive = !!s;
   let resume = msg.resume;
+  // Still answering an earlier turn (stopped, or wedged): never queue behind it. Close that
+  // process and continue the thread in a new one, resumed from the session it had.
+  if (s && s.busy) {
+    dlog(`session_busy key=${key} session=${s.sid} turn=${s.turn?.id ?? "-"} -> reopen`);
+    resume = s.sessionId || resume;
+    closeSession(s, "busy");
+    s = undefined;
+  }
+  const sessionWasLive = !!s;
   let fullText = msg.fullText ?? msg.text;
+  let retryText = typeof msg.retryText === "string" ? msg.retryText : null;
   let useFull = !s && !resume;
   if (msg.compact) {
     // Shown as the turn's first step, with its own token count.
+    const budget = local ? SUMMARY_MS.local : SUMMARY_MS.claude;
+    t.prepUntil = Date.now() + budget + 5000;
     const step = { sid: "compact", kind: "tool", tool: "compact", label: "Summarizing earlier messages…", status: "running", startedAt: Date.now() };
-    send({ type: "step", id: msg.id, step });
-    const tracker = makeTracker((o) => o.type === "usage" && send({ ...o, id: msg.id, phase: "compact" }));
-    const summary = await summarize({ ...msg.compact, local: msg.compact.local ? local : null }, tracker);
-    send({ type: "step", id: msg.id, step: { ...step, label: summary ? "Summarized earlier messages" : "Could not summarize earlier messages", status: summary ? "done" : "error", endedAt: Date.now() } });
+    emit(t, { type: "step", step });
+    const tracker = makeTracker((o) => o.type === "usage" && emit(t, { ...o, phase: "compact" }));
+    const summary = await summarize({ ...msg.compact, local: msg.compact.local ? local : null }, tracker, SUMMARY_SYSTEM, { timeoutMs: budget, turn: t });
+    if (t.ended) return;
+    emit(t, { type: "step", step: { ...step, label: summary ? "Summarized earlier messages" : "Could not summarize earlier messages", status: summary ? "done" : "error", endedAt: Date.now() } });
     if (summary) {
-      send({ type: "compacted", id: msg.id, summary, backend: local ? "local" : "claude" });
+      emit(t, { type: "compacted", summary, backend: local ? "local" : "claude" });
       if (s) closeSession(s);
       s = undefined;
       resume = null;
       useFull = true;
       fullText = fullText.replace(SUMMARY_SLOT, summary);
+      retryText = retryText?.replace(SUMMARY_SLOT, summary) ?? null;
     } else {
       fullText = fullText.replace(SUMMARY_SLOT, "(summary unavailable)");
+      retryText = retryText?.replace(SUMMARY_SLOT, "(summary unavailable)") ?? null;
     }
   }
   if (msg.recap && fullText.includes(RECAP_SLOT)) {
     // The local model recaps the thread for Claude (free); Claude gets the recap, not the transcript.
+    // Best effort, on a short budget: a slow local model must never hold up the Claude turn.
+    t.prepUntil = Date.now() + RECAP_MS + 5000;
     const step = { sid: "recap", kind: "tool", tool: "recap", label: "Recapping the thread (local model)…", status: "running", startedAt: Date.now() };
-    send({ type: "step", id: msg.id, step });
+    emit(t, { type: "step", step });
     const baseUrl = typeof msg.recap.baseUrl === "string" ? msg.recap.baseUrl : "http://localhost:11434";
-    const recap = await summarize({ transcript: msg.recap.transcript, model: msg.recap.model, local: { baseUrl } }, null, RECAP_SYSTEM);
-    send({ type: "step", id: msg.id, step: { ...step, label: recap ? "Recapped the thread (local model)" : "Could not recap the thread", status: recap ? "done" : "error", endedAt: Date.now() } });
+    const recap = await summarize({ transcript: msg.recap.transcript, model: msg.recap.model, local: { baseUrl } }, null, RECAP_SYSTEM, { timeoutMs: RECAP_MS, turn: t });
+    if (t.ended) return;
+    emit(t, { type: "step", step: { ...step, label: recap ? "Recapped the thread (local model)" : "No recap (the local model was too slow); using the last messages", status: recap ? "done" : "error", endedAt: Date.now() } });
     fullText = fullText.replace(RECAP_SLOT, recap ?? "(recap unavailable; see the last messages below)");
     if (!useFull) msg.text = fullText;
   }
+  if (t.ended) return;
   const think = msg.think === true && !local;
-  const artifact = !local && msg.artifact?.id ? { id: String(msg.artifact.id), cap: Number(msg.artifact.cap) || DEFAULT_CREDIT_CAP } : null;
-  // A thread's session was opened for the other mode (chat vs artifact): reopen it with the right tools.
+  // The thread's session was opened for the other mode (chat vs artifact) or is gone: reopen it.
+  s = s && !s.closed ? s : sessions.get(key);
+  if (s && (s.closed || s.busy)) s = undefined;
   if (s && !!s.artifact !== !!artifact) {
     closeSession(s);
     s = undefined;
@@ -2086,27 +2556,82 @@ async function handleUserMessage(msg) {
     s.think = think;
     s.q.setMaxThinkingTokens?.(think ? THINK_BUDGET : 0).catch(() => {});
   }
-  s.retryModel = !think && typeof msg.retryModel === "string" && msg.retryModel ? msg.retryModel : null;
-  s.retried = false;
-  s.turnText = msg.text;
-  s.tier = typeof msg.tier === "string" ? msg.tier : null;
+  t.retryModel = !think && typeof msg.retryModel === "string" && msg.retryModel ? msg.retryModel : null;
+  t.tier = typeof msg.tier === "string" ? msg.tier : null;
   s.web = msg.web === true;
-  s.lastUsed = Date.now();
-  s.text = "";
-  s.questionAsked = false;
-  s.lastInput = null;
-  resetTurnLimits(msg.text, !!artifact);
   s.credits = { calls: 0, units: 0, spent: 0, jobs: [], allowed: artifact?.cap ?? 0 };
-  currentSession = s;
-  const turn = (t) => ({ type: "user", message: { role: "user", content: [{ type: "text", text: t }] }, parent_tool_use_id: null });
-  s.pendingFull = turn(fullText);
-  s.pending = useFull ? s.pendingFull : turn(msg.text);
+  const turn = (x) => ({ type: "user", message: { role: "user", content: [{ type: "text", text: x }] }, parent_tool_use_id: null });
+  t.pendingFull = turn(fullText);
+  t.retryFull = retryText ? turn(retryText) : t.pendingFull;
+  s.pending = useFull ? t.pendingFull : turn(msg.text);
+  t.diag.sentChars = (useFull ? fullText.length : msg.text.length) + SYSTEM_PROMPT.length + 12000;
+  t.phase = "model";
+  t.modelStartedAt = Date.now();
   dlog(
-    `turn_start turn=${msg.id} thread=${key} session=${sessionWasLive ? "live" : resume ? "resume" : "fresh"} ` +
-      `sent=${useFull ? "fullText" : "text"} sentChars=${useFull ? fullText.length : msg.text.length} textChars=${msg.text.length} fullTextChars=${fullText.length} compacted=${!!msg.compact}`,
+    `turn_start turn=${msg.id} thread=${key} session=${sessionWasLive ? "live" : resume ? "resume" : "fresh"} sid=${s.sid} backend=${local ? "local" : "claude"} model=${model ?? "-"} ` +
+      `sent=${useFull ? "fullText" : "text"} sentChars=${useFull ? fullText.length : msg.text.length} textChars=${msg.text.length} fullTextChars=${fullText.length} compacted=${!!msg.compact} num_ctx=${t.numCtx ?? "-"}`,
   );
-  s.queue.push(msg.id);
+  attach(t, s);
   s.turns.push(s.pending);
+}
+
+// ---- One-shot completions (no tools): the Claude side of the organize pipeline ----
+// {type:"complete_start", job, system, prompt, model} -> {type:"complete_done", job, ok, text?, error?}
+// Claude only (local steps call Ollama from Rust directly). Own watchdog: first event 60 s, then 45 s.
+const completions = new Map();
+function startCompletion(msg) {
+  const { job } = msg;
+  const sid = `cmp${++sessionSeq}`;
+  const entry = { q: null, child: null, done: false, last: Date.now(), first: 0, started: Date.now() };
+  completions.set(job, entry);
+  const finish = (r) => {
+    if (entry.done) return;
+    entry.done = true;
+    clearInterval(entry.timer);
+    completions.delete(job);
+    try {
+      entry.q?.close?.();
+    } catch {
+      /* gone */
+    }
+    if (!r.ok) killChild({ sid, child: entry.child });
+    dlog(`complete_done job=${job} ok=${r.ok} ms=${Date.now() - entry.started}${r.ok ? ` chars=${r.text.length}` : ` error="${r.error}"`}`);
+    send({ type: "complete_done", job, ...r });
+  };
+  entry.timer = setInterval(() => {
+    const limit = entry.first ? entry.last + IDLE_MS : entry.started + FIRST_EVENT_MS.claude;
+    if (Date.now() > limit) finish({ ok: false, error: entry.first ? `no activity for ${IDLE_MS / 1000}s` : `no reply within ${FIRST_EVENT_MS.claude / 1000}s` });
+  }, 1000);
+  entry.cancel = () => finish({ ok: false, error: "cancelled", cancelled: true });
+  (async () => {
+    try {
+      entry.q = query({
+        prompt: String(msg.prompt ?? ""),
+        options: {
+          systemPrompt: { type: "custom", prompt: String(msg.system ?? "") },
+          tools: [],
+          allowedTools: [],
+          permissionMode: "default",
+          settingSources: [],
+          maxTurns: 1,
+          includePartialMessages: true,
+          spawnClaudeCodeProcess: (opts) => (entry.child = spawner({ sid })(opts)),
+          env: { ...claudeEnv(), CLAUDE_CODE_MAX_RETRIES: "2" },
+          ...(typeof msg.model === "string" && msg.model ? { model: msg.model } : {}),
+        },
+      });
+      let out = null;
+      for await (const m of entry.q) {
+        if (entry.done) return;
+        entry.last = Date.now();
+        if (m.type === "stream_event" && !entry.first) entry.first = Date.now();
+        if (m.type === "result") out = m.subtype === "success" && !m.is_error ? { ok: true, text: String(m.result ?? "") } : { ok: false, error: `Claude could not answer (${m.subtype})` };
+      }
+      finish(out ?? { ok: false, error: "Claude stopped without a result" });
+    } catch (e) {
+      finish({ ok: false, error: e?.message ?? String(e) });
+    }
+  })();
 }
 
 const rl = createInterface({ input: process.stdin });
@@ -2123,42 +2648,62 @@ rl.on("line", (line) => {
     // still end, with an error the UI shows.
     handleUserMessage(msg).catch((e) => {
       console.error(`[sidecar] could not start turn ${msg.id}: ${e?.stack ?? e}`);
-      if (currentId === msg.id) failTurn(`Claude could not start: ${e?.message ?? e}`);
+      if (current?.id === msg.id) failTurn(current, "error", `Claude could not start: ${e?.message ?? e}`, { noRetry: true });
       else send({ type: "error", id: msg.id, message: `Claude could not start: ${e?.message ?? e}` });
     });
   } else if (msg.type === "oneshot_start") {
     startOneshot(msg);
   } else if (msg.type === "memory_start") {
     startMemory(msg);
+  } else if (msg.type === "complete_start") {
+    startCompletion(msg);
+  } else if (msg.type === "complete_cancel") {
+    completions.get(msg.job)?.cancel();
   } else if (msg.type === "oneshot_cancel") {
     cancelOneshot(msg.job);
   } else if (msg.type === "credit_answer") {
     pendingCredit.get(msg.reqId)?.(msg.allow === true);
   } else if (msg.type === "spritecook_balance") {
     sendBalance();
-  } else if (msg.type === "interrupt") {
+  } else if (msg.type === "ping") {
+    send({ type: "pong", n: msg.n ?? null });
+  } else if (msg.type === "interrupt" || msg.type === "abort_turn") {
+    // interrupt = the Stop button (the UI has already ended the turn); hard = Retry after a stall;
+    // abort_turn = the app's own watchdog gave up on that turn.
+    const t = msg.type === "abort_turn" ? (current?.id === msg.id ? current : null) : current;
     denyPendingCredits();
-    const s = currentSession;
-    s?.q.interrupt?.().catch(() => {});
-    // hard (Retry after a stall): the session may be wedged, so close it; the thread's next
-    // message resumes it from the saved session id in a fresh process.
-    if (msg.hard && s) {
-      closeSession(s);
-      currentId = null;
-      currentSession = null;
+    if (!t) return;
+    const s = t.s;
+    const why = msg.type === "abort_turn" ? "aborted" : msg.hard ? "interrupted-hard" : "interrupted";
+    markEnded(t, why);
+    sendRaw({ type: "turn_ended", id: t.id, reason: why });
+    if (!s || s.closed) return;
+    if (msg.hard || msg.type === "abort_turn") {
+      closeSession(s, why);
+      return;
     }
+    s.q.interrupt?.().catch(() => {});
+    // A session that does not settle after the interrupt is wedged: close it, so the thread's next
+    // message gets a working process (resumed from the saved session).
+    setTimeout(() => {
+      if (s.busy && !s.closed && s.turn === t) closeSession(s, "wedged");
+    }, 8000).unref?.();
   } else if (msg.type === "reset_thread") {
     // Every backend's session of that thread.
     for (const s of [...sessions.values()].filter((x) => x.key.startsWith(`${msg.thread}#`))) {
-      closeSession(s);
-      if (currentSession === s) {
-        currentId = null;
-        currentSession = null;
+      if (s.turn && !s.turn.ended) {
+        const t = s.turn;
+        markEnded(t, "reset");
+        sendRaw({ type: "turn_ended", id: t.id, reason: "reset" });
       }
+      closeSession(s, s.busy ? "reset" : "close");
     }
   } else if (msg.type === "tool_response") {
     const pending = pendingToolReplies.get(msg.reqId);
-    if (!pending) return;
+    if (!pending) {
+      dlog(`tool_response_late req=${msg.reqId} (after its timeout; dropped)`);
+      return;
+    }
     clearTimeout(pending.timer);
     pendingToolReplies.delete(msg.reqId);
     if (msg.error) pending.reject(new Error(msg.error));
@@ -2172,8 +2717,12 @@ rl.on("line", (line) => {
 rl.on("close", () => {
   for (const s of [...sessions.values()]) closeSession(s);
   for (const job of [...oneshots.keys()]) cancelOneshot(job);
+  for (const c of [...completions.values()]) c.cancel();
   setTimeout(() => process.exit(0), 200);
 });
 
 console.error(`[sidecar] started: node ${process.version}, cwd ${process.cwd()}, claude ${CLAUDE_EXE || "(SDK default)"}`);
-send({ type: "ready" });
+proxyReady.then(() => {
+  dlog(`local_proxy port=${proxyPort || "(off)"}`);
+  send({ type: "ready" });
+});

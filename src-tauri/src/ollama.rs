@@ -784,6 +784,154 @@ impl OllamaState {
     }
 }
 
+// ---------- structured calls (the organize pipeline) and keeping the model warm ----------
+
+/** How long Dreamer asks Ollama to keep the chat model loaded after a request of its own. */
+pub const KEEP_ALIVE: &str = "30m";
+
+/// Why a structured call failed: the model went silent (a stall) or it errored / returned nonsense.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LlmError {
+    Stalled(String),
+    Failed(String),
+}
+
+impl std::fmt::Display for LlmError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LlmError::Stalled(m) | LlmError::Failed(m) => f.write_str(m),
+        }
+    }
+}
+
+/// Watchdog limits of one structured call.
+#[derive(Clone, Copy, Debug)]
+pub struct ChatLimits {
+    /// Until the first streamed chunk (model load + reading the prompt).
+    pub first: Duration,
+    /// Between chunks after that.
+    pub idle: Duration,
+    /// The whole call.
+    pub total: Duration,
+}
+
+impl Default for ChatLimits {
+    fn default() -> Self {
+        ChatLimits { first: Duration::from_secs(90), idle: Duration::from_secs(45), total: Duration::from_secs(240) }
+    }
+}
+
+/// The streamed body of /api/chat: NDJSON lines with `message.content` pieces, then `done`.
+/// Returns the whole content. Every read waits at most 1 s, so the limits are checked as it goes.
+fn read_chat_stream(r: &mut Resp, limits: &ChatLimits, started: Instant, cancel: &AtomicBool) -> std::result::Result<String, LlmError> {
+    let mut buf: Vec<u8> = Vec::new();
+    let mut chunk = [0u8; 8192];
+    let mut content = String::new();
+    let mut last = Instant::now();
+    let mut got_any = false;
+    loop {
+        if cancel.load(Ordering::SeqCst) {
+            return Err(LlmError::Failed("cancelled".into()));
+        }
+        let now = Instant::now();
+        if now.duration_since(started) > limits.total {
+            return Err(LlmError::Stalled(format!("the model did not finish within {}s", limits.total.as_secs())));
+        }
+        if !got_any && now.duration_since(started) > limits.first {
+            return Err(LlmError::Stalled(format!("no reply from the local model within {}s", limits.first.as_secs())));
+        }
+        if got_any && now.duration_since(last) > limits.idle {
+            return Err(LlmError::Stalled(format!("the local model went silent for {}s", limits.idle.as_secs())));
+        }
+        match r.body.read(&mut chunk) {
+            Ok(0) => return Err(LlmError::Failed("the local model's server closed the connection".into())),
+            Ok(n) => {
+                buf.extend_from_slice(&chunk[..n]);
+                while let Some(i) = buf.iter().position(|b| *b == b'\n') {
+                    let line: Vec<u8> = buf.drain(..=i).collect();
+                    let Ok(v) = serde_json::from_slice::<Value>(&line) else { continue };
+                    if let Some(e) = v.get("error").and_then(Value::as_str) {
+                        return Err(LlmError::Failed(e.to_string()));
+                    }
+                    let piece = v.pointer("/message/content").and_then(Value::as_str).unwrap_or_default();
+                    // Thinking chunks (if a model thinks anyway) count as activity, not content.
+                    if !piece.is_empty() || v.pointer("/message/thinking").is_some() {
+                        got_any = true;
+                        last = Instant::now();
+                    }
+                    content.push_str(piece);
+                    if v.get("done").and_then(Value::as_bool) == Some(true) {
+                        return Ok(content);
+                    }
+                }
+            }
+            Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => continue,
+            Err(e) => return Err(LlmError::Failed(format!("reading from the local model failed: {e}"))),
+        }
+    }
+}
+
+/// One /api/chat call with a JSON-schema `format` (Ollama's structured output: the reply always
+/// parses and matches the schema's shape, ids included when they are enums), thinking off, the model
+/// kept warm. Streamed, so a silent model is caught by `limits`.
+pub fn chat_json(model: &str, system: &str, user: &str, schema: &Value, temperature: f64, limits: &ChatLimits, cancel: &AtomicBool) -> std::result::Result<Value, LlmError> {
+    let addr = host().addr;
+    let body = json!({
+        "model": model,
+        "messages": [{ "role": "system", "content": system }, { "role": "user", "content": user }],
+        "stream": true,
+        "format": schema,
+        "think": false,
+        "keep_alive": KEEP_ALIVE,
+        "options": { "temperature": temperature, "top_p": 0.8, "top_k": 20, "num_predict": 4096 },
+    });
+    let started = Instant::now();
+    let mut r = request(&addr, "POST", "/api/chat", Some(&body), Some(Duration::from_secs(1))).map_err(|e| LlmError::Failed(format!("the local model's server is not reachable ({e})")))?;
+    if r.status != 200 {
+        let mut text = String::new();
+        let _ = r.body.read_to_string(&mut text);
+        let v: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+        return Err(LlmError::Failed(format!("Ollama answered {}: {}", r.status, error_text(&v, "request failed"))));
+    }
+    let content = read_chat_stream(&mut r, limits, started, cancel)?;
+    let trimmed = content.trim();
+    serde_json::from_str::<Value>(trimmed).map_err(|e| LlmError::Failed(format!("the reply was not valid JSON ({e}; {} chars)", trimmed.len())))
+}
+
+/// Loads `model` (if it isn't) and keeps it loaded for KEEP_ALIVE: an empty /api/generate. Runs on
+/// its own thread; never blocks the caller. Chat requests through the Anthropic API reset Ollama's
+/// expiry to its default (5 minutes), so this also runs after local turns.
+pub fn warm(model: &str) {
+    if model.is_empty() || is_cloud(model) {
+        return;
+    }
+    let (addr, model) = (host().addr, model.to_string());
+    std::thread::spawn(move || {
+        let t = Instant::now();
+        let r = json_call(&addr, "POST", "/api/generate", Some(&json!({ "model": model, "keep_alive": KEEP_ALIVE })), Duration::from_secs(180));
+        crate::sidecar_log::line(&format!("ollama warm {model}: {} in {}ms", match &r { Ok((c, _)) => format!("HTTP {c}"), Err(e) => format!("failed ({e})") }, t.elapsed().as_millis()));
+    });
+}
+
+static LAST_WARM: Mutex<Option<Instant>> = Mutex::new(None);
+
+/// Warms the configured local model unless that happened within `gap` (window focus, app start).
+pub fn warm_if_stale(app: &AppHandle, gap: Duration) {
+    use tauri::Manager;
+    let state = app.state::<crate::state::AppState>();
+    let model = crate::sidecar::local_variant(&state);
+    if model.is_empty() {
+        return;
+    }
+    if let Ok(mut last) = LAST_WARM.lock() {
+        if last.is_some_and(|t| t.elapsed() < gap) {
+            return;
+        }
+        *last = Some(Instant::now());
+    }
+    warm(&model);
+}
+
 /// One pull progress line -> (status text, completed, total).
 pub fn parse_pull_line(line: &str) -> Option<(String, u64, u64)> {
     let v: Value = serde_json::from_str(line.trim()).ok()?;
@@ -964,7 +1112,11 @@ pub fn spawn_auto_setup(app: &AppHandle) {
                 m.clone()
             }
         };
-        let _ = state.ollama.status(&LocalCfg { model: model.clone(), ..cfg }); // refreshes the cache chat turns read
+        let st = state.ollama.status(&LocalCfg { model: model.clone(), ..cfg }); // refreshes the cache chat turns read
+        // Pre-warm: the first message then doesn't pay the model load (only when the window shows).
+        if st.ready && app.get_webview_window("main").is_some_and(|w| w.is_visible().unwrap_or(false)) {
+            warm_if_stale(&app, Duration::from_secs(0));
+        }
         let _ = app.emit("ollama-setup", json!({ "type": "detected", "model": model, "switched": matches!(result, AutoSetup::Switched(_)) }));
     });
 }

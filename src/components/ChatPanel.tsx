@@ -483,9 +483,17 @@ export function ChatPanel({ ws, panels }: { ws: Workspace; panels: Pick<ReturnTy
               onRedo={(backend) => {
                 const user = chat.messages.find((x) => x.id === `${m.id}-u`);
                 const req = m.organizeReq ?? { scope: m.organize!.plan.scope, instruction: user?.text ?? "" };
-                runOrganize({ ...req, backend }, `${user?.text ?? "Organize"} (${backend === "claude" ? "with Claude" : "locally"})`);
+                // Redo makes the whole plan again (not only the rest of a partial one).
+                runOrganize({ scope: req.scope, instruction: req.rest ? "" : req.instruction, backend }, `${req.rest ? "Organize" : user?.text ?? "Organize"} (${backend === "claude" ? "with Claude" : "locally"})`);
               }}
-              onRevise={(ask) => runOrganize({ scope: m.organize!.plan.scope, instruction: ask, backend: m.backend ?? null }, `Revise the plan: ${ask}`, reviseText(m.organize!.plan, ask))}
+              onRevise={(ask) => runOrganize({ scope: m.organize!.plan.scope, instruction: ask, backend: m.backend ?? null, prior: m.organize!.plan }, `Revise the plan: ${ask}`, reviseText(m.organize!.plan, ask))}
+              onFinish={(backend) =>
+                runOrganize(
+                  { scope: m.organize!.plan.scope, instruction: "", backend, prior: m.organize!.plan, rest: true },
+                  backend === "claude" ? "Finish the plan with Claude" : "Retry the rest locally",
+                  `/organize: place the ${m.organize!.plan.unplaced?.length ?? 0} unplaced cards into the plan's frames.`,
+                )
+              }
             />
           )}
           </Fragment>
@@ -915,6 +923,7 @@ const FALLBACK_TEXT: Record<string, string> = {
   empty: "The local model gave no answer.",
   tool: "A tool call by the local model failed.",
   vision: "The local model can't look at images.",
+  stalled: "The local model stopped responding (it was retried once).",
 };
 
 const REASON_TEXT: Record<string, string> = { think: "Think harder", web: "web", retry: "retried with Claude", unavailable: "local model unavailable", size: "large scope" };

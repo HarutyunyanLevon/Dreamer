@@ -277,6 +277,21 @@ export function simulateOrganize(s0: Structure, cards: Card[], plan: OrganizePla
       for (const [id, p] of Object.entries(pos)) next[id] = { ...next[id], ...p };
       setCanvas(k, { ...c, cards: next });
       list.forEach((id) => arranged.add(id));
+    } else if (op.op === "place") {
+      // Explicit positions (the organize pipeline's own layout); pinned cards never move.
+      const k = ref(op.folder);
+      if (!on || k === undefined) return;
+      const c = s.canvases[k];
+      const next = { ...c.cards };
+      let n = 0;
+      for (const [id, p] of Object.entries(op.positions)) {
+        if (!c.cards[id] || c.cards[id].pinned) continue;
+        next[id] = { ...next[id], x: p.x, y: p.y };
+        arranged.add(id);
+        n++;
+      }
+      if (!n) return;
+      setCanvas(k, { ...c, cards: next });
     } else if (op.op === "retag") {
       const card = byId.get(op.id);
       if (!on || !card) return;

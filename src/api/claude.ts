@@ -67,7 +67,10 @@ export type Backend = "local" | "claude";
 /** Why a turn that would have been local went to Claude. */
 export type RouteReason = "think" | "web" | "retry" | "unavailable" | "size";
 /** Why a local turn offers "Retry with Claude". */
-export type LocalFallback = "error" | "empty" | "tool" | "vision";
+/** Why a local turn offers "Retry with Claude". "stalled": it stopped responding (after its automatic local retry). */
+export type LocalFallback = "error" | "empty" | "tool" | "vision" | "stalled";
+/** How a turn ended (diagnostics; the UI keys off isError / fallback). */
+export type EndReason = "done" | "empty" | "error" | "stalled" | "limit" | "partial";
 
 /** The local chat model (Ollama) as the setup screen sees it. */
 export interface LocalStatus {
@@ -142,14 +145,20 @@ export type ClaudeEvent =
   | { type: "memory_progress"; id: string; active: boolean; input: number; output: number }
   /** `item`: the handoff gap item this question settles (the gap interview only). */
   | { type: "question"; id: string; turnId?: string | null; question: string; choices: string[]; item?: string }
-  | { type: "message_done"; id: string; text: string; sessionId?: string; isError?: boolean; inputTokens?: number; usage?: TokenUsage; durationMs?: number; contextTokens?: number; contextWindow?: number; model?: string; tier?: ModelTier; retried?: boolean; retriedFrom?: string; backend?: Backend; escalated?: boolean; fallback?: LocalFallback; artifact?: { id: string; credits: number; paidCalls: number; jobs: string[]; spritecook: boolean } }
+  | { type: "message_done"; id: string; text: string; sessionId?: string; isError?: boolean; inputTokens?: number; usage?: TokenUsage; durationMs?: number; contextTokens?: number; contextWindow?: number; model?: string; tier?: ModelTier; retried?: boolean; retriedFrom?: string; backend?: Backend; escalated?: boolean; fallback?: LocalFallback; endReason?: EndReason; attempt?: number; localRetried?: boolean; artifact?: { id: string; credits: number; paidCalls: number; jobs: string[]; spritecook: boolean } }
   /** Sent before a turn starts: where it runs. `note`: why the local model wasn't usable (reason "unavailable"). */
   | { type: "route"; id: string; backend: Backend; model: string; escalated: boolean; reason?: RouteReason | null; note?: string | null }
   /** A fast-model turn failed or came back empty and was sent again on the main model. */
-  | { type: "model_note"; id: string; model: string; retried: boolean; from?: string }
+  | { type: "model_note"; id: string; model: string; retried?: boolean; from?: string; localRetry?: boolean; reason?: string }
+  /** The sidecar is alive and still on turn `id` (a heartbeat every ~10 s; not model activity). */
+  | { type: "alive"; id: string; phase?: string; idleMs?: number }
+  /** Drop the text streamed so far for turn `id` (it is being retried in a fresh session). */
+  | { type: "text_reset"; id: string }
+  /** The sidecar ended turn `id` without an answer (Stop, superseded, reset): nothing more comes for it. */
+  | { type: "turn_ended"; id: string; reason: string }
   /** The thread was summarized before turn `id` and continues in a fresh session. */
   | { type: "compacted"; id: string; summary: string; backend?: Backend }
-  | { type: "error"; id: string | null; message: string }
+  | { type: "error"; id: string | null; message: string; endReason?: EndReason }
   | { type: "search"; id: string; query: string; results: SearchResultRef[] }
   | { type: "link_proposal"; id: string | null; slug: string; from: string; to: string; label?: string; reason?: string }
   | { type: "edit_proposal"; id: string | null; slug: string; card: string; title: string }
@@ -179,7 +188,7 @@ export interface ClaudeApi {
   /** `thread` = card id or "project"; `resume` = that thread's saved Claude session id. */
   /** `web` = this turn may use WebSearch/WebFetch; `selection` = card ids selected on the canvas; `folder` = the folder open on the canvas. */
   /** `resumeLocal` = the thread's local-model session id; `escalate: "retry"` = Retry with Claude. */
-  send(slug: string, id: string, text: string, context?: string, thread?: string, resume?: string, opts?: { web?: boolean; selection?: string[]; folder?: string | null; memory?: boolean; question?: string; think?: boolean; pin?: ModelTier | null; resumeLocal?: string; escalate?: "retry"; organize?: "folder" | "project"; organizeBackend?: Backend | null; artifact?: string | null; recapFrom?: string | null }): Promise<void>;
+  send(slug: string, id: string, text: string, context?: string, thread?: string, resume?: string, opts?: { web?: boolean; selection?: string[]; folder?: string | null; memory?: boolean; question?: string; think?: boolean; pin?: ModelTier | null; resumeLocal?: string; escalate?: "retry"; organize?: "folder" | "project"; organizeBackend?: Backend | null; organizeInstruction?: string | null; organizePrior?: OrganizePlanData | null; organizeRest?: boolean; artifact?: string | null; recapFrom?: string | null }): Promise<void>;
   /** `memory: false` skips the memory pass after this turn (fixed chip commands); `question` = the question this text answers. */
   /** `hard`: also close the thread's Claude session (Retry after a stall); the next message resumes it. */
   interrupt(opts?: { hard?: boolean }): Promise<void>;

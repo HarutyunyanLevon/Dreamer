@@ -42,7 +42,30 @@ pub struct ClaudeState {
     pub memory: Mutex<crate::memory::Queue>,
     /// Router hysteresis per thread key. See router.rs.
     router: Mutex<std::collections::HashMap<String, crate::router::RouterState>>,
+    /// Sidecar turns in flight: when the sidecar last said anything about each (the app's watchdog).
+    watch: Mutex<std::collections::HashMap<String, Watch>>,
+    /// Turns the app's watchdog gave up on: anything the sidecar still sends for them is dropped.
+    dead: Mutex<VecDeque<String>>,
+    /// The last ping the watchdog sent (number, when) and whether its pong came back.
+    ping: Mutex<Option<(u64, Instant, bool)>>,
+    /// One-shot completions waiting for the sidecar's complete_done (the Claude side of organize).
+    completions: Mutex<std::collections::HashMap<String, std::sync::mpsc::Sender<Value>>>,
+    /// Organize pipelines running in Rust, by turn id (Stop cancels them).
+    pipelines: Mutex<std::collections::HashMap<String, Arc<AtomicBool>>>,
 }
+
+/// One sidecar turn the app's watchdog keeps an eye on.
+struct Watch {
+    generation: u64,
+    last: Instant,
+}
+
+/// The sidecar sends a heartbeat for the live turn every 10 s and has its own turn watchdog
+/// (first model event 90 s local / 60 s Claude, then 45 s between events, tools on their own
+/// limits). This one only fires when the sidecar itself has gone quiet about a turn: then the turn
+/// fails here, the sidecar is told to drop it, and a sidecar that does not answer a ping is restarted.
+const SIDECAR_SILENCE: Duration = Duration::from_secs(40);
+const PING_GRACE: Duration = Duration::from_secs(10);
 
 struct PendingCtx {
     /// The sidecar generation this turn was sent to; it fails with that sidecar.
@@ -55,6 +78,8 @@ struct PendingCtx {
     /// A one-turn Claude visit from a local thread: its fresh session's tokens and context
     /// snapshot are not the thread's, so they aren't recorded.
     escalated: bool,
+    /// It ran on the local model (a failure offers "Retry with Claude").
+    local: bool,
 }
 
 struct MemoryTurn {
@@ -71,7 +96,24 @@ impl ClaudeState {
 
 impl Default for ClaudeState {
     fn default() -> Self {
-        ClaudeState { sidecar: Mutex::new(None), generation: AtomicU64::new(0), app: OnceLock::new(), active_slug: Mutex::new("inbox".into()), selection: Mutex::new(Vec::new()), folder: Mutex::new(None), setup: Default::default(), handoff: Mutex::new(None), pending_ctx: Default::default(), memory: Default::default(), router: Default::default() }
+        ClaudeState {
+            sidecar: Mutex::new(None),
+            generation: AtomicU64::new(0),
+            app: OnceLock::new(),
+            active_slug: Mutex::new("inbox".into()),
+            selection: Mutex::new(Vec::new()),
+            folder: Mutex::new(None),
+            setup: Default::default(),
+            handoff: Mutex::new(None),
+            pending_ctx: Default::default(),
+            memory: Default::default(),
+            router: Default::default(),
+            watch: Default::default(),
+            dead: Default::default(),
+            ping: Mutex::new(None),
+            completions: Default::default(),
+            pipelines: Default::default(),
+        }
     }
 }
 
@@ -189,9 +231,12 @@ pub(crate) fn ensure_started(app: &AppHandle, state: &AppState) -> Result<()> {
         for line in BufReader::new(stdout).lines().map_while(|l| l.ok()) {
             match serde_json::from_str::<Value>(&line) {
                 Ok(msg) => {
-                    // Token counts and thinking text stream many lines per turn: not worth a log line each.
-                    if !matches!(msg.get("type").and_then(Value::as_str), Some("usage" | "thinking_delta")) {
+                    // Token counts, thinking text and heartbeats stream many lines per turn: not worth a log line each.
+                    if !matches!(msg.get("type").and_then(Value::as_str), Some("usage" | "thinking_delta" | "alive" | "pong")) {
                         crate::sidecar_log::line(&format!("<- #{generation} {}", crate::sidecar_log::summary(&msg)));
+                    }
+                    if !seen_by_watchdog(&out_app, &msg) {
+                        continue;
                     }
                     handle_sidecar_message(&out_app, msg);
                 }
@@ -234,6 +279,7 @@ pub(crate) fn ensure_started(app: &AppHandle, state: &AppState) -> Result<()> {
             on_exit(&mon_app, generation, "process exited", None);
             return;
         }
+        watchdog_tick(&mon_app, generation);
     });
 
     *guard = Some(Sidecar { child, stdin, tree, generation, stderr_tail, stderr_done });
@@ -353,6 +399,13 @@ fn fail_in_flight(app: &AppHandle, generation: u64, code: Option<i32>, tail: &[S
         }
         Err(_) => Vec::new(),
     };
+    if let Ok(mut w) = state.claude.watch.lock() {
+        w.retain(|_, x| x.generation != generation);
+    }
+    // Completions waiting on it fail at once (dropping the sender ends their wait).
+    if let Ok(mut c) = state.claude.completions.lock() {
+        c.clear();
+    }
     if restarted && ids.is_empty() {
         return;
     }
@@ -389,6 +442,31 @@ fn handle_sidecar_message(app: &AppHandle, msg: Value) {
             std::thread::spawn(move || crate::memory::on_done(&app, &job, ok));
             return;
         }
+        Some("complete_done") => {
+            let job = msg.get("job").and_then(Value::as_str).unwrap_or_default().to_string();
+            if let Some(tx) = app.state::<AppState>().claude.completions.lock().ok().and_then(|mut m| m.remove(&job)) {
+                let _ = tx.send(msg);
+            }
+            return;
+        }
+        Some("pong") => {
+            if let Ok(mut p) = app.state::<AppState>().claude.ping.lock() {
+                if let Some(p) = p.as_mut() {
+                    p.2 = true;
+                }
+            }
+            return;
+        }
+        // A turn the sidecar ended without an answer the UI waits for (Stop, superseded, reset).
+        Some("turn_ended") => {
+            let state = app.state::<AppState>();
+            if let Some(id) = msg.get("id").and_then(Value::as_str) {
+                if let Ok(mut p) = state.claude.pending_ctx.lock() {
+                    p.remove(id);
+                }
+            }
+            return;
+        }
         // Live activity of a one-shot job (handoff session or memory pass): routed to its own view.
         Some("step" | "usage" | "thinking_delta") if msg.get("job").is_some() => {
             route_job_activity(app, msg);
@@ -397,11 +475,9 @@ fn handle_sidecar_message(app: &AppHandle, msg: Value) {
         _ => {}
     }
     if msg.get("type").and_then(Value::as_str) == Some("tool_request") {
-        let state = app.state::<AppState>();
         let req_id = msg.get("reqId").and_then(Value::as_str).unwrap_or_default().to_string();
         let tool = msg.get("tool").and_then(Value::as_str).unwrap_or_default();
         let input = msg.get("input").cloned().unwrap_or(Value::Null);
-        crate::harness::fault_tool_delay(tool);
         // Artifact tools write into the artifact of the turn's thread (a download may take a while,
         // so they run off the thread that reads the sidecar's output).
         if tool.starts_with("artifact_") {
@@ -421,18 +497,25 @@ fn handle_sidecar_message(app: &AppHandle, msg: Value) {
             });
             return;
         }
-        let result = if tool.starts_with("handoff_") {
-            crate::handoff::run_tool(app, &state, tool, input)
-        } else if matches!(tool, "remember" | "forget") {
-            crate::memory::run_tool(app, &state, tool, input)
-        } else {
-            run_tool(&state, tool, input)
-        };
-        let reply = match result {
-            Ok(result) => json!({ "type": "tool_response", "reqId": req_id, "result": result }),
-            Err(e) => json!({ "type": "tool_response", "reqId": req_id, "error": e.to_string() }),
-        };
-        write_line(&state, &reply);
+        // Off the thread that reads the sidecar's output: a tool that waits on a lock (or writes a
+        // big image reply into stdin) must never stop the stream of every other event.
+        let (app, tool) = (app.clone(), tool.to_string());
+        std::thread::spawn(move || {
+            let state = app.state::<AppState>();
+            crate::harness::fault_tool_delay(&tool);
+            let result = if tool.starts_with("handoff_") {
+                crate::handoff::run_tool(&app, &state, &tool, input)
+            } else if matches!(tool.as_str(), "remember" | "forget") {
+                crate::memory::run_tool(&app, &state, &tool, input)
+            } else {
+                run_tool(&state, &tool, input)
+            };
+            let reply = match result {
+                Ok(result) => json!({ "type": "tool_response", "reqId": req_id, "result": result }),
+                Err(e) => json!({ "type": "tool_response", "reqId": req_id, "error": e.to_string() }),
+            };
+            write_line(&state, &reply);
+        });
         return;
     }
     if msg.get("type").and_then(Value::as_str) == Some("oneshot_done") {
@@ -442,8 +525,136 @@ fn handle_sidecar_message(app: &AppHandle, msg: Value) {
         return;
     }
     record_turn_result(app, &msg);
+    // A local turn's requests reset Ollama's expiry to its default (5 min): keep the model loaded.
+    if msg.get("type").and_then(Value::as_str) == Some("message_done") && msg.get("backend").and_then(Value::as_str) == Some("local") {
+        crate::ollama::warm(&local_variant(&app.state::<AppState>()));
+    }
     let _ = app.emit("claude-event", msg);
 }
+
+/// The local model Dreamer runs (the 64k variant), from the settings; empty when local chat is off.
+pub(crate) fn local_variant(state: &AppState) -> String {
+    let settings = state.ws.lock().ok().and_then(|ws| ws.get_settings().ok()).unwrap_or_default();
+    if !settings.local_chat {
+        return String::new();
+    }
+    crate::ollama::variant_name(&settings.local_model)
+}
+
+/// Bookkeeping for the app's watchdog on every sidecar line. False: the line is about a turn the
+/// watchdog already failed, and is dropped (it must not land on a dead or later turn).
+fn seen_by_watchdog(app: &AppHandle, msg: &Value) -> bool {
+    let state = app.state::<AppState>();
+    let Some(id) = msg.get("id").and_then(Value::as_str) else { return true };
+    if state.claude.dead.lock().map(|d| d.iter().any(|x| x == id)).unwrap_or(false) {
+        crate::sidecar_log::line(&format!("dropped late {} for failed turn {id}", msg.get("type").and_then(Value::as_str).unwrap_or("?")));
+        return false;
+    }
+    if let Ok(mut w) = state.claude.watch.lock() {
+        let terminal = matches!(msg.get("type").and_then(Value::as_str), Some("message_done" | "error" | "turn_ended"));
+        if terminal {
+            w.remove(id);
+        } else if let Some(x) = w.get_mut(id) {
+            x.last = Instant::now();
+        }
+    }
+    true
+}
+
+/// Once a second (from the sidecar's monitor thread): fail turns the sidecar went quiet about, and
+/// restart a sidecar that does not answer a ping.
+fn watchdog_tick(app: &AppHandle, generation: u64) {
+    let state = app.state::<AppState>();
+    let silent: Vec<String> = match state.claude.watch.lock() {
+        Ok(w) => w.iter().filter(|(_, x)| x.generation == generation && x.last.elapsed() > SIDECAR_SILENCE).map(|(id, _)| id.clone()).collect(),
+        Err(_) => return,
+    };
+    for id in &silent {
+        crate::sidecar_log::line(&format!("watchdog: turn {id} silent for {}s; failing it", SIDECAR_SILENCE.as_secs()));
+        if let Ok(mut w) = state.claude.watch.lock() {
+            w.remove(id);
+        }
+        if let Ok(mut d) = state.claude.dead.lock() {
+            d.push_back(id.clone());
+            while d.len() > 64 {
+                d.pop_front();
+            }
+        }
+        let local = state.claude.pending_ctx.lock().ok().and_then(|mut p| p.remove(id)).map(|p| p.local).unwrap_or(false);
+        let text = "Claude's helper stopped responding to this message. Retry to send it again.";
+        let event = if local {
+            json!({ "type": "message_done", "id": id, "text": text, "isError": true, "backend": "local", "fallback": "stalled", "endReason": "stalled" })
+        } else {
+            json!({ "type": "error", "id": id, "message": text, "endReason": "stalled" })
+        };
+        let _ = app.emit("claude-event", event);
+        write_line(&state, &json!({ "type": "abort_turn", "id": id }));
+    }
+    // A ping after a silent turn: no pong in time means the sidecar is wedged, not just one turn.
+    let mut restart = false;
+    let mut send_ping: Option<u64> = None;
+    if let Ok(mut p) = state.claude.ping.lock() {
+        match *p {
+            Some((_, at, false)) if at.elapsed() > PING_GRACE => {
+                restart = true;
+                *p = None;
+            }
+            Some((_, _, true)) if silent.is_empty() => *p = None,
+            _ => {}
+        }
+        if !silent.is_empty() && p.is_none() && !restart {
+            static PINGS: AtomicU64 = AtomicU64::new(0);
+            let n = PINGS.fetch_add(1, Ordering::SeqCst) + 1;
+            *p = Some((n, Instant::now(), false));
+            send_ping = Some(n);
+        }
+    }
+    if let Some(n) = send_ping {
+        write_line(&state, &json!({ "type": "ping", "n": n }));
+    }
+    if restart {
+        crate::sidecar_log::line(&format!("watchdog: sidecar #{generation} did not answer a ping; restarting it"));
+        on_exit(app, generation, "unresponsive", None);
+    }
+}
+
+/// Registers a running organize pipeline (Stop cancels it).
+pub(crate) fn register_pipeline(app: &AppHandle, turn: &str, cancel: Arc<AtomicBool>) {
+    if let Ok(mut m) = app.state::<AppState>().claude.pipelines.lock() {
+        m.insert(turn.to_string(), cancel);
+    }
+}
+
+pub(crate) fn unregister_pipeline(app: &AppHandle, turn: &str) {
+    if let Ok(mut m) = app.state::<AppState>().claude.pipelines.lock() {
+        m.remove(turn);
+    }
+}
+
+/// One Claude completion without tools (the sidecar's complete_start), waited for here. The sidecar
+/// has the watchdog; this only backs it up (and fails when the sidecar dies).
+pub(crate) fn complete(app: &AppHandle, state: &AppState, model: &str, system: &str, prompt: &str) -> std::result::Result<String, String> {
+    ensure_started(app, state).map_err(|e| e.to_string())?;
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let job = format!("cmp{}", SEQ.fetch_add(1, Ordering::SeqCst) + 1);
+    let (tx, rx) = std::sync::mpsc::channel::<Value>();
+    state.claude.completions.lock().map_err(|_| "lock poisoned".to_string())?.insert(job.clone(), tx);
+    write_line(state, &json!({ "type": "complete_start", "job": job, "system": system, "prompt": prompt, "model": model }));
+    let r = rx.recv_timeout(Duration::from_secs(180));
+    if let Ok(mut m) = state.claude.completions.lock() {
+        m.remove(&job);
+    }
+    match r {
+        Ok(v) if v.get("ok").and_then(Value::as_bool) == Some(true) => Ok(v.get("text").and_then(Value::as_str).unwrap_or_default().to_string()),
+        Ok(v) => Err(v.get("error").and_then(Value::as_str).unwrap_or("Claude could not answer").to_string()),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            write_line(state, &json!({ "type": "complete_cancel", "job": job }));
+            Err("no reply from Claude within 180s".into())
+        }
+        Err(_) => Err("Claude's helper stopped".into()),
+    }
+}
+
 
 /// A handoff job's steps/usage go to the handoff panel (handoff-event); a memory pass's usage becomes
 /// the "Updating memory…" line under the chat turn it follows (claude-event memory_progress).
@@ -968,6 +1179,12 @@ pub struct Turn {
     /// An organize turn: scope "folder" | "project", and a backend the user forced ("Redo with
     /// Claude" / "Redo locally"); None = by the number of cards in scope.
     pub organize: Option<(String, Option<crate::router::Backend>)>,
+    /// The organize request's own words (the pipeline's instruction), the plan it continues from
+    /// (a revision, "Retry rest locally", "Finish with Claude") and whether only that plan's
+    /// unplaced cards are assigned.
+    pub organize_instruction: Option<String>,
+    pub organize_prior: Option<Value>,
+    pub organize_rest: bool,
     /// An artifact turn (create, regenerate, a suggestion chip, feedback in the artifact's thread):
     /// the artifact id (= its card id). Always runs on Claude, with SpriteCook and the artifact tools.
     pub artifact: Option<String>,
@@ -1059,25 +1276,41 @@ pub fn send_message(app: &AppHandle, state: &AppState, turn: Turn) -> Result<()>
     if turn.artifact.is_some() {
         route = crate::router::Route { backend: crate::router::Backend::Claude, escalated: false, reason: None };
     }
-    // Organize: small scopes on the local model, big ones (or "Redo with Claude") on Claude.
-    let mut route_note: Option<String> = None;
-    if let Some((scope, forced)) = &turn.organize {
+    // Organize: the chunked pipeline (organize_pipeline.rs), local unless the user asked for Claude
+    // ("Redo with Claude" / "Finish with Claude") or the local model is not usable. Card count no
+    // longer matters: the pipeline works in small batches.
+    let route_note: Option<String> = None;
+    if let Some((_, forced)) = &turn.organize {
         use crate::router::{Backend, Reason, Route};
-        let n = crate::organize::scope_count(state, &turn.slug, turn.folder.as_deref(), scope).unwrap_or(0);
-        let big = n > crate::organize::LOCAL_MAX_CARDS;
         match forced {
             Some(Backend::Claude) if route.backend == Backend::Local => route = Route { backend: Backend::Claude, escalated: true, reason: Some(Reason::Retry) },
             Some(Backend::Local) if route.backend == Backend::Claude && settings.local_chat && local_ready => route = Route { backend: Backend::Local, escalated: false, reason: None },
-            None if big && route.backend == Backend::Local => route = Route { backend: Backend::Claude, escalated: true, reason: Some(Reason::Size) },
-            None if big && route.reason.is_none() => route.reason = Some(Reason::Size),
             _ => {}
-        }
-        if route.reason == Some(Reason::Size) {
-            route_note = Some(format!("{n} cards in scope (over {})", crate::organize::LOCAL_MAX_CARDS));
         }
     }
     let is_local = route.backend == crate::router::Backend::Local;
     let local_model = local.as_ref().and_then(|l| l.variant.clone()).unwrap_or_default();
+    if turn.organize.is_some() {
+        let backend = if is_local { "local" } else { "claude" };
+        let (model, shown) = if is_local { (local_model.clone(), settings.local_model.clone()) } else { (settings.model_chat.clone(), settings.model_chat.clone()) };
+        crate::sidecar_log::line(&format!("route {} kind=organize backend={backend} model={model} escalated={} reason={:?} rest={}", turn.id, route.escalated, route.reason, turn.organize_rest));
+        let _ = app.emit("claude-event", json!({ "type": "route", "id": turn.id, "backend": backend, "model": shown, "escalated": route.escalated, "reason": route.reason, "note": (route.reason == Some(crate::router::Reason::Unavailable)).then(|| local.as_ref().and_then(|l| l.error.clone())).flatten() }));
+        crate::organize_pipeline::spawn(
+            app.clone(),
+            crate::organize_pipeline::Request {
+                turn: turn.id.clone(),
+                slug: turn.slug.clone(),
+                folder: turn.folder.clone(),
+                instruction: turn.organize_instruction.clone().unwrap_or_default(),
+                prior: turn.organize_prior.clone(),
+                rest: turn.organize_rest,
+                backend: route.backend,
+                model,
+                shown_model: shown,
+            },
+        );
+        return Ok(());
+    }
 
     // The first message of a session (or one whose session could not be resumed, or that follows a
     // compaction) carries everything instead; the sidecar picks. A local thread compacts by 64k
@@ -1191,8 +1424,11 @@ pub fn send_message(app: &AppHandle, state: &AppState, turn: Turn) -> Result<()>
         let generation = state.claude.generation.load(Ordering::SeqCst);
         pending.insert(
             turn.id.clone(),
-            PendingCtx { generation, slug: turn.slug.clone(), thread: turn.thread.clone(), ctx: now, memory: turn.memory.then(|| MemoryTurn { user: turn.text.clone(), question: turn.question.clone() }), escalated: route.escalated },
+            PendingCtx { generation, slug: turn.slug.clone(), thread: turn.thread.clone(), ctx: now, memory: turn.memory.then(|| MemoryTurn { user: turn.text.clone(), question: turn.question.clone() }), escalated: route.escalated, local: is_local },
         );
+        if let Ok(mut w) = state.claude.watch.lock() {
+            w.insert(turn.id.clone(), Watch { generation, last: Instant::now() });
+        }
     }
     let model: String = if is_local {
         local_model.clone()
@@ -1236,7 +1472,14 @@ pub fn send_message(app: &AppHandle, state: &AppState, turn: Turn) -> Result<()>
     });
     if is_local {
         let vision = local.as_ref().and_then(|l| l.vision).unwrap_or(false);
-        msg["local"] = json!({ "baseUrl": crate::ollama::base_url(), "vision": vision });
+        msg["local"] = json!({ "baseUrl": crate::ollama::base_url(), "vision": vision, "numCtx": crate::ollama::NUM_CTX });
+        // The automatic local retry runs in a fresh session: the full context plus the thread's
+        // last messages (a fresh session has no history of its own).
+        let retry = match crate::ctx::recent_turns(&file, ESCALATION_RECENT) {
+            Some(r) => format!("{}\n\n[Last messages in this thread]\n{r}\n\n---\n\n{}", parts.join("\n\n"), turn.text),
+            None => full_text.clone(),
+        };
+        msg["retryText"] = json!(retry);
     }
     // A router-picked fast Claude turn that fails or comes back empty is retried once on the main
     // model. Never for local turns: those offer "Retry with Claude" instead.
@@ -1288,6 +1531,12 @@ pub fn sidecar_pid(state: &AppState) -> Option<u32> {
 
 /// `hard`: also close the thread's Claude session (Retry after a stall); its next message resumes it.
 pub fn interrupt(state: &AppState, hard: bool) -> Result<()> {
+    // An organize pipeline running in Rust stops at its next step.
+    if let Ok(m) = state.claude.pipelines.lock() {
+        for c in m.values() {
+            c.store(true, Ordering::SeqCst);
+        }
+    }
     write_line(state, &json!({ "type": "interrupt", "hard": hard }));
     Ok(())
 }

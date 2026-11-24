@@ -35,6 +35,8 @@ function opItems(op: OrganizeOp, plan: OrganizePlanData): string[] {
       return [...op.ids.map(ref), ...(op.to ? [ref(op.to)] : [])];
     case "arrange":
       return op.ids;
+    case "place":
+      return Object.keys(op.positions);
   }
 }
 
@@ -61,6 +63,10 @@ function describe(op: OrganizePlanData["ops"][number], plan: OrganizePlanData, d
       return { text: `New frame ${op.title} in ${folder(op.folder)}` };
     case "arrange":
       return { text: `Re-layout ${folder(op.folder)} as ${LAYOUT_LABEL[op.layout]}`, detail: plural(op.ids.length, "card") };
+    case "place": {
+      const ids = Object.keys(op.positions);
+      return { text: `Lay out ${plural(ids.length, "card")} in their frames`, detail: ids.map(title).join(", ") };
+    }
     case "retag":
       return { text: `Tags on ${title(op.id)}: ${[...op.add.map((t) => `+${t}`), ...op.remove.map((t) => `−${t}`)].join(" ")}` };
   }
@@ -77,6 +83,7 @@ export function OrganizePlanCard({
   onChange,
   onRedo,
   onRevise,
+  onFinish,
 }: {
   message: ChatMessage;
   ws: Workspace;
@@ -84,6 +91,8 @@ export function OrganizePlanCard({
   onChange: (patch: Partial<NonNullable<ChatMessage["organize"]>>) => void;
   onRedo: (backend: Backend) => void;
   onRevise: (text: string) => void;
+  /** A partial plan: place its unplaced cards (on Claude, or locally again). Never runs by itself. */
+  onFinish: (backend: Backend) => void;
 }) {
   const org = message.organize!;
   const { plan, status, checked } = org;
@@ -156,6 +165,21 @@ export function OrganizePlanCard({
         })}
       </ul>
       {plan.kept.length > 0 && <p className="organize-kept">Kept in place (pinned): {plan.kept.map((k) => k.title).join(", ")}</p>}
+      {plan.partial && !!plan.unplaced?.length && (
+        <div className="organize-partial" role="note">
+          <p className="organize-kept">
+            Not placed yet ({plan.unplaced.length}): {plan.unplaced.map((u) => u.title).join(", ")}. Applying lays them out below the frames.
+          </p>
+          <div className="organize-actions">
+            <button type="button" className="chip" disabled={busy || applying} title="Ask Claude to place only these cards into the plan's frames" onClick={() => onFinish("claude")}>
+              Finish with Claude
+            </button>
+            <button type="button" className="chip" disabled={busy || applying} title="Try the local model again for only these cards" onClick={() => onFinish("local")}>
+              Retry rest locally
+            </button>
+          </div>
+        </div>
+      )}
       {!here && <p className="organize-kept">This plan is for another project. Open it to preview and apply.</p>}
       <div className="organize-actions">
         <button type="button" className="btn primary" disabled={!here || busy || applying || nOn === 0} onClick={() => void apply()}>

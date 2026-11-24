@@ -297,6 +297,8 @@ export type OrganizeOp =
   | { op: "move"; ids: string[]; to: string | null; x?: number; y?: number }
   | { op: "create_frame"; tempId: string; folder: string | null; title: string; rect: { x: number; y: number; w: number; h: number } }
   | { op: "arrange"; folder: string | null; ids: string[]; layout: OrganizeLayout }
+  /** Explicit positions (the organize pipeline lays cards out itself). */
+  | { op: "place"; folder: string | null; positions: Record<string, { x: number; y: number }> }
   | { op: "retag"; id: string; add: string[]; remove: string[] };
 /** A propose_organize plan (validated whole; nothing applied until the user does). */
 export interface OrganizePlanData {
@@ -311,6 +313,11 @@ export interface OrganizePlanData {
   kept: { id: string; title: string }[];
   /** Titles of the existing cards / folders / frames the ops name. */
   titles: Record<string, string>;
+  /** A pipeline plan where some cards could not be placed (they are listed in `unplaced`). */
+  partial?: boolean;
+  unplaced?: { id: string; title: string }[];
+  /** The organize pipeline's state (groups, assignments), for "Retry rest locally" / "Finish with Claude". */
+  pipeline?: { groups: { id: string; title: string; purpose: string }[]; backend?: string; problems?: string[] } & Record<string, unknown>;
 }
 
 /** A change Claude proposed for one card (propose_edit). Only the listed keys change. */

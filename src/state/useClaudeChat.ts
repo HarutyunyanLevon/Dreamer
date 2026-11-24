@@ -10,6 +10,23 @@ const SAVE_DEBOUNCE_MS = 400;
 /** Thinking text kept per step in the thread file. */
 const THINKING_KEEP = 2000;
 const DEFAULT_CONTEXT_WINDOW = 200000;
+/**
+ * Last-resort timer: a streaming turn with no event at all from the app for this long (the sidecar
+ * sends a heartbeat every ~10 s and has its own watchdog; the app's fires after 40 s of silence)
+ * is marked failed here, so the spinner can never run forever.
+ */
+export const LAST_RESORT_MS = 75_000;
+/** Events that still belong to a finished turn (they arrive after its answer by design). */
+const AFTER_END = new Set(["memory_update", "memory_progress"]);
+
+/** Whether the last-resort timer should fail this streaming message now (pure; see LAST_RESORT_MS). */
+export function lastResortDue(m: { streaming?: boolean; startedAt?: number; lastEventAt?: number; creditAsk?: { answered?: string } }, aliveAt: number | undefined, now: number, limit = LAST_RESORT_MS): boolean {
+  if (!m.streaming) return false;
+  // Waiting for the user's answer (a credit confirm) is not a stall.
+  if (m.creditAsk && !m.creditAsk.answered) return false;
+  const last = Math.max(m.lastEventAt ?? 0, aliveAt ?? 0, m.startedAt ?? 0);
+  return last > 0 && now - last > limit;
+}
 
 /** Inserts or updates a step by sid (keeping thinking text already streamed). */
 function upsertStep(steps: ActivityStep[] | undefined, s: ActivityStep): ActivityStep[] {
@@ -106,6 +123,9 @@ export interface OrganizeReq {
   scope: "folder" | "project";
   instruction: string;
   backend?: Backend | null;
+  /** The plan this one continues from: a revision, or only its unplaced cards (`rest`). */
+  prior?: OrganizePlanData | null;
+  rest?: boolean;
 }
 
 type SendOpts = { quiet?: boolean; web?: boolean; selection?: string[]; folder?: string | null; memory?: boolean; question?: string; think?: boolean; pin?: ModelTier | null; escalate?: "retry"; organize?: OrganizeReq; artifact?: string; recapFrom?: string };
@@ -153,6 +173,10 @@ export function useClaudeChat(opts: { slug: string | null; thread: string; onLin
   const saveTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
   /** What each turn sent (by reply id), so Retry can send exactly the same turn again. */
   const sentArgs = useRef(new Map<string, { text: string; context?: string; displayText?: string; opts?: SendOpts }>());
+  /** Turns that have ended here (answer, error, Stop, timeout): late events for them are ignored. */
+  const finished = useRef(new Set<string>());
+  /** The last heartbeat per streaming turn (kept out of state: no re-render per heartbeat). */
+  const aliveAt = useRef(new Map<string, number>());
 
   const refreshStatus = useCallback(async () => {
     try {
@@ -253,6 +277,24 @@ export function useClaudeChat(opts: { slug: string | null; thread: string; onLin
     claudeApi
       .onEvent((e) => {
         const at = Date.now();
+        const eid = "id" in e && typeof e.id === "string" ? e.id : null;
+        const turnOf = e.type === "question" ? e.turnId ?? null : eid;
+        // A turn that has ended here (Stop, timeout, its answer) takes nothing more: a late event
+        // must never reopen it or land on the next turn.
+        if (turnOf && finished.current.has(turnOf) && !AFTER_END.has(e.type)) return;
+        if (e.type === "alive") {
+          aliveAt.current.set(e.id, at);
+          return;
+        }
+        if (e.type === "turn_ended") return;
+        if (e.type === "text_reset") {
+          update(idToKey.current.get(e.id), (ms) => ms.map((m) => (m.id === e.id ? { ...m, text: "", lastEventAt: at } : m)));
+          return;
+        }
+        if (e.type === "message_done" || (e.type === "error" && e.id)) {
+          finished.current.add(e.id!);
+          aliveAt.current.delete(e.id!);
+        }
         if (e.type === "delta") {
           update(idToKey.current.get(e.id), (ms) => ms.map((m) => (m.id === e.id ? { ...m, text: m.text + e.text, lastEventAt: at } : m)));
         } else if (e.type === "step") {
@@ -265,7 +307,8 @@ export function useClaudeChat(opts: { slug: string | null; thread: string; onLin
           const u = { input: e.input, cacheRead: e.cacheRead, cacheCreate: e.cacheCreate, output: e.output, ...(e.calls ? { calls: e.calls } : {}) };
           update(idToKey.current.get(e.id), (ms) => ms.map((m) => (m.id === e.id ? { ...m, ...(e.phase === "compact" ? { compactUsage: u } : { usage: u }), lastEventAt: at } : m)));
         } else if (e.type === "model_note") {
-          update(idToKey.current.get(e.id), (ms) => ms.map((m) => (m.id === e.id ? { ...m, model: e.model, retried: e.retried, retriedFrom: e.from, lastEventAt: at } : m)));
+          // A local retry keeps the model; a fast->main retry names the new one.
+          update(idToKey.current.get(e.id), (ms) => ms.map((m) => (m.id === e.id ? (e.localRetry ? { ...m, lastEventAt: at } : { ...m, model: e.model, retried: e.retried, retriedFrom: e.from, lastEventAt: at }) : m)));
         } else if (e.type === "route") {
           update(
             idToKey.current.get(e.id),
@@ -404,7 +447,11 @@ export function useClaudeChat(opts: { slug: string | null; thread: string; onLin
             if (!t?.messages.some((m) => m.streaming && m.id !== e.keep)) continue;
             update(key, (ms) => ms.map((m) => (m.streaming && m.id !== e.keep ? { ...m, streaming: false, isError: true, failure, steps: trimThinking(closeSteps(m.steps, "error")) } : m)), true);
           }
-          if (busyId.current && busyId.current !== e.keep) finishBusy(busyId.current);
+          for (const t of threads.current.values()) for (const m of t.messages) if (m.id !== e.keep && e.ids?.includes(m.id)) finished.current.add(m.id);
+          if (busyId.current && busyId.current !== e.keep) {
+            finished.current.add(busyId.current);
+            finishBusy(busyId.current);
+          }
         } else if (e.type === "error") {
           update(e.id ? idToKey.current.get(e.id) : undefined, (ms) => ms.map((m) => (m.id === e.id ? { ...m, text: e.message, streaming: false, isError: true, steps: trimThinking(closeSteps(m.steps, "error")) } : m)), true);
           finishBusy(e.id);
@@ -432,7 +479,7 @@ export function useClaudeChat(opts: { slug: string | null; thread: string; onLin
       update(key, (ms) => [...ms, { id: `${id}-u`, role: "user", text: displayText ?? text }, { id, role: "claude", text: "", streaming: true, quiet: opts?.quiet, startedAt: now, lastEventAt: now, ...(opts?.organize ? { organizeReq: opts.organize } : {}), ...(opts?.artifact ? { artifact: { id: opts.artifact } } : {}) }], true);
       if (opts?.artifact) artifactRuns.start(opts.artifact, id);
       // A thread opened a moment ago (e.g. from the canvas context menu) may still be loading.
-      Promise.resolve(t.loaded ? undefined : t.loading).then(() => claudeApi.send(t.slug, id, text, context, t.thread, t.sessionId, { web: opts?.web, selection: opts?.selection, folder: opts?.folder, memory: opts?.memory, question: opts?.question, think: opts?.think, pin: opts?.pin, resumeLocal: t.localSessionId, escalate: opts?.escalate, organize: opts?.organize?.scope, organizeBackend: opts?.organize?.backend ?? null, artifact: opts?.artifact ?? null, recapFrom: opts?.recapFrom ?? null })).catch((e) => {
+      Promise.resolve(t.loaded ? undefined : t.loading).then(() => claudeApi.send(t.slug, id, text, context, t.thread, t.sessionId, { web: opts?.web, selection: opts?.selection, folder: opts?.folder, memory: opts?.memory, question: opts?.question, think: opts?.think, pin: opts?.pin, resumeLocal: t.localSessionId, escalate: opts?.escalate, organize: opts?.organize?.scope, organizeBackend: opts?.organize?.backend ?? null, organizeInstruction: opts?.organize?.instruction ?? null, organizePrior: opts?.organize?.prior ?? null, organizeRest: opts?.organize?.rest ?? false, artifact: opts?.artifact ?? null, recapFrom: opts?.recapFrom ?? null })).catch((e) => {
         update(key, (ms) => ms.map((m) => (m.id === id ? { ...m, text: String(e), streaming: false, isError: true } : m)), true);
         finishBusy(id);
       });
@@ -531,6 +578,7 @@ export function useClaudeChat(opts: { slug: string | null; thread: string; onLin
       void claudeApi.interrupt({ hard });
       const id = busyId.current;
       if (id) {
+        finished.current.add(id);
         update(idToKey.current.get(id), (ms) => ms.map((m) => (m.id === id ? { ...m, streaming: false, steps: trimThinking(closeSteps(m.steps, "done")) } : m)), true);
         finishBusy(id);
       }
@@ -550,6 +598,24 @@ export function useClaudeChat(opts: { slug: string | null; thread: string; onLin
     },
     [interrupt, retry, sendText],
   );
+
+  // The last-resort timer: a streaming turn the app has said nothing about for LAST_RESORT_MS
+  // (no event, no heartbeat) is failed here, and its session closed.
+  useEffect(() => {
+    const timer = setInterval(() => {
+      const id = busyId.current;
+      const key = id ? idToKey.current.get(id) : undefined;
+      const m = key ? threads.current.get(key)?.messages.find((x) => x.id === id) : undefined;
+      if (!id || !m || !lastResortDue(m, aliveAt.current.get(id), Date.now())) return;
+      finished.current.add(id);
+      aliveAt.current.delete(id);
+      void claudeApi.interrupt({ hard: true });
+      const text = `No response from Dreamer's Claude helper for ${Math.round(LAST_RESORT_MS / 1000)}s. Retry to send it again.`;
+      update(key, (ms) => ms.map((x) => (x.id === id ? { ...x, text, streaming: false, isError: true, ...(x.backend === "local" ? { fallback: "stalled" as const } : {}), steps: trimThinking(closeSteps(x.steps, "error")) } : x)), true);
+      finishBusy(id);
+    }, 5000);
+    return () => clearInterval(timer);
+  }, [update]);
 
   /** Clears the current thread only (its file and its Claude session). */
   const reset = useCallback(async () => {
