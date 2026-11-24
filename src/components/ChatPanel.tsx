@@ -103,6 +103,8 @@ export function ChatPanel({ ws, panels }: { ws: Workspace; panels: Pick<ReturnTy
   const [web, setWeb] = useState(false);
   /** "Think" for the next message only: deep model with a thinking budget. */
   const [think, setThink] = useState(false);
+  /** Whether the last typed message had Think on: the answers to its follow-up questions inherit it. */
+  const lastThink = useRef(false);
   /** A tier pinned from the header chip (null = Auto, the router decides). Beats the router. */
   const [modelPin, setModelPin] = useState<ModelTier | null>(null);
   const [tierModels, setTierModels] = useState<Record<ModelTier, string> & { router: boolean }>({ fast: "haiku", main: "sonnet", deep: "opus", router: true });
@@ -255,7 +257,10 @@ export function ChatPanel({ ws, panels }: { ws: Workspace; panels: Pick<ReturnTy
       return;
     }
     const x = expand(display, contextCard);
-    chat.sendText(x.text, formatContext(contextCard), display, { quiet: x.quiet || !!opts?.answering, web, think, pin: modelPin, selection: ws.getCanvasSelection(), folder: ws.folder, memory: !!opts?.answering || !NO_MEMORY.test(display), question: opts?.question });
+    // Answering a question Claude asked (e.g. /grill-me) keeps the Think of the message that started it.
+    const thinkNow = opts?.answering ? think || lastThink.current : think;
+    if (!opts?.answering) lastThink.current = think;
+    chat.sendText(x.text, formatContext(contextCard), display, { quiet: x.quiet || !!opts?.answering, web, think: thinkNow, pin: modelPin, selection: ws.getCanvasSelection(), folder: ws.folder, memory: !!opts?.answering || !NO_MEMORY.test(display), question: opts?.question });
     setText("");
     setWeb(false);
     setThink(false);

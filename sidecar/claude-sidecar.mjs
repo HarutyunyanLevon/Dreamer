@@ -1604,7 +1604,9 @@ function pump(s) {
               inputTokens: contextTokens,
               usage: { ...usage, ...(tr?.hasUsage() ? { calls: tr.calls() } : {}) },
               durationMs: msg.duration_ms ?? (tr ? Date.now() - tr.startedAt : undefined),
-              model: Object.keys(msg.modelUsage ?? {})[0] || s.model || undefined,
+              // The model this turn was routed to. modelUsage also lists Claude Code's own cheap
+              // background calls (Haiku), so its first key is not reliably the answering model.
+              model: s.model || Object.keys(msg.modelUsage ?? {})[0] || undefined,
               tier: s.tier ?? undefined,
               backend: s.local ? "local" : "claude",
               ...(s.escalated ? { escalated: true } : {}),

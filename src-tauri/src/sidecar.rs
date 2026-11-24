@@ -1226,7 +1226,8 @@ pub fn send_message(app: &AppHandle, state: &AppState, turn: Turn) -> Result<()>
     let mut msg = json!({
         "type": "user_message", "id": turn.id, "text": delta_text, "fullText": full_text,
         "thread": key, "resume": resume, "model": model, "web": turn.web && !is_local, "tier": tier.as_str(),
-        "think": turn.think && !is_local, "backend": backend, "escalated": route.escalated
+        // A Deep turn (Think, or the pinned Opus tier) always gets the thinking budget.
+        "think": (turn.think || tier == crate::router::Tier::Deep) && !is_local, "backend": backend, "escalated": route.escalated
     });
     if is_local {
         let vision = local.as_ref().and_then(|l| l.vision).unwrap_or(false);
