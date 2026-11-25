@@ -18,6 +18,7 @@ export const claudeTauriApi: ClaudeApi = {
   cancelPullLocal: () => invoke("ollama_cancel"),
   openOllamaInstaller: () => invoke("ollama_open_installer"),
   checkLocal: () => invoke<LocalStatus>("ollama_check"),
+  restartOllama: () => invoke<LocalStatus>("restart_ollama"),
   installOllama: () => invoke("ollama_install"),
   cancelInstallOllama: () => invoke("ollama_install_cancel"),
   localRecommend: () => invoke<LocalRecommendation>("ollama_recommend"),

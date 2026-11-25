@@ -609,6 +609,16 @@ pub fn ollama_check(state: State<AppState>) -> Result<crate::ollama::LocalStatus
     Ok(state.ollama.check_again(&local_cfg(&state)?))
 }
 
+/// "Restart Ollama": stops Dreamer's Ollama (only that one), starts it, loads the model. Steps
+/// arrive as `ollama-setup` events of type "restart".
+#[tauri::command(async)]
+pub fn restart_ollama(app: AppHandle, state: State<AppState>) -> Result<crate::ollama::LocalStatus> {
+    let cfg = local_cfg(&state)?;
+    state.ollama.restart(&cfg, &|step| {
+        let _ = app.emit("ollama-setup", serde_json::json!({ "type": "restart", "step": step }));
+    }).map_err(AppError::Invalid)
+}
+
 /// Downloads the configured local model; progress arrives as `ollama-setup` events.
 #[tauri::command(async)]
 pub fn ollama_pull(app: AppHandle, state: State<AppState>) -> Result<()> {

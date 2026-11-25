@@ -222,17 +222,37 @@ enum Probe {
     Down,
     /// Something listens, but it isn't Ollama (no `/api/version` JSON).
     Foreign,
+    /// Ollama is there but didn't answer in time (busy loading a model).
+    Busy,
 }
 
+/// A connect or read that ran out of time (not one that was refused or reset).
+fn timed_out(e: &std::io::Error) -> bool {
+    matches!(e.kind(), std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock)
+}
+
+/// The one check behind the setup dialog, "Check again", and every chat turn.
 fn probe(addr: &str, timeout: Duration) -> Probe {
-    if connect(addr, timeout.min(Duration::from_millis(800))).is_err() {
-        return Probe::Down;
+    // Refused / unreachable = nothing listens. A connect that merely times out is a busy server:
+    // Ollama stops accepting for a while when it loads a big model after sitting idle.
+    // Windows reports a refused connection only after ~2 s, so a short timeout alone can't tell
+    // stopped from busy: a timed-out connect is retried once with a longer limit.
+    let first = connect(addr, timeout);
+    let outcome = match first {
+        Err(e) if timed_out(&e) => connect(addr, timeout.max(Duration::from_secs(3))),
+        other => other,
+    };
+    match outcome {
+        Ok(s) => drop(s), // close it before the real request
+        Err(e) if timed_out(&e) => return Probe::Busy,
+        Err(_) => return Probe::Down,
     }
     match json_call(addr, "GET", "/api/version", None, timeout) {
         Ok((200, v)) => match v.get("version").and_then(Value::as_str) {
             Some(ver) => Probe::Up(ver.to_string()),
             None => Probe::Foreign,
         },
+        Err(e) if timed_out(&e) => Probe::Busy,
         _ => Probe::Foreign,
     }
 }
@@ -509,6 +529,8 @@ pub struct LocalStatus {
     pub host_note: Option<String>,
     /// Something other than Ollama answers at that address.
     pub foreign: bool,
+    /// Ollama didn't answer in time: it is busy (loading the model), not stopped.
+    pub busy: bool,
     /// The model from settings.
     pub model: String,
     /// It's an Ollama cloud model.
@@ -593,6 +615,13 @@ fn cloud_signed_in(addr: &str, model: &str) -> std::result::Result<(), (u16, Str
     }
 }
 
+fn busy(mut st: LocalStatus) -> LocalStatus {
+    st.busy = true;
+    st.installed = true;
+    st.error = Some("Ollama didn't answer in time (model loading).".into());
+    st
+}
+
 /// Full check against a server at `addr`. Creates the 64k variant when the base is there and it
 /// isn't. `cloud_ok`: this cloud model already answered once (skips the sign-in probe).
 fn check_at(addr: &str, cfg: &LocalCfg, cloud_ok: bool) -> LocalStatus {
@@ -615,9 +644,10 @@ fn check_at(addr: &str, cfg: &LocalCfg, cloud_ok: bool) -> LocalStatus {
             let exe = find_exe(cfg.exe_dir.as_deref());
             st.installed = exe.is_some();
             st.exe = exe.map(|p| p.display().to_string());
-            st.error = Some(if st.installed { "Ollama is installed but not running. Check again starts it.".into() } else { "Ollama isn't installed.".into() });
+            st.error = Some(if st.installed { "Ollama isn't running.".into() } else { "Ollama isn't installed.".into() });
             return st;
         }
+        Probe::Busy => return busy(st),
     }
     if !st.version_ok {
         st.error = Some(format!("Ollama {} is too old; Dreamer needs {}.{} or newer. Update Ollama.", st.version.as_deref().unwrap_or("?"), MIN_VERSION.0, MIN_VERSION.1));
@@ -642,6 +672,7 @@ fn check_at(addr: &str, cfg: &LocalCfg, cloud_ok: bool) -> LocalStatus {
         }
     }
     match caps {
+        Err(e) if timed_out(&e) => return busy(st),
         Ok(Some(caps)) => {
             st.pulled = true;
             // A cloud model's details may come without a capabilities list; the library lists tools for it.
@@ -650,7 +681,7 @@ fn check_at(addr: &str, cfg: &LocalCfg, cloud_ok: bool) -> LocalStatus {
             st.vision = Some(caps.iter().any(|c| c == "vision"));
         }
         Ok(None) => {
-            st.error = Some(format!("The model {model} isn't downloaded yet."));
+            st.error = Some(format!("Model {model} isn't installed."));
             if cfg.cloud_declined {
                 st.declined = true;
                 st.error = Some("No local model on this PC: its GPU is too small for one and the cloud model was declined, so chat uses Claude.".into());
@@ -662,7 +693,7 @@ fn check_at(addr: &str, cfg: &LocalCfg, cloud_ok: bool) -> LocalStatus {
             return st;
         }
         Err(e) => {
-            st.error = Some(format!("Couldn't read the model's details: {e}"));
+            st.error = Some(format!("Local model error: couldn't read the model's details ({e})"));
             return st;
         }
     }
@@ -692,8 +723,9 @@ fn check_at(addr: &str, cfg: &LocalCfg, cloud_ok: bool) -> LocalStatus {
     let have = matches!(capabilities(addr, &variant), Ok(Some(_)));
     match if have { Ok(variant) } else { create_variant(addr, model) } {
         Ok(v) => st.variant = Some(v),
+        Err(e) if timed_out(&e) => return busy(st),
         Err(e) => {
-            st.error = Some(format!("Couldn't set up the 64k-context copy of {model}: {e}"));
+            st.error = Some(format!("Local model error: couldn't set up the 64k-context copy of {model} ({e})"));
             return st;
         }
     }
@@ -716,6 +748,54 @@ pub struct OllamaState {
     pub(crate) gpu: Mutex<Option<Option<crate::ollama_install::Gpu>>>,
 }
 
+/// How long a chat turn waits for a busy Ollama (loading the model) before falling back to Claude.
+const LOAD_WAIT: Duration = Duration::from_secs(60);
+
+/// The OS side of a restart, so tests can run it without touching real processes.
+trait RestartIo {
+    /// Processes of the Ollama install Dreamer resolved (ollama.exe, ollama app.exe, runners): nothing else.
+    fn owned_pids(&self) -> Vec<u32>;
+    fn kill(&self, pid: u32) -> std::result::Result<(), String>;
+    fn start(&self) -> bool;
+}
+
+struct SysIo {
+    exe_dir: Option<PathBuf>,
+}
+
+/// `Id|Path` lines from Get-Process -> pids whose executable sits in `dir`.
+fn pids_in_dir(listing: &str, dir: &Path) -> Vec<u32> {
+    let same = |p: &Path| p.parent().is_some_and(|d| d.to_string_lossy().eq_ignore_ascii_case(&dir.to_string_lossy()));
+    listing.lines().filter_map(|l| l.trim().split_once('|')).filter(|(_, path)| same(Path::new(path.trim()))).filter_map(|(id, _)| id.trim().parse().ok()).collect()
+}
+
+impl RestartIo for SysIo {
+    fn owned_pids(&self) -> Vec<u32> {
+        let Some(dir) = find_exe(self.exe_dir.as_deref()).and_then(|e| e.parent().map(Path::to_path_buf)) else { return Vec::new() };
+        let mut cmd = crate::claude_setup::command(Path::new("powershell"));
+        cmd.args(["-NoProfile", "-Command", "Get-Process -Name 'ollama','ollama app' -ErrorAction SilentlyContinue | ForEach-Object { \"$($_.Id)|$($_.Path)\" }"]).stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+        cmd.output().map(|o| pids_in_dir(&String::from_utf8_lossy(&o.stdout), &dir)).unwrap_or_default()
+    }
+
+    fn kill(&self, pid: u32) -> std::result::Result<(), String> {
+        let mut cmd = crate::claude_setup::command(Path::new("taskkill"));
+        cmd.args(["/F", "/PID", &pid.to_string()]).stdin(std::process::Stdio::null());
+        let out = cmd.output().map_err(|e| format!("Couldn't stop Ollama: {e}"))?;
+        let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        if out.status.success() || text.contains("not found") {
+            Ok(())
+        } else if text.to_ascii_lowercase().contains("access is denied") {
+            Err("Couldn't stop Ollama: permission denied. Quit it from the tray icon instead.".into())
+        } else {
+            Err(format!("Couldn't stop Ollama: {}", text.trim()))
+        }
+    }
+
+    fn start(&self) -> bool {
+        start_server(&host().addr, self.exe_dir.as_deref())
+    }
+}
+
 /// A full status is reused this long by chat turns; a cheap version ping still runs every turn.
 const CACHE_FOR: Duration = Duration::from_secs(60);
 
@@ -729,7 +809,10 @@ impl OllamaState {
     }
 
     pub fn status(&self, cfg: &LocalCfg) -> LocalStatus {
-        let h = host();
+        self.status_at(host(), cfg)
+    }
+
+    fn status_at(&self, h: Host, cfg: &LocalCfg) -> LocalStatus {
         let cloud_ok = self.cloud_ok.lock().map(|s| s.contains(&cfg.model)).unwrap_or(false);
         let mut st = check_at(&h.addr, cfg, cloud_ok);
         if st.cloud && st.ready {
@@ -758,15 +841,81 @@ impl OllamaState {
         self.status(cfg)
     }
 
-    /// For a chat turn: the cached status if recent and the server still answers; else a fresh check.
-    pub fn for_turn(&self, cfg: &LocalCfg) -> LocalStatus {
+    /// For a chat turn: the cached status if recent and the server still answers; else the same
+    /// full check the dialog runs. A busy server (loading the model) is waited for, up to
+    /// `LOAD_WAIT`; `on_wait` runs once when the wait begins.
+    pub fn for_turn(&self, cfg: &LocalCfg, on_wait: &dyn Fn()) -> LocalStatus {
+        self.for_turn_at(&host(), cfg, on_wait, LOAD_WAIT)
+    }
+
+    fn for_turn_at(&self, h: &Host, cfg: &LocalCfg, on_wait: &dyn Fn(), limit: Duration) -> LocalStatus {
         let cached = self.cache.lock().ok().and_then(|c| c.get(&cfg.model).cloned());
         if let Some((at, st)) = cached {
-            if st.ready && at.elapsed() < CACHE_FOR && matches!(probe(&host().addr, Duration::from_millis(700)), Probe::Up(_)) {
+            if st.ready && at.elapsed() < CACHE_FOR && matches!(probe(&h.addr, Duration::from_millis(700)), Probe::Up(_)) {
                 return st;
             }
         }
-        self.status(cfg)
+        let until = Instant::now() + limit;
+        let mut st = self.status_at(h.clone(), cfg);
+        if st.busy {
+            on_wait();
+        }
+        while st.busy && Instant::now() < until {
+            std::thread::sleep(Duration::from_secs(1));
+            st = self.status_at(h.clone(), cfg);
+        }
+        st
+    }
+
+    /// "Restart Ollama": stops the Ollama that Dreamer found (never another program), starts it,
+    /// and loads the model so the next turn doesn't pay for it. `progress` gets "stopping",
+    /// "starting" and "loading". Clears the cached status so the next turn checks fresh.
+    pub fn restart(&self, cfg: &LocalCfg, progress: &dyn Fn(&str)) -> std::result::Result<LocalStatus, String> {
+        let io = SysIo { exe_dir: cfg.exe_dir.clone() };
+        self.restart_with(cfg, &host(), &io, progress)
+    }
+
+    fn restart_with(&self, cfg: &LocalCfg, h: &Host, io: &dyn RestartIo, progress: &dyn Fn(&str)) -> std::result::Result<LocalStatus, String> {
+        let addr = h.addr.as_str();
+        if self.installing() {
+            return Err("Ollama is being installed right now.".into());
+        }
+        self.clear_cache();
+        let port = addr.rsplit(':').next().unwrap_or(addr);
+        if probe(addr, Duration::from_secs(2)) == Probe::Foreign {
+            return Err(format!("Port {port} is used by another program."));
+        }
+        progress("stopping");
+        let pids = io.owned_pids();
+        // Something answers (as Ollama or busy) but none of the processes is the Ollama we found.
+        if pids.is_empty() && matches!(probe(addr, Duration::from_secs(2)), Probe::Up(_) | Probe::Busy) {
+            return Err("Ollama is running from a folder Dreamer didn't find, so it won't stop it. Quit it yourself, or use Locate ollama.exe.".into());
+        }
+        for pid in pids {
+            io.kill(pid)?;
+        }
+        let gone = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < gone && !matches!(probe(addr, Duration::from_millis(500)), Probe::Down) {
+            std::thread::sleep(Duration::from_millis(300));
+        }
+        progress("starting");
+        if !io.start() {
+            return Err("Ollama didn't start within 20 seconds.".into());
+        }
+        let st = self.status_at(h.clone(), cfg);
+        if !st.ready || st.cloud {
+            return Ok(st);
+        }
+        progress("loading");
+        let variant = st.variant.clone().unwrap_or_default();
+        let body = json!({ "model": variant, "keep_alive": KEEP_ALIVE });
+        match json_call(addr, "POST", "/api/generate", Some(&body), Duration::from_secs(180)) {
+            Ok((c, _)) if c < 400 => {}
+            Ok((_, v)) => return Err(format!("Ollama started, but the model didn't load: {}", error_text(&v, "request failed"))),
+            Err(e) => return Err(format!("Ollama started, but the model didn't load: {e}")),
+        }
+        self.clear_cache();
+        Ok(self.status_at(h.clone(), cfg))
     }
 
     pub fn clear_cache(&self) {
@@ -1278,6 +1427,98 @@ pub(crate) mod tests {
         assert_eq!(expand_env(&format!(r"%{k}%\bin;%NOPE_NOT_SET%;a%")), format!(r"{v}\bin;%NOPE_NOT_SET%;a%"));
     }
 
+    /// A server that accepts connections and never answers (Ollama busy loading a model).
+    fn hung() -> (TcpListener, String) {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap().to_string();
+        (l, addr)
+    }
+
+    fn host_of(addr: &str) -> Host {
+        Host { addr: addr.into(), base_url: format!("http://{addr}"), note: None }
+    }
+
+    #[derive(Default)]
+    struct MockIo {
+        pids: Vec<u32>,
+        killed: std::cell::RefCell<Vec<u32>>,
+    }
+    impl RestartIo for MockIo {
+        fn owned_pids(&self) -> Vec<u32> {
+            self.pids.clone()
+        }
+        fn kill(&self, pid: u32) -> std::result::Result<(), String> {
+            self.killed.borrow_mut().push(pid);
+            Ok(())
+        }
+        fn start(&self) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn slow_load_is_busy_not_not_running() {
+        let (_keep, addr) = hung();
+        assert_eq!(probe(&addr, Duration::from_millis(300)), Probe::Busy);
+        let st = check_at(&addr, &cfg("m:1"), false);
+        assert!(st.busy && !st.running && !st.foreign && st.error.unwrap().contains("didn't answer in time"));
+        // A closed port is a stopped server.
+        let closed = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().to_string();
+        assert_eq!(probe(&closed, Duration::from_millis(300)), Probe::Down);
+        assert!(!check_at(&closed, &cfg("m:1"), false).busy);
+    }
+
+    #[test]
+    fn chat_turn_uses_the_dialogs_check_and_waits_while_busy() {
+        let ready = fake(vec![
+            ("/api/version", 200, r#"{"version":"0.15.0"}"#.into()),
+            ("/api/show m:1", 200, r#"{"capabilities":["completion","tools"]}"#.into()),
+            ("/api/create", 200, r#"{"status":"success"}"#.into()),
+        ]);
+        let state = OllamaState::default();
+        let turn = state.for_turn_at(&host_of(&ready), &cfg("m:1"), &|| panic!("not busy"), Duration::from_secs(1));
+        assert_eq!(turn, state.status_at(host_of(&ready), &cfg("m:1")), "same check, same result");
+        let (_keep, hung_addr) = hung();
+        let waited = std::cell::Cell::new(0);
+        let st = state.for_turn_at(&host_of(&hung_addr), &cfg("m:1"), &|| waited.set(waited.get() + 1), Duration::from_millis(1));
+        assert!(st.busy && !st.ready);
+        assert_eq!(waited.get(), 1, "the turn is told it is waiting, once");
+    }
+
+    #[test]
+    fn restart_never_kills_what_is_not_ollama() {
+        let other = fake(vec![("/api/version", 200, "<html>hello</html>".into())]);
+        let io = MockIo { pids: vec![42], ..Default::default() };
+        let err = OllamaState::default().restart_with(&cfg("m:1"), &host_of(&other), &io, &|_| {}).unwrap_err();
+        assert!(err.starts_with("Port ") && err.contains("another program"), "{err}");
+        assert!(io.killed.borrow().is_empty());
+        // Ollama answering but no process of the resolved install: still no kill.
+        let up = fake(vec![("/api/version", 200, r#"{"version":"0.15.0"}"#.into())]);
+        assert!(OllamaState::default().restart_with(&cfg("m:1"), &host_of(&up), &MockIo::default(), &|_| {}).is_err());
+        assert_eq!(pids_in_dir("7|C:\\Ollama\\ollama.exe\n8|C:\\Other\\ollama.exe\n9|C:\\Ollama\\ollama app.exe", Path::new("C:\\Ollama")), vec![7, 9]);
+    }
+
+    #[test]
+    fn restart_clears_cached_unavailable_and_reports_ready() {
+        let state = OllamaState::default();
+        let closed = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().to_string();
+        let down = state.status_at(host_of(&closed), &cfg("m:1"));
+        assert!(!down.ready && state.cache.lock().unwrap().contains_key("m:1"), "unavailable was cached");
+        let ready = fake(vec![
+            ("/api/version", 200, r#"{"version":"0.15.0"}"#.into()),
+            ("/api/show m:1", 200, r#"{"capabilities":["completion","tools"]}"#.into()),
+            ("/api/create", 200, r#"{"status":"success"}"#.into()),
+            ("/api/generate", 200, "{}".into()),
+        ]);
+        let steps = std::cell::RefCell::new(Vec::new());
+        let io = MockIo { pids: vec![5], ..Default::default() };
+        let st = state.restart_with(&cfg("m:1"), &host_of(&ready), &io, &|s| steps.borrow_mut().push(s.to_string())).unwrap();
+        assert!(st.ready);
+        assert_eq!(*io.killed.borrow(), vec![5]);
+        assert_eq!(*steps.borrow(), vec!["stopping", "starting", "loading"]);
+        assert!(state.cache.lock().unwrap().get("m:1").is_some_and(|(_, c)| c.ready), "no stale unavailable left");
+    }
+
     #[test]
     fn missing_server_is_not_ready() {
         // Nothing listens on this port (bound then dropped).
@@ -1301,7 +1542,7 @@ pub(crate) mod tests {
 
         let missing = fake(vec![("/api/version", 200, r#"{"version":"0.14.1"}"#.into())]);
         let st = check_at(&missing, &cfg("m:1"), false);
-        assert!(st.version_ok && !st.pulled && !st.ready && st.error.unwrap().contains("isn't downloaded"));
+        assert!(st.version_ok && !st.pulled && !st.ready && st.error.unwrap().contains("isn't installed"));
         let declined = check_at(&missing, &LocalCfg { cloud_declined: true, ..cfg("m:1") }, false);
         assert!(declined.declined && declined.error.unwrap().contains("uses Claude"));
 

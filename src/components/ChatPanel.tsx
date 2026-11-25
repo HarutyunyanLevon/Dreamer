@@ -14,6 +14,7 @@ import type { LocalStatus, ModelTier } from "../api/claude";
 import type { SkillStatus, SpritecookKeyStatus } from "../api";
 import { claudeApi } from "../api/claudeIndex";
 import { LocalSetup } from "./LocalSetup";
+import { RESTART_LABEL, useOllamaRestart } from "../state/useOllamaRestart";
 import { ThreadMenu } from "./chat/ThreadMenu";
 import { PanelMenu } from "./chat/PanelMenu";
 import { ModelChip } from "./chat/ModelChip";
@@ -325,6 +326,8 @@ export function ChatPanel({ ws, panels }: { ws: Workspace; panels: Pick<ReturnTy
   };
 
   const canAct = !chat.busy && !!ws.active;
+  /** The most recent reply: the only one that offers "Retry locally". */
+  const lastReplyId = [...chat.messages].reverse().find((m) => m.role === "claude" && !m.kind)?.id;
   const group = contextCard ? "card" : "project";
   const needCard = contextCard ? undefined : { short: "Open a card first", long: "Select a card on the canvas (or a recent one in the thread menu) to open its own thread, then run this." };
   const summarize = () => ws.openHandoff(contextCard ? { kind: "card", id: contextCard.id } : { kind: "project" });
@@ -432,7 +435,7 @@ export function ChatPanel({ ws, panels }: { ws: Workspace; panels: Pick<ReturnTy
           </div>
         )}
       </header>
-      {showLocal && <LocalSetup onClose={() => setShowLocal(false)} onStatus={setLocalStatus} />}
+      {showLocal && <LocalSetup onClose={() => setShowLocal(false)} onStatus={setLocalStatus} turnBusy={chat.busy} />}
       {showModels && (
         <ModelSettings
           onClose={() => {
@@ -500,6 +503,8 @@ export function ChatPanel({ ws, panels }: { ws: Workspace; panels: Pick<ReturnTy
             onStop={() => chat.interrupt()}
             onRetryStalled={() => chat.retryStalled(m.id)}
             onRetryWithClaude={() => chat.retryWithClaude(m.id)}
+            onRetryLocally={m.id === lastReplyId ? () => chat.retryLocally(m.id) : undefined}
+            onOpenLocalSetup={() => setShowLocal(true)}
             onCredit={(allow) => chat.answerCredit(m.id, allow)}
             onOpenSettings={() => setShowModels(true)}
             onRetry={() => {
@@ -682,6 +687,8 @@ function ChatBubble({
   saveTarget,
   onRetry,
   onRetryWithClaude,
+  onRetryLocally,
+  onOpenLocalSetup,
   retryDisabled,
   onStop,
   onRetryStalled,
@@ -694,6 +701,9 @@ function ChatBubble({
   onRetry: () => void;
   /** A failed local turn: send it to Claude once. */
   onRetryWithClaude: () => void;
+  /** After a restart, on the most recent turn only: send it again on the local model. */
+  onRetryLocally?: () => void;
+  onOpenLocalSetup: () => void;
   retryDisabled: boolean;
   /** Stop / Retry offered by a stalled live turn. */
   onStop: () => void;
@@ -714,6 +724,12 @@ function ChatBubble({
   const live = message.role === "claude" && message.streaming;
   const compacting = message.steps?.some((s) => s.sid === "compact" && s.status === "running");
   const activity = live ? (
+    <>
+      {message.localLoading && (
+        <div className="model-note" role="status">
+          Loading local model…
+        </div>
+      )}
     <LiveActivity
       steps={message.steps}
       usage={compacting ? message.compactUsage : message.usage}
@@ -723,6 +739,7 @@ function ChatBubble({
       onStop={onStop}
       onRetry={onRetryStalled}
     />
+    </>
   ) : message.role === "claude" && !message.failure ? (
     // Turns with a backend show model and tokens in the badge under the reply instead.
     <ActivitySummary
@@ -744,7 +761,7 @@ function ChatBubble({
       </div>
     </div>
   );
-  const badge = message.role === "claude" && !live && !message.failure && <ModelBadge message={message} />;
+  const badge = message.role === "claude" && !live && !message.failure && <ModelBadge message={message} busy={retryDisabled} onRetryLocally={onRetryLocally} onOpenLocalSetup={onOpenLocalSetup} />;
   const memBusy = message.memoryBusy && (
     <div className="memory-line busy" aria-live="polite">
       <span className="memory-text">
@@ -982,7 +999,9 @@ const FALLBACK_TEXT: Record<string, string> = {
 const REASON_TEXT: Record<string, string> = { think: "Think harder", web: "web", retry: "retried with Claude", unavailable: "local model unavailable", size: "large scope" };
 
 /** Under each reply: "local · qwen3.5:35b-a3b" or "Claude · Opus · Think harder · ↑ 12k ↓ 300". */
-function ModelBadge({ message: m }: { message: ChatMessage }) {
+function ModelBadge({ message: m, busy, onRetryLocally, onOpenLocalSetup }: { message: ChatMessage; busy: boolean; onRetryLocally?: () => void; onOpenLocalSetup: () => void }) {
+  const rs = useOllamaRestart();
+  const [back, setBack] = useState(false);
   if (!m.backend) return null;
   if (m.backend === "local") {
     return (
@@ -996,7 +1015,44 @@ function ModelBadge({ message: m }: { message: ChatMessage }) {
     <>
       {m.routeReason === "unavailable" && (
         <div className="model-note" role="note">
-          Local model unavailable{m.routeNote ? `: ${m.routeNote}` : "."} This reply used Claude.
+          {back ? (
+            <>
+              Local model is back.{" "}
+              {onRetryLocally && (
+                <button type="button" className="memory-act" disabled={busy} onClick={onRetryLocally}>
+                  Retry locally
+                </button>
+              )}
+            </>
+          ) : (
+            <>
+              Local model unavailable{m.routeNote ? `: ${m.routeNote}` : "."} This reply used Claude.
+              {m.routeCanRestart && rs.fails >= 2 ? (
+                <>
+                  {" "}
+                  <button type="button" className="memory-act" onClick={onOpenLocalSetup}>
+                    Open Local model settings
+                  </button>
+                </>
+              ) : (
+                m.routeCanRestart && (
+                  <>
+                    {" "}
+                    <button
+                      type="button"
+                      className="memory-act"
+                      disabled={busy || !!rs.step}
+                      title={busy ? "Wait for the reply to finish" : "Stop Ollama, start it again and load the model"}
+                      onClick={() => void rs.restart().then((st) => st?.ready && setBack(true))}
+                    >
+                      {rs.step ? RESTART_LABEL[rs.step] : "Restart"}
+                    </button>
+                  </>
+                )
+              )}
+              {rs.error && <span role="alert"> {rs.error}</span>}
+            </>
+          )}
         </div>
       )}
       <div className="model-badge claude" title={m.escalated ? "One Claude turn with a recap of this thread; the next message is local again" : undefined}>

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { claudeApi } from "../api/claudeIndex";
 import type { InstallPhase, LocalRecommendation, LocalStatus } from "../api/claude";
 import { Modal } from "../ui/Modal";
+import { RESTART_LABEL, useOllamaRestart } from "../state/useOllamaRestart";
 
 const POLL_MS = 4000;
 const SIGNIN = "ollama signin";
@@ -30,7 +31,7 @@ export function localChipLabel(s: LocalStatus | null, on: boolean): string {
  * a weak GPU gets the cloud model (`ollama signin`) or Claude. Ready: version, model, tools.
  * Re-checks every few seconds while open and idle.
  */
-export function LocalSetup({ onClose, onStatus }: { onClose: () => void; onStatus?: (s: LocalStatus) => void }) {
+export function LocalSetup({ onClose, onStatus, turnBusy = false }: { onClose: () => void; onStatus?: (s: LocalStatus) => void; /** A reply is streaming: Restart waits. */ turnBusy?: boolean }) {
   const [status, setStatus] = useState<LocalStatus | null>(null);
   const [progress, setProgress] = useState<{ status: string; completed: number; total: number } | null>(null);
   const [install, setInstall] = useState<{ phase: InstallPhase; completed: number; total: number } | null>(null);
@@ -40,7 +41,8 @@ export function LocalSetup({ onClose, onStatus }: { onClose: () => void; onStatu
   const [rec, setRec] = useState<LocalRecommendation | null>(null);
   const [pick, setPick] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
-  const busy = pulling || !!install || checking;
+  const rs = useOllamaRestart();
+  const busy = pulling || !!install || checking || !!rs.step;
   const busyRef = useRef(busy);
   busyRef.current = busy;
 
@@ -73,6 +75,13 @@ export function LocalSetup({ onClose, onStatus }: { onClose: () => void; onStatu
     } finally {
       setChecking(false);
     }
+  };
+
+  /** Restart Ollama: stop, start, warm the model; the status line then shows the result. */
+  const restartOllama = async () => {
+    setError(null);
+    const st = await rs.restart();
+    if (st) apply(st);
   };
 
   useEffect(() => {
@@ -386,9 +395,9 @@ export function LocalSetup({ onClose, onStatus }: { onClose: () => void; onStatu
             {!s.cloud && <p className="chat-sub">The first reply after a few idle minutes takes a few seconds while Ollama loads the model.</p>}
           </>
         )}
-        {error && (
+        {(error || rs.error) && (
           <p className="setup-error" role="alert">
-            {error}
+            {error ?? rs.error}
           </p>
         )}
         <p className="chat-sub">Change the model or turn local chat off under Settings.</p>
@@ -396,6 +405,11 @@ export function LocalSetup({ onClose, onStatus }: { onClose: () => void; onStatu
           {!busy && (
             <button type="button" className="chip" onClick={() => void checkAgain()}>
               Check again
+            </button>
+          )}
+          {(!busy || rs.step) && status?.installed && !status.foreign && !status.installing && (
+            <button type="button" className="chip" disabled={!!rs.step || turnBusy} title={turnBusy ? "Wait for the reply to finish" : "Stop Ollama, start it again and load the model"} onClick={() => void restartOllama()}>
+              {rs.step ? RESTART_LABEL[rs.step] : "Restart Ollama"}
             </button>
           )}
           <div className="side-spacer" />

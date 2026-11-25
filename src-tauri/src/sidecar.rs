@@ -1361,6 +1361,11 @@ fn thread_key(slug: &str, thread: &str) -> String {
     format!("{slug}/{thread}")
 }
 
+/// The fallback note offers "Restart" when Ollama is installed and stopped or stuck (not a foreign port).
+fn can_restart(route: &crate::router::Route, local: Option<&crate::ollama::LocalStatus>) -> bool {
+    route.reason == Some(crate::router::Reason::Unavailable) && local.is_some_and(|l| l.installed && !l.foreign && (!l.running || l.busy))
+}
+
 /// Sends one chat turn. `context` is prepended to `text` so the sidecar stays unaware of
 /// Dreamer's card shape entirely.
 pub fn send_message(app: &AppHandle, state: &AppState, turn: Turn) -> Result<()> {
@@ -1436,7 +1441,9 @@ pub fn send_message(app: &AppHandle, state: &AppState, turn: Turn) -> Result<()>
         let mut map = state.claude.router.lock().map_err(|_| AppError::Invalid("router lock poisoned".into()))?;
         crate::router::route(map.entry(key.clone()).or_default(), &turn.text, turn.think, turn.pin, settings.model_router)
     };
-    let local = settings.local_chat.then(|| state.ollama.for_turn(&crate::ollama::LocalCfg::from_settings(&settings)));
+    let local = settings.local_chat.then(|| state.ollama.for_turn(&crate::ollama::LocalCfg::from_settings(&settings), &|| {
+        let _ = app.emit("claude-event", json!({ "type": "local-wait", "id": turn.id }));
+    }));
     let local_ready = local.as_ref().is_some_and(|l| l.ready);
     let mut route = crate::router::backend(tier, turn.web, turn.retry_with_claude, settings.local_chat, local_ready);
     // Artifacts always run on Claude, in the artifact thread's own (resumable) Claude session.
@@ -1461,7 +1468,7 @@ pub fn send_message(app: &AppHandle, state: &AppState, turn: Turn) -> Result<()>
         let backend = if is_local { "local" } else { "claude" };
         let (model, shown) = if is_local { (local_model.clone(), settings.local_model.clone()) } else { (settings.model_chat.clone(), settings.model_chat.clone()) };
         crate::sidecar_log::line(&format!("route {} kind=organize backend={backend} model={model} escalated={} reason={:?} rest={}", turn.id, route.escalated, route.reason, turn.organize_rest));
-        let _ = app.emit("claude-event", json!({ "type": "route", "id": turn.id, "backend": backend, "model": shown, "escalated": route.escalated, "reason": route.reason, "note": (route.reason == Some(crate::router::Reason::Unavailable)).then(|| local.as_ref().and_then(|l| l.error.clone())).flatten() }));
+        let _ = app.emit("claude-event", json!({ "type": "route", "id": turn.id, "backend": backend, "model": shown, "escalated": route.escalated, "reason": route.reason, "note": (route.reason == Some(crate::router::Reason::Unavailable)).then(|| local.as_ref().and_then(|l| l.error.clone())).flatten(), "canRestart": can_restart(&route, local.as_ref()) }));
         crate::organize_pipeline::spawn(
             app.clone(),
             crate::organize_pipeline::Request {
@@ -1628,7 +1635,7 @@ pub fn send_message(app: &AppHandle, state: &AppState, turn: Turn) -> Result<()>
     ));
     // The chat shows where the turn runs before anything streams (and why, when it isn't local).
     let shown_model = if is_local { settings.local_model.clone() } else { model.clone() };
-    let _ = app.emit("claude-event", json!({ "type": "route", "id": turn.id, "backend": backend, "model": shown_model, "escalated": route.escalated, "reason": route.reason, "note": route_note.or_else(|| (route.reason == Some(crate::router::Reason::Unavailable)).then(|| local.as_ref().and_then(|l| l.error.clone())).flatten()) }));
+    let _ = app.emit("claude-event", json!({ "type": "route", "id": turn.id, "backend": backend, "model": shown_model, "escalated": route.escalated, "reason": route.reason, "note": route_note.or_else(|| (route.reason == Some(crate::router::Reason::Unavailable)).then(|| local.as_ref().and_then(|l| l.error.clone())).flatten()), "canRestart": can_restart(&route, local.as_ref()) }));
     let resume = if is_local {
         turn.resume_local.clone()
     } else if route.escalated {

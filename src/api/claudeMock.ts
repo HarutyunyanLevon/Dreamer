@@ -129,7 +129,7 @@ export function createClaudeMockApi(): ClaudeApi {
       const local = ollama === "ready" && !toClaude;
       const reason = opts?.escalate ? "retry" : opts?.think || opts?.pin === "deep" ? "think" : opts?.web ? "web" : ollama !== "ready" ? "unavailable" : null;
       const model = local ? localModel : opts?.think || opts?.pin === "deep" ? "claude-opus-5-5" : "claude-sonnet-5-5";
-      emit({ type: "route", id, backend: local ? "local" : "claude", model, escalated: !local && ollama === "ready", reason, note: reason === "unavailable" ? "Ollama isn't installed. (mock)" : null });
+      emit({ type: "route", id, backend: local ? "local" : "claude", model, escalated: !local && ollama === "ready", reason, note: reason === "unavailable" ? (ollama === "stopped" ? "Ollama isn't running." : "Ollama isn't installed. (mock)") : null, canRestart: reason === "unavailable" && ollama === "stopped" });
       turnTimers = [];
       const at = (ms: number, fn: () => void) => turnTimers.push(window.setTimeout(fn, ms));
       const started = Date.now();
@@ -238,7 +238,7 @@ export function createClaudeMockApi(): ClaudeApi {
           ollama === "missing"
             ? "Ollama isn't installed."
             : ollama === "stopped"
-              ? "Ollama is installed but not running. Check again starts it."
+              ? "Ollama isn't running."
               : ollama === "foreign"
                 ? "Another program is using 127.0.0.1:11434, and it isn't Ollama. (mock)"
                 : needsSignin
@@ -246,9 +246,17 @@ export function createClaudeMockApi(): ClaudeApi {
                   : declined && !ready
                     ? "No local model on this PC: its GPU is too small for one and the cloud model was declined, so chat uses Claude."
                     : !ready
-                      ? `The model ${localModel} isn't downloaded yet.`
+                      ? `Model ${localModel} isn't installed.`
                       : null,
       };
+    },
+    restartOllama: async () => {
+      for (const step of ["stopping", "starting", "loading"] as const) {
+        emitL({ type: "restart", step });
+        await new Promise((r) => window.setTimeout(r, 600));
+      }
+      if (ollama === "stopped") ollama = "nomodel";
+      return api.localStatus();
     },
     checkLocal: async () => {
       if (ollama === "stopped") {

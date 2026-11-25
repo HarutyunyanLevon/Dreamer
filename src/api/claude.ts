@@ -85,6 +85,8 @@ export interface LocalStatus {
   hostNote?: string | null;
   /** Something other than Ollama answers on that port. */
   foreign?: boolean;
+  /** Ollama didn't answer in time: it is busy (loading the model), not stopped. */
+  busy?: boolean;
   model: string;
   /** An Ollama cloud model (`name:cloud`). */
   cloud?: boolean;
@@ -124,11 +126,15 @@ export interface LocalRecommendation {
 
 export type InstallPhase = "download" | "verify" | "run" | "start";
 
+export type RestartStep = "stopping" | "starting" | "loading";
+
 export type OllamaSetupEvent =
   | { type: "progress"; status: string; completed: number; total: number }
   /** Installing Ollama itself; then the model download's progress/done follow. */
   | { type: "install"; phase: InstallPhase; completed: number; total: number }
   | { type: "done"; ok: boolean; cancelled: boolean; message: string }
+  /** "Restart Ollama" is at this step. */
+  | { type: "restart"; step: RestartStep }
   /** Startup found and prepared a local model; `switched`: it replaced the default, which wasn't downloaded. */
   | { type: "detected"; model: string; switched: boolean };
 
@@ -147,7 +153,9 @@ export type ClaudeEvent =
   | { type: "question"; id: string; turnId?: string | null; question: string; choices: string[]; item?: string }
   | { type: "message_done"; id: string; text: string; sessionId?: string; isError?: boolean; inputTokens?: number; usage?: TokenUsage; durationMs?: number; contextTokens?: number; contextWindow?: number; model?: string; tier?: ModelTier; retried?: boolean; retriedFrom?: string; backend?: Backend; escalated?: boolean; fallback?: LocalFallback; endReason?: EndReason; attempt?: number; localRetried?: boolean; artifact?: { id: string; credits: number; paidCalls: number; jobs: string[]; spritecook: boolean } }
   /** Sent before a turn starts: where it runs. `note`: why the local model wasn't usable (reason "unavailable"). */
-  | { type: "route"; id: string; backend: Backend; model: string; escalated: boolean; reason?: RouteReason | null; note?: string | null }
+  | { type: "route"; id: string; backend: Backend; model: string; escalated: boolean; reason?: RouteReason | null; note?: string | null; canRestart?: boolean }
+  /** The turn is waiting for Ollama to load the model (up to ~60 s) before it runs. */
+  | { type: "local-wait"; id: string }
   /** A fast-model turn failed or came back empty and was sent again on the main model. */
   | { type: "model_note"; id: string; model: string; retried?: boolean; from?: string; localRetry?: boolean; reason?: string }
   /** The sidecar is alive and still on turn `id` (a heartbeat every ~10 s; not model activity). */
@@ -208,6 +216,8 @@ export interface ClaudeApi {
   cancelPullLocal(): Promise<void>;
   /** Opens Ollama's Windows download page (the manual route). */
   openOllamaInstaller(): Promise<void>;
+  /** "Restart Ollama": stops Dreamer's Ollama, starts it, loads the model; steps via onLocalSetupEvent. */
+  restartOllama(): Promise<LocalStatus>;
   /** "Check again": starts an installed but stopped Ollama (up to 20 s), then checks. */
   checkLocal(): Promise<LocalStatus>;
   /** Downloads, verifies and runs Ollama's installer, then starts it and the model download; progress via onLocalSetupEvent. */

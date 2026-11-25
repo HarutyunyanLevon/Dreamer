@@ -114,19 +114,23 @@ export interface ChatMessage {
   /** Why it went to Claude instead of the local model; `routeNote`: what was wrong with Ollama. */
   routeReason?: RouteReason | null;
   routeNote?: string | null;
+  /** The fallback note offers "Restart" (Ollama installed, stopped or stuck). */
+  routeCanRestart?: boolean;
   /** A local turn that failed: the reply offers "Retry with Claude". */
   fallback?: LocalFallback;
   // ---- transient (never saved) ----
   /** When the turn was sent / when its last activity event arrived (ms): elapsed time and stall warning. */
   startedAt?: number;
   lastEventAt?: number;
+  /** Waiting for Ollama to load the model before the turn runs. */
+  localLoading?: boolean;
   /** Tokens of the thread summary that ran before this turn. */
   compactUsage?: TokenUsage;
   /** The memory pass after this turn is running: its tokens so far. */
   memoryBusy?: { input: number; output: number };
 }
 
-const TRANSIENT: (keyof ChatMessage)[] = ["streaming", "startedAt", "lastEventAt", "compactUsage", "memoryBusy"];
+const TRANSIENT: (keyof ChatMessage)[] = ["localLoading", "streaming", "startedAt", "lastEventAt", "compactUsage", "memoryBusy"];
 
 /** An organize turn: its scope, the user's optional instruction, and a backend they forced (Redo). */
 export interface OrganizeReq {
@@ -322,9 +326,11 @@ export function useClaudeChat(opts: { slug: string | null; thread: string; onLin
         } else if (e.type === "route") {
           update(
             idToKey.current.get(e.id),
-            (ms) => ms.map((m) => (m.id === e.id ? { ...m, backend: e.backend, model: e.model, escalated: e.escalated, routeReason: e.reason ?? null, routeNote: e.note ?? null, lastEventAt: at } : m)),
+            (ms) => ms.map((m) => (m.id === e.id ? { ...m, backend: e.backend, model: e.model, escalated: e.escalated, routeReason: e.reason ?? null, routeNote: e.note ?? null, routeCanRestart: e.canRestart ?? false, localLoading: false, lastEventAt: at } : m)),
             true,
           );
+        } else if (e.type === "local-wait") {
+          update(idToKey.current.get(e.id), (ms) => ms.map((m) => (m.id === e.id ? { ...m, localLoading: true, lastEventAt: at } : m)));
         } else if (e.type === "memory_progress") {
           update(idToKey.current.get(e.id), (ms) => ms.map((m) => (m.id === e.id ? { ...m, memoryBusy: e.active ? { input: e.input, output: e.output } : undefined } : m)));
         } else if (e.type === "message_done") {
@@ -534,6 +540,19 @@ export function useClaudeChat(opts: { slug: string | null; thread: string; onLin
     [update, sendText],
   );
 
+  /** "Retry locally" after a restart: sends the same turn again on the local model, as a new reply (the Claude reply stays). */
+  const retryLocally = useCallback(
+    (replyId: string) => {
+      if (busyId.current) return;
+      const args = sentArgs.current.get(replyId);
+      const key = currentKey.current;
+      const user = key ? threads.current.get(key)?.messages.find((m) => m.id === `${replyId}-u`) : undefined;
+      if (args) sendText(args.text, args.context, args.displayText, args.opts);
+      else if (user) sendText(user.text);
+    },
+    [sendText],
+  );
+
   /** A STATUS.md change as a line in the project thread (also when that thread is not the open one). */
   const addBuildNote = useCallback(
     (u: BuildUpdate) => {
@@ -660,7 +679,7 @@ export function useClaudeChat(opts: { slug: string | null; thread: string; onLin
     }
   }, []);
 
-  return { status, refreshStatus, messages, busy, context, addBuildNote, sendText, retry, retryWithClaude, retryStalled, answerQuestion, answerCredit, markFetchSaved, setOrganize, undoMemory, interrupt, reset };
+  return { status, refreshStatus, messages, busy, context, addBuildNote, sendText, retry, retryWithClaude, retryLocally, retryStalled, answerQuestion, answerCredit, markFetchSaved, setOrganize, undoMemory, interrupt, reset };
 }
 
 export type ClaudeChat = ReturnType<typeof useClaudeChat>;

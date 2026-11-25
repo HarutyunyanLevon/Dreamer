@@ -295,6 +295,7 @@ pub fn run() {
             commands::claude_send,
             commands::ollama_status,
             commands::ollama_check,
+            commands::restart_ollama,
             commands::ollama_install,
             commands::ollama_install_cancel,
             commands::ollama_recommend,
