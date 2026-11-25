@@ -647,6 +647,7 @@ export type HandoffEventBody =
   | { type: "note"; step: string; note: string }
   | { type: "gaps"; gaps: Gap[] }
   | { type: "done"; mode: "gaps" }
+  | { type: "done"; mode: "task"; markdown: string; title: string; card_ids: string[]; flags: TaskFlag[]; model: string; version: string; kind: TaskKind }
   | { type: "done"; mode: "generate"; version: number; label?: string; design_dir?: string; dir: string; warnings: string[]; repo: HandoffRepoResult | null }
   | { type: "error"; message: string }
   /** Live activity of the job (see ActivityStep / TokenUsage in claude.ts). */
@@ -654,6 +655,33 @@ export type HandoffEventBody =
   | { type: "thinking_delta"; sid: string; text: string }
   | ({ type: "usage" } & TokenUsage);
 export type HandoffEvent = { job: string } & HandoffEventBody;
+/** "Make build prompt": a thin spot Claude found while writing the task. */
+export interface TaskFlag {
+  card_id?: string | null;
+  text: string;
+}
+export type TaskKind = "build" | "rebuild";
+export interface TaskSave {
+  markdown: string;
+  title: string;
+  card_ids: string[];
+  kind: TaskKind;
+  version: string;
+}
+/** A saved task file (<repo>/docs/design/tasks/). */
+export interface SavedTask {
+  /** Repo-relative path. */
+  file: string;
+  title: string;
+  id: string;
+  kind: string;
+  cards: string[];
+  created: string;
+  version: string;
+  done?: string | null;
+}
+/** What Claude Code is told to do with a saved task (mirrors task::reference). */
+export const taskReference = (file: string) => `Implement ${file}. Follow CLAUDE.md and the Report back section.`;
 /** The docs of a version, in reading order (CHANGELOG last). */
 export const DESIGN_DOCS = ["00-overview.md", "01-gdd.md", "02-tech-design.md", "03-roadmap.md", "04-open-questions.md", "05-assets.md", "CLAUDE.md", "CHANGELOG.md"] as const;
 /** The gap check's checklist (mirrors CHECKLIST in handoff.rs). */
@@ -755,6 +783,14 @@ export interface Api {
   handoffStart(slug: string, mode: "gaps" | "generate", spec: HandoffSpec, gaps?: Gap[]): Promise<string>;
   /** Interrupts the running handoff session; nothing it produced is written. */
   handoffCancel(): Promise<void>;
+  /** "Make build prompt" for these cards (their links come along as context); events like handoffStart's. */
+  taskStart(slug: string, ids: string[]): Promise<string>;
+  /** Writes the task into the linked repo and queues its cards; returns the repo-relative path. */
+  saveTask(slug: string, task: TaskSave): Promise<string>;
+  listTasks(slug: string): Promise<SavedTask[]>;
+  markTaskDone(slug: string, file: string): Promise<void>;
+  /** `claude "<reference>"` in a terminal in the repo; rejects when `claude` is not on PATH. */
+  openTerminal(slug: string, file: string): Promise<void>;
   onHandoffEvent(cb: (e: HandoffEvent) => void): Promise<() => void>;
   listDesignVersions(slug: string): Promise<DesignVersion[]>;
   /** `dir`: the version's folder under design/ ("" / absent = the flat layout). */

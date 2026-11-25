@@ -25,6 +25,7 @@ mod sidecar_log;
 mod state;
 mod status;
 mod storage;
+mod task;
 mod watcher;
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -294,6 +295,11 @@ pub fn run() {
             commands::search_cards,
             commands::handoff_start,
             commands::handoff_cancel,
+            commands::task_start,
+            commands::save_task,
+            commands::list_tasks,
+            commands::mark_task_done,
+            commands::open_terminal,
             commands::list_design_versions,
             commands::read_design_doc,
             commands::open_design_folder,

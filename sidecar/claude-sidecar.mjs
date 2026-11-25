@@ -22,7 +22,7 @@
 //        {type:"reset_thread", thread}                    -- "Reset chat": drop that thread's session
 //        {type:"interrupt", hard?}                        -- hard: also close the session (Retry after a stall)
 //        {type:"tool_response", reqId, result} | {type:"tool_response", reqId, error}
-//        {type:"oneshot_start", job, mode:"gaps"|"generate", prompt, model}
+//        {type:"oneshot_start", job, mode:"gaps"|"generate"|"task", prompt, model}
 //                                    -- a handoff pack session: its own one-turn query, not a chat
 //                                       thread; tools are handoff_* requests carrying the job id
 //        {type:"oneshot_cancel", job}                      -- interrupt it; Rust drops its output
@@ -2195,6 +2195,35 @@ const GEN_SYSTEM = [
     "end your turn with one short sentence.",
 ].join("\n\n");
 
+const TASK_SYSTEM = [
+  ...HANDOFF_BASE,
+  "Job: write a build task for Claude Code from the cards in scope. list_cards tells which cards to build " +
+    "('task_role: build') and which are only context ('context, not to build'): read the context cards, but never " +
+    "list them as work; say in the task only what they mean for the cards to build. read_design_doc(name) returns a " +
+    "doc of the latest design revision of the open version, when there is one; use it to align with decisions, " +
+    "never to add scope. Read every card to build with read_card and look at every image (view_attachment). Then " +
+    "call write_task(markdown, meta) exactly once, and end with one short sentence.",
+  "Source of truth: the cards. Never invent features, mechanics, numbers or story. The task must stand alone: " +
+    "Claude Code reads only this file, the repo's CLAUDE.md and docs/design/. Sections, in this order, as '## ' headings: " +
+    "1. Goal (2-3 lines). 2. Context: pointers to the repo's CLAUDE.md and docs/design/ files, only those the task " +
+    "message says exist. 3. What to build: one '### <card title> (<card id>)' subsection per card: what it is, the " +
+    "behaviour, edge cases, assets referenced (embed none; name the files as read_card gave them). 4. Acceptance " +
+    "criteria: checkable bullets per card. 5. Out of scope. 6. Report back: update docs/design/STATUS.md (keep its " +
+    "first two lines; one '## <card id> · <title>' section per card with 'status: in-progress|built|partial|blocked', " +
+    "and 'task:', 'commits:', 'files:' (repo-relative), 'evidence:', a one-line 'notes:'); append design questions to " +
+    "docs/design/QUESTIONS.md as '- [ ] Q (task id): question — context', take the most conservative option and " +
+    "continue; commit once per logical step with '[dreamer:<card id>]' at the start of the message when the commit " +
+    "belongs to one card. Do not invent design.",
+  "Rebuild cards: the task message lists a placeholder like {{DIFF:<card id>}} per rebuild card. Put each on its own " +
+    "line, exactly as given, under a 'Design change since last build' heading inside that card's subsection of " +
+    "'What to build'. Never write the diff yourself. Write the change task around it (what differs, what to keep) and " +
+    "list the files from the card's build.files as the likely places to change.",
+  "Flags: in meta.flags, list each thin spot: a card for which no acceptance criteria can be written, cards that " +
+    "contradict each other, an asset a card refers to that is missing. { card_id?, text } with one short sentence; " +
+    "card_id only when it is one card. An empty list is fine; do not pad it. meta.title: a short imperative title. " +
+    "meta.card_ids: exactly the cards to build. Tone: formal, neutral, concise; no emoji.",
+].join("\n\n");
+
 const oneshots = new Map();
 
 function imageResult(args, r) {
@@ -2229,7 +2258,24 @@ function handoffTools(job, mode) {
       wrap(async (a) => imageResult(a, await call("view_attachment", a))),
     ),
   ];
-  if (mode === "gaps") {
+  if (mode === "task") {
+    tools.push(
+      tool("read_design_doc", "Read one doc of the latest design revision of the open version (e.g. 01-gdd.md), if there is one.", { name: z.string() }, wrap(async (a) => text(await call("read_design_doc", a)))),
+      tool(
+        "write_task",
+        "Save the finished task, once. markdown is the whole task; meta lists its title, the cards it builds and the thin spots.",
+        {
+          markdown: z.string(),
+          meta: z.object({
+            title: z.string(),
+            card_ids: z.array(z.string()),
+            flags: z.array(z.object({ card_id: z.string().optional(), text: z.string() })),
+          }),
+        },
+        wrap(async (a) => text(await call("write_task", a))),
+      ),
+    );
+  } else if (mode === "gaps") {
     tools.push(
       tool(
         "report_gaps",
@@ -2268,7 +2314,7 @@ function startOneshot(msg) {
   entry.q = query({
     prompt: turns,
     options: {
-      systemPrompt: { type: "custom", prompt: mode === "gaps" ? GAP_SYSTEM : GEN_SYSTEM },
+      systemPrompt: { type: "custom", prompt: mode === "gaps" ? GAP_SYSTEM : mode === "task" ? TASK_SYSTEM : GEN_SYSTEM },
       allowedTools: tools.map((t) => `mcp__handoff__${t.name}`),
       // No built-in tools at all (no files, shell or web), and the user's own settings are ignored.
       // Every tool offered is in allowedTools, so no permission callback is needed.

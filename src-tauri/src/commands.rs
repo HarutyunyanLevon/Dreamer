@@ -379,6 +379,35 @@ pub fn handoff_cancel(state: State<AppState>) -> Result<()> {
     crate::handoff::cancel(&state)
 }
 
+/// "Make build prompt": starts the one-shot session for these cards (and their links as context).
+/// Progress and the finished task arrive as `handoff-event`s tagged with the returned job id.
+#[tauri::command(async)]
+pub fn task_start(app: AppHandle, state: State<AppState>, slug: String, ids: Vec<String>) -> Result<String> {
+    crate::task::start(&app, &state, &slug, ids)
+}
+
+/// Writes the task into the linked repo and queues its cards. Returns the repo-relative path.
+#[tauri::command(async)]
+pub fn save_task(state: State<AppState>, slug: String, task: crate::task::TaskSave) -> Result<String> {
+    crate::task::save(&state, &slug, task)
+}
+
+#[tauri::command(async)]
+pub fn list_tasks(state: State<AppState>, slug: String) -> Result<Vec<crate::task::TaskInfo>> {
+    crate::task::list(&state, &slug)
+}
+
+#[tauri::command(async)]
+pub fn mark_task_done(state: State<AppState>, slug: String, file: String) -> Result<()> {
+    crate::task::mark_done(&state, &slug, &file)
+}
+
+/// Opens a terminal in the repo running `claude` on a saved task.
+#[tauri::command(async)]
+pub fn open_terminal(state: State<AppState>, slug: String, file: String) -> Result<()> {
+    crate::task::open_terminal(&state, &slug, &file)
+}
+
 /// design/index.json's versions, oldest first.
 #[tauri::command(async)]
 pub fn list_design_versions(state: State<AppState>, slug: String) -> Result<Vec<crate::handoff::IndexEntry>> {

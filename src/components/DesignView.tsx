@@ -4,6 +4,7 @@ import type { Workspace } from "../state/useWorkspace";
 import { Modal } from "../ui/Modal";
 import { ScrollArea } from "../ui/Scroll";
 import { renderDoc } from "../util/markdown";
+import { TasksPanel } from "./TaskPrompt";
 
 /** What "Copy Claude Code prompt" puts on the clipboard. */
 export const CLAUDE_CODE_PROMPT = "Read CLAUDE.md and docs/design/, then implement 03-roadmap.md starting at the first unchecked task. Commit per task.";
@@ -34,6 +35,7 @@ export function DesignView({ ws, onClose, onNewVersion }: { ws: Workspace; onClo
   const [text, setText] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [showTasks, setShowTasks] = useState(false);
   const bodyRef = useRef<HTMLElement | null>(null);
   const pendingHash = useRef<string | null>(null);
   const images = useRef(new Map<string, string>());
@@ -180,17 +182,19 @@ export function DesignView({ ws, onClose, onNewVersion }: { ws: Workspace; onClo
           </label>
         )}
         <div className="side-spacer" />
+        <button type="button" className={"btn" + (showTasks ? " on" : "")} aria-pressed={showTasks} onClick={() => setShowTasks((v) => !v)} title="Build tasks saved in the linked repo">Tasks</button>
         <button type="button" className="btn" onClick={onNewVersion}>New version</button>
       </div>
+      {showTasks && <TasksPanel ws={ws} />}
 
-      {versions && versions.length === 0 && (
+      {!showTasks && versions && versions.length === 0 && (
         <div className="design-empty">
           <p>No design versions yet.</p>
           <p className="chat-sub">Summarize the project to write the first handoff pack: an overview, a game design document, a tech design, a roadmap Claude Code can work through, open questions, assets and a CLAUDE.md.</p>
         </div>
       )}
 
-      {entry && (
+      {entry && !showTasks && (
         <>
           <div className="design-tabs" role="tablist" aria-label="Documents">
             {docs.map((d) => (
@@ -212,7 +216,7 @@ export function DesignView({ ws, onClose, onNewVersion }: { ws: Workspace; onClo
           </div>
         </>
       )}
-      {!entry && (
+      {(!entry || showTasks) && (
         <div className="editor-actions">
           <div className="side-spacer" />
           <button type="button" className="btn" onClick={onClose}>Close</button>

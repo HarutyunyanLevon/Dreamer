@@ -384,6 +384,12 @@ export interface HandoffRequest {
   n: number;
 }
 
+/** Opens "Make build prompt" for the cards a scope covers (a card, a selection, a frame, a version). */
+export interface TaskRequest {
+  scope: HandoffScope;
+  n: number;
+}
+
 export type VersionDialog = { kind: "new"; from?: string } | { kind: "rename"; id: string } | { kind: "compare"; a?: string; b?: string; card?: string };
 
 interface UndoEntry {
@@ -422,6 +428,7 @@ export function useWorkspace() {
   const chatSeq = useRef(0);
   const [handoffRequest, setHandoffRequest] = useState<HandoffRequest | null>(null);
   const handoffSeq = useRef(0);
+  const [taskRequest, setTaskRequest] = useState<TaskRequest | null>(null);
   /** The Design view (handoff pack reader) is open for the active project. */
   const [designOpen, setDesignOpen] = useState(false);
   /** A project-version dialog (Versions.tsx): new, rename, compare (optionally of one card). */
@@ -1855,6 +1862,9 @@ export function useWorkspace() {
     handoffRequest,
     openHandoff: (scope: HandoffScope) => setHandoffRequest({ scope, n: ++handoffSeq.current }),
     clearHandoff: () => setHandoffRequest(null),
+    taskRequest,
+    openTask: (scope: HandoffScope) => setTaskRequest({ scope, n: ++handoffSeq.current }),
+    clearTask: () => setTaskRequest(null),
     designOpen,
     setDesignOpen,
     memoryOpen,

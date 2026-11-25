@@ -608,6 +608,8 @@ pub fn create_if_missing(path: &Path, text: &str) -> Result<bool> {
 pub enum Mode {
     Gaps,
     Generate,
+    /// A build prompt for Claude Code (task.rs).
+    Task,
 }
 
 pub struct Job {
@@ -632,6 +634,8 @@ pub struct Job {
     pub read: HashSet<String>,
     pub viewed: HashSet<String>,
     pub images: usize,
+    /// Only in a build-prompt job.
+    pub task: Option<crate::task::TaskState>,
 }
 
 pub(crate) fn emit(app: &AppHandle, job: &str, payload: Value) {
@@ -640,7 +644,7 @@ pub(crate) fn emit(app: &AppHandle, job: &str, payload: Value) {
     let _ = app.emit("handoff-event", p);
 }
 
-fn lock_job(state: &AppState) -> Result<std::sync::MutexGuard<'_, Option<Job>>> {
+pub(crate) fn lock_job(state: &AppState) -> Result<std::sync::MutexGuard<'_, Option<Job>>> {
     state.claude.handoff.lock().map_err(|_| AppError::Invalid("handoff lock poisoned".into()))
 }
 
@@ -676,6 +680,7 @@ pub fn start(app: &AppHandle, state: &AppState, slug: &str, mode: Mode, spec: Sc
     let mut prompt = match mode {
         Mode::Gaps => gap_prompt(&data, &label, &spec, &cards, &frames, memory.as_deref()),
         Mode::Generate => gen_prompt(&data, &label, &spec, &cards, &frames, &tag, &gaps, prev.as_ref(), memory.as_deref()),
+        Mode::Task => return Err(AppError::Invalid("Build prompts start with task::start.".into())),
     };
     if mode == Mode::Generate {
         let note = state.ws.lock().map(|ws| crate::artifacts::handoff(&ws, slug).prompt_note).unwrap_or_default();
@@ -690,7 +695,7 @@ pub fn start(app: &AppHandle, state: &AppState, slug: &str, mode: Mode, spec: Sc
         if g.is_some() {
             return Err(AppError::Invalid("A handoff session is already running.".into()));
         }
-        *g = Some(Job { id: id.clone(), slug: slug.into(), mode, model: model.clone(), spec, label, cards, version, ver_id, ver_title, dir: ddir, gaps_in: gaps, gaps_out: None, memory_hash: memory.as_deref().map(crate::memory::hash_of).unwrap_or_default(), docs: BTreeMap::new(), read: HashSet::new(), viewed: HashSet::new(), images });
+        *g = Some(Job { id: id.clone(), slug: slug.into(), mode, model: model.clone(), spec, label, cards, version, ver_id, ver_title, dir: ddir, gaps_in: gaps, gaps_out: None, memory_hash: memory.as_deref().map(crate::memory::hash_of).unwrap_or_default(), docs: BTreeMap::new(), read: HashSet::new(), viewed: HashSet::new(), images, task: None });
     }
     if let Err(e) = crate::sidecar::ensure_started(app, state) {
         *lock_job(state)? = None;
@@ -719,18 +724,28 @@ struct JobView {
     slug: String,
     mode: Mode,
     cards: Vec<String>,
+    /// A build prompt's cards to build (the other cards are context).
+    build: Vec<String>,
 }
 
 fn view_of(state: &AppState, job_id: &str) -> Result<JobView> {
     let g = lock_job(state)?;
     match g.as_ref() {
-        Some(j) if j.id == job_id => Ok(JobView { slug: j.slug.clone(), mode: j.mode, cards: j.cards.clone() }),
+        Some(j) if j.id == job_id => Ok(JobView { slug: j.slug.clone(), mode: j.mode, cards: j.cards.clone(), build: j.task.as_ref().map(|t| t.build.clone()).unwrap_or_default() }),
         _ => Err(AppError::Invalid("this handoff session was cancelled; stop now".into())),
     }
 }
 
 fn in_scope(v: &JobView, id: &str) -> Result<()> {
     if v.cards.iter().any(|c| c == id) { Ok(()) } else { Err(AppError::Invalid(format!("card {id} is not in this handoff's scope; use list_cards"))) }
+}
+
+/// In a build prompt: whether a card is to be built or only context (null elsewhere).
+fn task_role(v: &JobView, id: &str) -> Value {
+    if v.mode != Mode::Task {
+        return Value::Null;
+    }
+    json!(if v.build.iter().any(|b| b == id) { "build" } else { "context, not to build" })
 }
 
 /// The handoff session's tools (`handoff_*` requests from the sidecar).
@@ -756,6 +771,7 @@ pub fn run_tool(app: &AppHandle, state: &AppState, tool: &str, input: Value) -> 
                         "build_status": build::build_status(c), "needs_rebuild": build::is_dirty(c),
                         "images": c.meta.attachments.iter().filter(|a| matches!(a, Attachment::Image { .. })).count(),
                         "clips": c.meta.attachments.iter().filter(|a| matches!(a, Attachment::Clip { .. })).count(),
+                        "task_role": task_role(&v, &c.meta.id),
                     })
                 })
                 .collect();
@@ -799,7 +815,7 @@ pub fn run_tool(app: &AppHandle, state: &AppState, tool: &str, input: Value) -> 
                 "tags": card.meta.tags, "fields": card.meta.fields, "frame": frames.get(id), "body": card.body,
                 "build": card.meta.extra.get("build").map(|b| json!({ "status": b.get("status"), "files": b.get("files"), "commits": b.get("commits"), "notes": b.get("notes"), "needs_rebuild": build::is_dirty(&card) })),
                 "items": card.meta.items, "links": links, "linked_from": linked_from, "attachments": atts,
-                "updated": card.meta.updated,
+                "updated": card.meta.updated, "task_role": task_role(&v, id),
             }))
         }
         "handoff_view_attachment" => {
@@ -865,6 +881,12 @@ pub fn run_tool(app: &AppHandle, state: &AppState, tool: &str, input: Value) -> 
             };
             Ok(json!(if left.is_empty() { format!("Saved {name}. All docs are written; write CHANGELOG.md if you haven't, then end.") } else { format!("Saved {name}. Still to write: {}.", left.join(", ")) }))
         }
+        "handoff_read_design_doc" | "handoff_write_task" => {
+            if v.mode != Mode::Task {
+                return Err(AppError::Invalid("this tool is only for build prompts".into()));
+            }
+            crate::task::run_tool(state, tool, &job_id, input)
+        }
         other => Err(AppError::Invalid(format!("unknown handoff tool {other:?}"))),
     }
 }
@@ -902,6 +924,10 @@ pub fn finish(app: &AppHandle, state: &AppState, msg: &Value) {
             Some(_) => emit(app, &job.id, json!({ "type": "done", "mode": "gaps" })),
             None => emit(app, &job.id, json!({ "type": "error", "message": "Claude ended without reporting the gaps. Try again." })),
         },
+        Mode::Task => {
+            let id = job.id.clone();
+            emit(app, &id, crate::task::done_event(job));
+        }
         Mode::Generate => {
             let missing: Vec<&str> = DOC_NAMES.iter().filter(|n| !job.docs.contains_key(**n)).copied().collect();
             if !missing.is_empty() {
@@ -998,7 +1024,7 @@ fn finalize(state: &AppState, job: &Job) -> Result<Value> {
 
 // ---------- prompts (the task message; the standing instructions live in the sidecar) ----------
 
-fn card_lines(data: &ProjectData, cards: &[String], frames: &HashMap<String, String>) -> String {
+pub(crate) fn card_lines(data: &ProjectData, cards: &[String], frames: &HashMap<String, String>) -> String {
     data.cards
         .iter()
         .filter(|c| cards.contains(&c.meta.id))
@@ -1048,7 +1074,7 @@ fn cc_questions_text(data: &ProjectData) -> String {
 }
 
 /// The project memory as a primary source: what the user decided and rejected outranks Mist cards.
-fn memory_text(memory: Option<&str>) -> String {
+pub(crate) fn memory_text(memory: Option<&str>) -> String {
     match memory {
         Some(m) => format!("\nProject memory (memory.md; the user's own confirmed decisions). It is a PRIMARY source: 'Decisions' and 'Rejected' are authoritative and win over any Mist card that disagrees; 'Pillars', 'Pitch' and 'How to work with me' are confirmed too. Never list a rejected idea as a feature.\n---\n{m}\n---\n"),
         None => String::new(),

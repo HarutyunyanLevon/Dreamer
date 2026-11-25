@@ -183,6 +183,22 @@ impl Workspace {
         Ok(card)
     }
 
+    /// A saved build task queues its cards: status `queued`, `task` = the repo-relative task file.
+    pub fn queue_cards(&self, slug: &str, ids: &[String], task: &str) -> Result<()> {
+        let dir = self.existing_project_dir(slug)?;
+        for id in ids {
+            let path = Self::card_path(&dir, id)?;
+            let mut card = Self::read_card_file(&path, id)?;
+            let b = block_mut(&mut card);
+            b.insert("status".into(), json!("queued"));
+            b.insert("task".into(), json!(task));
+            push_history(b, "queued", "dreamer");
+            card.meta.updated = now();
+            Self::write_card_file(&path, &card)?;
+        }
+        Ok(())
+    }
+
     /// Undo of the above: puts the build block, snapshot file and stage back as they were.
     pub fn restore_build(&self, slug: &str, id: &str, build: Option<Value>, snapshot: Option<String>, stage: Stage) -> Result<Card> {
         let dir = self.existing_project_dir(slug)?;
@@ -546,6 +562,17 @@ mod tests {
 
     fn built(ws: &Workspace, slug: &str, id: &str) -> Card {
         ws.update_card(slug, id, CardPatch { stage: Some(Stage::Built), ..Default::default() }).unwrap()
+    }
+
+    #[test]
+    fn queueing_sets_status_and_task_and_keeps_drift() {
+        let (_d, ws, slug, _) = setup();
+        let c = built(&ws, &slug, &card(&ws, &slug, "Harpoon", "a rod").meta.id);
+        ws.update_card(&slug, &c.meta.id, CardPatch { body: Some("a long rod".into()), ..Default::default() }).unwrap();
+        ws.queue_cards(&slug, &[c.meta.id.clone()], "docs/design/tasks/x.md").unwrap();
+        let c = ws.read_card(&slug, &c.meta.id).unwrap();
+        assert_eq!((build_status(&c), is_dirty(&c)), (Some("queued"), true));
+        assert_eq!(c.meta.extra["build"]["task"].as_str(), Some("docs/design/tasks/x.md"));
     }
 
     #[test]

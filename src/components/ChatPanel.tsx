@@ -335,6 +335,9 @@ export function ChatPanel({ ws, panels }: { ws: Workspace; panels: Pick<ReturnTy
           { id: "describe", label: "/describe", desc: "Describe the images on this card", group: "card", command: "/describe", run: () => send("/describe") },
         ] satisfies ChatAction[])
       : []),
+    ...(contextCard
+      ? ([{ id: "build-prompt", label: "Make build prompt", desc: "Turn this card into a task for Claude Code", group: "card", run: () => ws.openTask({ kind: "card", id: contextCard.id }) }] satisfies ChatAction[])
+      : []),
     { id: "summarize", label: "Summarize", desc: "Turn the project into design docs for Claude Code", group: "project", run: summarize },
     ...(ws.folder
       ? ([{ id: "org-folder", label: "Organize this folder", desc: "Claude proposes a tidy-up plan you review", group: "project", command: "/organize", run: () => runOrganize({ scope: "folder", instruction: "" }) }] satisfies ChatAction[])
@@ -342,7 +345,7 @@ export function ChatPanel({ ws, panels }: { ws: Workspace; panels: Pick<ReturnTy
     { id: "org-project", label: "Organize the project", desc: "Claude proposes a tidy-up plan you review", group: "project", command: "/organize project", run: () => runOrganize({ scope: "project", instruction: "" }) },
   ];
   const byId = (id: string) => actions.find((a) => a.id === id)!;
-  const suggestions = (contextCard ? ["grill", "related", "takes"] : ws.folder ? ["org-folder", "summarize", "grill"] : ["summarize", "org-project", "grill"]).map(byId);
+  const suggestions = (contextCard ? ["grill", "related", "build-prompt"] : ws.folder ? ["org-folder", "summarize", "grill"] : ["summarize", "org-project", "grill"]).map(byId);
 
   // "/" typed first opens the menu filtered by what follows (until Esc, or no item matches).
   const slashQuery = text.startsWith("/") && !text.includes("\n") && text !== slashDismissed ? text.slice(1) : null;

@@ -121,7 +121,7 @@ function folderMenu(id: string, env: MenuEnv): MenuSection[] {
           { label: "Compare versions…", run: () => ws.setVersionDialog({ kind: "compare", b: id }) },
         ],
       },
-      { title: "Claude", items: [{ label: "Summarize this version…", run: () => ws.openHandoff({ kind: "folder", id }) }] },
+      { title: "Claude", items: [{ label: "Summarize this version…", run: () => ws.openHandoff({ kind: "folder", id }) }, { label: "Make build prompt", run: () => ws.openTask({ kind: "folder", id }) }] },
       { title: "Arrange", items: [pinItem("folders", id, env), { label: "Bring to front", run: () => ws.setFolderStacking(id, "front") }, { label: "Send to back", run: () => ws.setFolderStacking(id, "back") }] },
       { title: "Danger", items: [{ label: "Delete version", danger: true, run: () => void ws.deleteFolder(id) }] },
     ];
@@ -147,7 +147,7 @@ function folderMenu(id: string, env: MenuEnv): MenuSection[] {
         { label: sel.length > 1 ? `Group ${sel.length} folders into a folder` : "Group into folder", run: () => env.groupIntoFolder({ folders: sel }) },
       ],
     },
-    { title: "Claude", items: [{ label: "Summarize this folder…", run: () => ws.openHandoff({ kind: "folder", id }) }] },
+    { title: "Claude", items: [{ label: "Summarize this folder…", run: () => ws.openHandoff({ kind: "folder", id }) }, { label: "Make build prompt", run: () => ws.openTask({ kind: "folder", id }) }] },
     {
       title: "Arrange",
       items: [
@@ -280,7 +280,7 @@ function claudeCardMenu(c: Card, env: MenuEnv): MenuItem {
     { label: "Critique", run: ask("/critique") },
   ];
   if (hasImages) items.push({ label: "Describe images", run: ask("/describe") });
-  items.push({ label: "Summarize from here…", run: () => env.ws.openHandoff({ kind: "card", id: c.id }) });
+  items.push({ label: "Summarize from here…", run: () => env.ws.openHandoff({ kind: "card", id: c.id }) }, { label: "Make build prompt", run: () => env.ws.openTask({ kind: "card", id: c.id }) });
   return { label: "Claude", submenu: [{ items }] };
 }
 
@@ -509,6 +509,7 @@ function multiMenu(cards: Card[], env: MenuEnv): MenuSection[] {
       items: [
         { label: "Merge with Claude", run: () => env.merge(ids) },
         { label: "Summarize selection…", run: () => env.ws.openHandoff({ kind: "selection", ids: cards.map((c) => c.id) }) },
+        { label: "Make build prompt", run: () => env.ws.openTask({ kind: "selection", ids: cards.map((c) => c.id) }) },
       ],
     },
     {
@@ -614,6 +615,7 @@ function frameMenu(id: string, env: MenuEnv): MenuSection[] {
       title: "Claude",
       items: [
         { label: "Summarize this frame…", disabled: empty, run: () => env.ws.openHandoff({ kind: "frames", ids: [id] }) },
+        { label: "Make build prompt", disabled: empty, run: () => env.ws.openTask({ kind: "frames", ids: [id] }) },
       ],
     },
     {

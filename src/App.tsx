@@ -2,6 +2,7 @@ import { CanvasArea } from "./components/CanvasArea";
 import { CaptureWindow } from "./components/CaptureWindow";
 import { ChatPanel } from "./components/ChatPanel";
 import { HandoffHost } from "./components/Handoff";
+import { TaskHost } from "./components/TaskPrompt";
 import { MemoryHost } from "./components/Memory";
 import { PanelTabs } from "./components/PanelTabs";
 import { TrayNotice } from "./components/TrayNotice";
@@ -84,6 +85,7 @@ function MainApp() {
       />
       <ChatPanel ws={ws} panels={panels} />
       <HandoffHost ws={ws} />
+      <TaskHost ws={ws} />
       <MemoryHost ws={ws} />
       <VersionsHost ws={ws} />
       <ImportHost ws={ws} />
