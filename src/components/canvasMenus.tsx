@@ -108,6 +108,23 @@ function folderMenu(id: string, env: MenuEnv): MenuSection[] {
   const f = data.folders.find((x) => x.id === id);
   if (!f) return [];
   const sel = env.folderSelection.includes(id) ? env.folderSelection : [id];
+  if (f.kind === "version" && !f.parent) {
+    const name = f.title.trim() || "Untitled folder";
+    return [
+      {
+        title: "Version",
+        items: [
+          { label: "Open", hint: "Enter", run: () => ws.openFolder(id) },
+          { label: "Rename version", run: () => ws.setVersionDialog({ kind: "rename", id }) },
+          { label: `New version from ${name}…`, run: () => ws.setVersionDialog({ kind: "new", from: id }) },
+          { label: "Compare versions…", run: () => ws.setVersionDialog({ kind: "compare", b: id }) },
+        ],
+      },
+      { title: "Claude", items: [{ label: "Summarize this version…", run: () => ws.openHandoff({ kind: "folder", id }) }] },
+      { title: "Arrange", items: [pinItem("folders", id, env), { label: "Bring to front", run: () => ws.setFolderStacking(id, "front") }, { label: "Send to back", run: () => ws.setFolderStacking(id, "back") }] },
+      { title: "Danger", items: [{ label: "Delete version", danger: true, run: () => void ws.deleteFolder(id) }] },
+    ];
+  }
   return [
     {
       title: "Folder",

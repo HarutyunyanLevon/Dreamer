@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import type { Card, Link } from "../api";
-import type { Workspace } from "../state/useWorkspace";
+import { cardVersions, folderName, type Workspace } from "../state/useWorkspace";
 import { STAGES, STAGE_LABEL, type StageId } from "../theme/types";
 import { renderMarkdown } from "../util/markdown";
 import { Modal } from "../ui/Modal";
@@ -102,6 +102,8 @@ export function CardEditor({
     if (hasExtras || next) writeMore(card.id, next);
   };
   const group = branchGroup(card);
+  // Lineage across project versions: "from v1" opens Compare for this card and its origin.
+  const originVersion = card.origin ? ws.data?.folders.find((f) => f.id === card.origin!.version) : undefined;
   const staged = hasStage(card);
   const isLabel = card.kind === "label";
 
@@ -158,7 +160,7 @@ export function CardEditor({
           </div>
         )}
 
-        {(staged || group) && (
+        {(staged || group || originVersion) && (
         <div className="editor-row">
           <div className="stage-filter" role="group" aria-label="Stage">
             {staged && STAGES.map((s) => (
@@ -170,6 +172,16 @@ export function CardEditor({
             {group && (
               <button type="button" className="chip fork-chip" onClick={() => setComparing(true)}>
                 <IconFork /> Compare forks
+              </button>
+            )}
+            {originVersion && ws.data && (
+              <button
+                type="button"
+                className="chip origin-chip"
+                title={`Copied from ${folderName(originVersion)}: compare with the original`}
+                onClick={() => ws.setVersionDialog({ kind: "compare", a: originVersion.id, b: cardVersions(ws.data!).get(card.id), card: card.id })}
+              >
+                from {folderName(originVersion)}
               </button>
             )}
           </div>

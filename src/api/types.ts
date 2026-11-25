@@ -161,9 +161,17 @@ export interface Card {
   branch?: unknown;
   /** On a merge ghost: the ids of the cards it replaces when kept. */
   merged_from?: string[];
+  /** The card it was copied from (a new project version, or Compare's "Apply to"); never changes. */
+  origin?: Origin;
   body: string;
   /** Any other frontmatter keys found in the file are passed through untouched. */
   [extra: string]: unknown;
+}
+
+/** A card's lineage: the card it was copied from and that card's version (folder id). */
+export interface Origin {
+  card: string;
+  version: string;
 }
 
 export interface NewCard {
@@ -184,8 +192,9 @@ export interface NewCard {
   branch?: unknown;
   x?: number;
   y?: number;
-  /** The folder whose canvas it lands on (absent = the project root). */
+  /** The folder whose canvas it lands on (absent = the open version, or the root without versions). */
   folder?: string;
+  origin?: Origin;
 }
 
 /** `role: ""` / `color: ""` clear them. */
@@ -242,6 +251,10 @@ export interface Folder {
   created: string;
   updated: string;
   nudge_off?: boolean;
+  /** "version" = a project version (always top-level); absent = an ordinary folder. */
+  kind?: "version";
+  /** A version: the version it was copied from. */
+  created_from?: string;
   [extra: string]: unknown;
 }
 
@@ -261,6 +274,8 @@ export interface ProjectMeta {
   handoff_target_confirmed?: string;
   /** The root canvas's "Tidy this folder?" hint was dismissed. */
   nudge_off?: boolean;
+  /** The project version (folder id) that opens by default. */
+  last_version?: string;
 }
 export interface ProjectSummary {
   slug: string;
@@ -286,6 +301,8 @@ export interface ProjectData {
   /** Pending Claude edit proposals by card id (cards/<id>.proposal.json). */
   proposals?: Record<string, EditProposal>;
   warnings: string[];
+  /** The root has top-level folders and no versions yet: ask which ones are versions (once). */
+  version_migration?: { folders: { id: string; title: string; suggested: boolean }[] };
 }
 
 /** Arrange layouts of an organize plan. */
@@ -520,6 +537,8 @@ export interface HandoffSpec {
   /** Stages of plain cards to include (other kinds have no stage and are always in). */
   stages: StageId[];
   include_stickies: boolean;
+  /** The project version the pack is of (folder id); absent = the one the scope is in, else the open one. */
+  version?: string;
 }
 export type GapStatus = "ok" | "thin" | "missing";
 export interface Gap {
@@ -535,6 +554,11 @@ export interface DesignVersion {
   scope: string;
   docs: string[];
   cards: number;
+  /** The project version (folder id) this revision is of; "" without versions. */
+  version_id?: string;
+  version_title?: string;
+  /** Folder under design/ (`design/<dir>/r<N>/`); "" = the flat `design/v<N>/`. */
+  dir?: string;
 }
 export interface HandoffRepoResult {
   path: string;
@@ -552,7 +576,7 @@ export type HandoffEventBody =
   | { type: "note"; step: string; note: string }
   | { type: "gaps"; gaps: Gap[] }
   | { type: "done"; mode: "gaps" }
-  | { type: "done"; mode: "generate"; version: number; dir: string; warnings: string[]; repo: HandoffRepoResult | null }
+  | { type: "done"; mode: "generate"; version: number; label?: string; design_dir?: string; dir: string; warnings: string[]; repo: HandoffRepoResult | null }
   | { type: "error"; message: string }
   /** Live activity of the job (see ActivityStep / TokenUsage in claude.ts). */
   | { type: "step"; step: ActivityStep }
@@ -578,8 +602,12 @@ export interface Api {
   listProjects(): Promise<ProjectSummary[]>;
   createProject(name: string): Promise<ProjectSummary>;
   /** `handoff_target: ""` clears the target (and its confirmation). */
-  updateProject(slug: string, patch: { name?: string; theme?: string; handoff_target?: string; handoff_target_confirmed?: string; nudge_off?: boolean }): Promise<ProjectSummary>;
+  updateProject(slug: string, patch: { name?: string; theme?: string; handoff_target?: string; handoff_target_confirmed?: string; nudge_off?: boolean; last_version?: string }): Promise<ProjectSummary>;
   loadProject(slug: string): Promise<ProjectData>;
+  /** The one-time "Treat these folders as versions?" answer (ids of the folders that become versions). */
+  migrateVersions(slug: string, versions: string[]): Promise<boolean>;
+  /** "New version from <from>": copies the version whole (new ids, origin set) and makes it the open one. */
+  newVersion(slug: string, from: string, title: string): Promise<{ version: Folder; cards: Record<string, string> }>;
   /** `folder` omitted/null = the root canvas. */
   saveCanvas(slug: string, canvas: Canvas, folder?: string | null): Promise<void>;
   /** Several canvases and the folder list in one write (moves between folders, folder edits). */
@@ -635,8 +663,9 @@ export interface Api {
   handoffCancel(): Promise<void>;
   onHandoffEvent(cb: (e: HandoffEvent) => void): Promise<() => void>;
   listDesignVersions(slug: string): Promise<DesignVersion[]>;
-  readDesignDoc(slug: string, version: number, name: string): Promise<string>;
-  openDesignFolder(slug: string, version: number): Promise<void>;
+  /** `dir`: the version's folder under design/ ("" / absent = the flat layout). */
+  readDesignDoc(slug: string, version: number, name: string, dir?: string): Promise<string>;
+  openDesignFolder(slug: string, version: number, dir?: string): Promise<void>;
   /** Shows %LOCALAPPDATA%\Dreamer\logs (sidecar.log) in the file manager. */
   openLogsFolder(): Promise<void>;
   /** Native folder picker; null when cancelled (or unavailable). */

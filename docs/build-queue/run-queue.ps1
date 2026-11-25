@@ -41,6 +41,7 @@ $suffix = @"
 
 
 ---
+If git status shows uncommitted changes at the start, they are an interrupted earlier run of THIS prompt: review and continue them, do not restart or revert them.
 You are running unattended in a queue. Nobody will answer questions: decide yourself, write each decision in one line to docs/decisions.md, and finish the whole prompt. If a command is denied, find another way or note it in docs/decisions.md and continue. At the end, run the Rust tests and tsc, fix what you broke, then commit everything.
 "@
 

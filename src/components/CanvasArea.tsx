@@ -2,7 +2,7 @@ import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useStat
 import { api, type Card, type CardKind, type ClipAttachment, type Frame, type Pos, type ProjectData } from "../api";
 import { renderMarkdown } from "../util/markdown";
 import { CARD_H, CARD_W, FOLDER_H, FOLDER_W, HANDLES, cardRect, displayStack, folderRect, resizeRect, type HandleDir, type Rect } from "./cardGeometry";
-import { folderChain, folderName, isInside, ROOT, type GhostLink, type Items, type Structure, type Workspace } from "../state/useWorkspace";
+import { folderChain, folderName, isInside, isVersion, ROOT, type GhostLink, type Items, type Structure, type Workspace } from "../state/useWorkspace";
 import { DEFAULT_FOLDER_TITLE, FolderView, previewsOf, type FolderControls } from "./Folders";
 import { useTheme } from "../theme/ThemeContext";
 import { STAGES, STAGE_LABEL, type StageId } from "../theme/types";
@@ -23,6 +23,7 @@ import { menuFor, type MenuEnv, type MenuTarget } from "./canvasMenus";
 import { CardAttachments, ClipPopover, Lightbox, droppedUrl, imageFiles, isClip, isImage } from "./Attachments";
 import { asUrl } from "../util/media";
 import { TrashView } from "./TrashView";
+import { VersionMenu, openVersion } from "./Versions";
 import { ProposalView } from "./ProposalView";
 import { DuskStrip, useDuskGlass } from "./DuskGlass";
 import { OrganizePreviewLayer, TidyNudge } from "./OrganizePlan";
@@ -72,6 +73,7 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
   const lastPointer = useRef({ x: 0, y: 0 });
   const [trashOpen, setTrashOpen] = useState(false);
   const [themePicker, setThemePicker] = useState<{ left: number; top: number } | null>(null);
+  const [versionMenu, setVersionMenu] = useState<{ left: number; top: number } | null>(null);
   const { themes } = useTheme();
   const rootRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -1277,14 +1279,35 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
           >
             <span className="proj-title">{title || "…"}</span>
           </button>
-          {chain.map((f, i) => (
+          {/* Project versions: "· v2 ▾" opens the version menu (switch, new, compare, rename). */}
+          {data && !data.is_inbox && openVersion(data, ws.folder) && (
+            <span className="crumb-wrap">
+              <span className="crumb-sep" aria-hidden="true">·</span>
+              <button
+                type="button"
+                className={"crumb version-crumb" + (chain.length === 1 ? " here" : "") + (chain[0] && dropTarget === chain[0].id ? " drop-hover" : "")}
+                data-drop-folder={chain[0]?.id}
+                aria-haspopup="menu"
+                aria-expanded={!!versionMenu}
+                title="Project version: switch, new, compare, rename"
+                onClick={(e) => {
+                  const r = e.currentTarget.getBoundingClientRect();
+                  setVersionMenu({ left: r.left, top: r.bottom + 6 });
+                }}
+              >
+                {folderName(openVersion(data, ws.folder))} ▾
+              </button>
+              {versionMenu && <VersionMenu ws={ws} at={versionMenu} onClose={() => setVersionMenu(null)} />}
+            </span>
+          )}
+          {chain.filter((f) => !isVersion(f)).map((f, i, rest) => (
             <span key={f.id} className="crumb-wrap">
               <span className="crumb-sep" aria-hidden="true">›</span>
               <button
                 type="button"
-                className={"crumb" + (i === chain.length - 1 ? " here" : "") + (dropTarget === f.id ? " drop-hover" : "")}
+                className={"crumb" + (i === rest.length - 1 ? " here" : "") + (dropTarget === f.id ? " drop-hover" : "")}
                 data-drop-folder={f.id}
-                aria-current={i === chain.length - 1 ? "page" : undefined}
+                aria-current={i === rest.length - 1 ? "page" : undefined}
                 onClick={() => ws.openFolder(f.id)}
               >
                 <IconFolder />

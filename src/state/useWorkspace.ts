@@ -63,6 +63,31 @@ export function folderChain(folders: Folder[], id: string | null): Folder[] {
   return out;
 }
 export const folderName = (f: Folder | undefined) => f?.title.trim() || "Untitled folder";
+export const isVersion = (f: Folder | undefined) => f?.kind === "version" && !f.parent;
+/** Project versions, oldest first (same order as Rust's versions_of). */
+export const versionsOf = (folders: Folder[]) => folders.filter(isVersion).sort((a, b) => a.created.localeCompare(b.created) || a.id.localeCompare(b.id));
+/** The version a folder is in (itself when it is one); undefined at the root or without versions. */
+export const versionOf = (folders: Folder[], id: string | null | undefined): Folder | undefined => {
+  const top = folderChain(folders, id ?? null)[0];
+  return isVersion(top) ? top : undefined;
+};
+/** The canvas a project opens on: its last version (the root without versions). */
+const startFolder = (d: ProjectData): string | null => {
+  const vs = versionsOf(d.folders);
+  const v = vs.find((f) => f.id === d.meta.last_version) ?? vs[vs.length - 1];
+  return v && d.canvases[v.id] ? v.id : null;
+};
+/** Card id -> the version it is in (cards outside versions are left out). */
+export function cardVersions(d: Pick<ProjectData, "folders" | "canvases">): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const [k, c] of Object.entries(d.canvases)) {
+    const v = k ? versionOf(d.folders, k) : undefined;
+    if (v) for (const id of Object.keys(c.cards)) if (!out.has(id)) out.set(id, v.id);
+  }
+  return out;
+}
+/** The next free "vN" title. */
+export const nextVersionTitle = (folders: Folder[]) => `v${Math.max(0, ...versionsOf(folders).map((f) => Number(/^v\s*(\d+)$/i.exec(f.title.trim())?.[1] ?? 0))) + 1}`;
 const itemSize = (kind: "cards" | "folders" | "frames", p: { w?: number; h?: number }) =>
   kind === "frames" ? { w: p.w ?? 0, h: p.h ?? 0 } : kind === "folders" ? { w: p.w ?? FOLDER_W, h: p.h ?? FOLDER_H } : { w: p.w ?? CARD_W, h: p.h ?? CARD_H };
 /** Bounds of everything on a canvas (null when empty). */
@@ -359,6 +384,8 @@ export interface HandoffRequest {
   n: number;
 }
 
+export type VersionDialog = { kind: "new"; from?: string } | { kind: "rename"; id: string } | { kind: "compare"; a?: string; b?: string; card?: string };
+
 interface UndoEntry {
   label: string;
   undo: () => Promise<void>;
@@ -397,6 +424,8 @@ export function useWorkspace() {
   const handoffSeq = useRef(0);
   /** The Design view (handoff pack reader) is open for the active project. */
   const [designOpen, setDesignOpen] = useState(false);
+  /** A project-version dialog (Versions.tsx): new, rename, compare (optionally of one card). */
+  const [versionDialog, setVersionDialog] = useState<VersionDialog | null>(null);
   /** The Memory modal is open for the active project. */
   const [memoryOpen, setMemoryOpen] = useState(false);
   const activeRef = useRef<string | null>(null);
@@ -443,8 +472,11 @@ export function useWorkspace() {
             for (const [k, c] of Object.entries(d.canvases)) if (live.canvases[k]) d.canvases[k] = { ...c, viewport: live.canvases[k].viewport };
           }
           // The open folder went away (deleted, or by hand): back to the nearest folder that's left.
-          let f = folderRef.current;
+          // First load of a project: its last version.
+          let f = live && live.slug === slug ? folderRef.current : startFolder(d);
+          const was = f;
           while (f && !d.canvases[f]) f = live?.folders.find((x) => x.id === f)?.parent ?? null;
+          if (f === null && was !== null) f = startFolder(d);
           if (f !== folderRef.current) {
             folderRef.current = f;
             setFolderState(f);
@@ -458,9 +490,10 @@ export function useWorkspace() {
         if (list.some((p) => p.slug === INBOX) && slug !== INBOX) {
           activeRef.current = INBOX;
           setActive(INBOX);
-          folderRef.current = null;
-          setFolderState(null);
-          const d = viewOf(withRoot(await api.loadProject(INBOX)), null);
+          const raw = withRoot(await api.loadProject(INBOX));
+          folderRef.current = startFolder(raw);
+          setFolderState(folderRef.current);
+          const d = viewOf(raw, folderRef.current);
           dataRef.current = d;
           setData(d);
         } else throw e;
@@ -504,7 +537,10 @@ export function useWorkspace() {
         activeRef.current = start;
         setActive(start);
         setProjects(list);
-        const d = viewOf(withRoot(await api.loadProject(start)), null);
+        const raw = withRoot(await api.loadProject(start));
+        folderRef.current = startFolder(raw);
+        setFolderState(folderRef.current);
+        const d = viewOf(raw, folderRef.current);
         dataRef.current = d;
         setData(d);
       } catch (e) {
@@ -636,9 +672,13 @@ export function useWorkspace() {
       const d = dataRef.current;
       if (!d || (id && !d.canvases[id]) || id === folderRef.current) return;
       void flushCanvas();
+      // Into another version: it becomes the one that opens next time (and the one Claude works in).
+      const v = versionOf(d.folders, id);
+      const switched = v && v.id !== d.meta.last_version;
+      if (switched && activeRef.current) api.updateProject(activeRef.current, { last_version: v.id }).catch(() => {});
       folderRef.current = id;
       setFolderState(id);
-      const next = viewOf(d, id);
+      const next = viewOf(switched ? { ...d, meta: { ...d.meta, last_version: v.id } } : d, id);
       dataRef.current = next;
       setData(next);
     },
@@ -948,6 +988,15 @@ export function useWorkspace() {
     (at: { x: number; y: number } | null, title = "New folder", group?: Items, extra?: Partial<Folder>): string | null => {
       const id = newFolderId();
       const key = keyOf(folderRef.current);
+      // The top level of a versioned project holds only versions: a folder there is a new, empty version.
+      if (!folderRef.current && versionsOf(dataRef.current?.folders ?? []).length) {
+        if (group) {
+          setNotice("Versions can't be grouped. Open a version to make folders inside it.");
+          return null;
+        }
+        extra = { ...extra, kind: "version" };
+        if (title === "New folder") title = nextVersionTitle(dataRef.current!.folders);
+      }
       const ok = changeStructure(group ? "group into folder" : "new folder", (s) => {
         const cur = s.canvases[key];
         let [outer, inner] = [cur, blankCanvas()];
@@ -965,7 +1014,7 @@ export function useWorkspace() {
       });
       return ok ? id : null;
     },
-    [changeStructure],
+    [changeStructure, setNotice],
   );
 
   /**
@@ -978,6 +1027,10 @@ export function useWorkspace() {
       const toKey = keyOf(to);
       const d = dataRef.current;
       if (!d || from === toKey || (to && !d.canvases[to])) return false;
+      if (!to && versionsOf(d.folders).length) {
+        setNotice("The project's top level holds only versions; drop into a version instead.");
+        return false;
+      }
       if (to && (items.folders ?? []).some((f) => isInside(d.folders, to, f))) {
         setNotice("A folder can't go inside itself.");
         return false;
@@ -1009,6 +1062,10 @@ export function useWorkspace() {
       const d = dataRef.current;
       const f = d?.folders.find((x) => x.id === id);
       if (!d || !f || f.parent === to) return false;
+      if (!to && versionsOf(d.folders).length) {
+        setNotice("The project's top level holds only versions; drop the folder into a version.");
+        return false;
+      }
       if (to && isInside(d.folders, to, id)) {
         setNotice("A folder can't go inside itself.");
         return false;
@@ -1131,6 +1188,48 @@ export function useWorkspace() {
       setNoticeUndo(true);
     },
     [openFolder, flushCanvas, run, pushUndo, setNotice],
+  );
+
+  /** "New version from <from>": one copy in Rust, then it opens. Undo = the new version to Trash. */
+  const newVersion = useCallback(
+    async (from: string, title: string): Promise<string | null> => {
+      const slug = activeRef.current;
+      if (!slug) return null;
+      await flushCanvas();
+      try {
+        const out = await api.newVersion(slug, from, title);
+        const id = out.version.id;
+        await refresh();
+        openFolder(id);
+        pushUndo({
+          label: "new version",
+          folder: id,
+          undo: async () => {
+            if (folderRef.current && isInside(dataRef.current?.folders ?? [], folderRef.current, id)) openFolder(from);
+            await api.deleteFolder(slug, id);
+          },
+          redo: async () => void (await api.restoreCard(slug, id)),
+        });
+        setNotice(`${title} created from ${folderName(dataRef.current?.folders.find((f) => f.id === from))} (${Object.keys(out.cards).length} cards).`);
+        return null;
+      } catch (e) {
+        return message(e);
+      }
+    },
+    [flushCanvas, refresh, openFolder, pushUndo, setNotice],
+  );
+
+  /** The one-time "Treat these folders as versions?" answer; then the project opens on its last version. */
+  const migrateVersions = useCallback(
+    async (ids: string[]) => {
+      const slug = activeRef.current;
+      if (!slug) return;
+      await flushCanvas();
+      await run(() => api.migrateVersions(slug, ids));
+      const d = dataRef.current;
+      if (d) openFolder(startFolder(d));
+    },
+    [flushCanvas, run, openFolder],
   );
 
   /** The canvas a card is on (ROOT = the root), or undefined. */
@@ -1801,6 +1900,10 @@ export function useWorkspace() {
     frameToFolder,
     folderToFrame,
     deleteFolder,
+    newVersion,
+    migrateVersions,
+    versionDialog,
+    setVersionDialog,
     patchFolderLive,
     setPinned,
     setFolderStacking: (id: string, where: "front" | "back") => setStacking(id, where, "folders"),

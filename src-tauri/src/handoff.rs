@@ -100,6 +100,41 @@ pub struct ScopeSpec {
     pub stages: Vec<Stage>,
     #[serde(default)]
     pub include_stickies: bool,
+    /// The project version the pack is of (folder id). None = the version the scope is in, else
+    /// the open one. Only that version's cards (role cards included) are in scope.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+}
+
+/// Card id -> version id, from loaded project data.
+pub fn card_versions(data: &ProjectData) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    for (fid, c) in &data.canvases {
+        if let Some(v) = crate::storage::top_version(&data.folders, fid) {
+            for id in c.cards.keys() {
+                out.entry(id.clone()).or_insert_with(|| v.clone());
+            }
+        }
+    }
+    out
+}
+
+/// The version a pack is of: the spec's, else the one its scope is in, else the open one.
+pub fn job_version(data: &ProjectData, spec: &ScopeSpec) -> Option<crate::model::Folder> {
+    let vs = crate::storage::versions_of(&data.folders);
+    if vs.is_empty() {
+        return None;
+    }
+    let of = card_versions(data);
+    let from_scope = match &spec.scope {
+        Scope::Folder { id } => crate::storage::top_version(&data.folders, id),
+        Scope::Card { id } => of.get(id).cloned(),
+        Scope::Selection { ids } => ids.iter().find_map(|i| of.get(i).cloned()),
+        Scope::Frames { ids } => ids.iter().find_map(|fid| data.canvases.iter().find(|(_, c)| c.frames.contains_key(fid)).and_then(|(k, _)| crate::storage::top_version(&data.folders, k))),
+        Scope::Project => None,
+    };
+    let id = spec.version.clone().or(from_scope).or(data.meta.last_version.clone());
+    id.and_then(|id| vs.iter().find(|f| f.id == id).map(|f| (*f).clone())).or_else(|| vs.last().map(|f| (*f).clone()))
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -126,7 +161,9 @@ const LINK_DEPTH: usize = 2;
 /// The in-scope card ids, in the project's card order. Ghosts are never included; the role cards
 /// (Tech & constraints, Project decisions) always are, since they hold project-wide decisions.
 pub fn resolve_scope(data: &ProjectData, spec: &ScopeSpec) -> Result<Vec<String>> {
-    let live: Vec<&Card> = data.cards.iter().filter(|c| !c.meta.ghost).collect();
+    let version = job_version(data, spec).map(|f| f.id);
+    let of = card_versions(data);
+    let live: Vec<&Card> = data.cards.iter().filter(|c| !c.meta.ghost && (version.is_none() || of.get(&c.meta.id) == version.as_ref())).collect();
     let by_id: HashMap<&str, &Card> = live.iter().map(|c| (c.meta.id.as_str(), *c)).collect();
     let base: HashSet<String> = match &spec.scope {
         Scope::Project => live.iter().map(|c| c.meta.id.clone()).collect(),
@@ -256,6 +293,15 @@ pub struct IndexEntry {
     pub docs: Vec<String>,
     #[serde(default)]
     pub cards: usize,
+    /// The project version (folder id) this revision is of; "" in a project without versions.
+    #[serde(default)]
+    pub version_id: String,
+    #[serde(default)]
+    pub version_title: String,
+    /// Folder under design/ holding this version's revisions (`design/<dir>/r<N>/`); "" = the old
+    /// flat layout `design/v<N>/` (projects without versions, i.e. the Inbox).
+    #[serde(default)]
+    pub dir: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
@@ -273,16 +319,91 @@ pub fn read_index(project_dir: &Path) -> DesignIndex {
 
 /// One more than the highest version in the index *or* on disk (a `v<N>` folder whose index entry
 /// was lost still counts, so it is never overwritten).
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn next_version(project_dir: &Path) -> u32 {
-    let from_index = read_index(project_dir).versions.iter().map(|v| v.version).max().unwrap_or(0);
-    let from_dirs = fs::read_dir(project_dir.join("design"))
-        .map(|rd| rd.filter_map(|e| e.ok()).filter(|e| e.path().is_dir()).filter_map(|e| e.file_name().to_string_lossy().strip_prefix('v').and_then(|n| n.parse::<u32>().ok())).max().unwrap_or(0))
+    next_revision(project_dir, "")
+}
+
+/// The next revision of the version stored under `design/<dir>/` ("" = the flat `design/v<N>/`).
+pub fn next_revision(project_dir: &Path, dir: &str) -> u32 {
+    let from_index = read_index(project_dir).versions.iter().filter(|v| v.dir == dir).map(|v| v.version).max().unwrap_or(0);
+    let (base, prefix) = if dir.is_empty() { (project_dir.join("design"), 'v') } else { (project_dir.join("design").join(dir), 'r') };
+    let from_dirs = fs::read_dir(base)
+        .map(|rd| rd.filter_map(|e| e.ok()).filter(|e| e.path().is_dir()).filter_map(|e| e.file_name().to_string_lossy().strip_prefix(prefix).and_then(|n| n.parse::<u32>().ok())).max().unwrap_or(0))
         .unwrap_or(0);
     from_index.max(from_dirs) + 1
 }
 
-pub fn version_dir(project_dir: &Path, version: u32) -> PathBuf {
-    project_dir.join("design").join(format!("v{version}"))
+pub fn revision_dir(project_dir: &Path, dir: &str, rev: u32) -> PathBuf {
+    if dir.is_empty() { project_dir.join("design").join(format!("v{rev}")) } else { project_dir.join("design").join(dir).join(format!("r{rev}")) }
+}
+
+/// A version title as a folder name under design/ (letters, digits, '-', '_', '.'; spaces become '-').
+pub fn dir_name(title: &str) -> String {
+    let s: String = title.trim().chars().map(|c| if c.is_alphanumeric() || matches!(c, '-' | '_' | '.') { c } else { '-' }).collect();
+    let s = s.trim_matches(['-', '.']).chars().take(60).collect::<String>();
+    if s.is_empty() { "version".into() } else { s }
+}
+
+/// Where a version's revisions go: the folder its earlier revisions used, else its title (made
+/// unique against other versions' folders). A renamed version keeps its folder.
+pub fn dir_for(project_dir: &Path, version_id: &str, title: &str) -> String {
+    let idx = read_index(project_dir);
+    if let Some(e) = idx.versions.iter().rev().find(|e| e.version_id == version_id && !e.dir.is_empty()) {
+        return e.dir.clone();
+    }
+    let base = dir_name(title);
+    let taken = |d: &str| idx.versions.iter().any(|e| e.dir.eq_ignore_ascii_case(d) && e.version_id != version_id) || (project_dir.join("design").join(d).is_dir() && !idx.versions.iter().any(|e| e.dir.eq_ignore_ascii_case(d)));
+    let mut name = base.clone();
+    let mut n = 2;
+    while taken(&name) {
+        name = format!("{base}-{n}");
+        n += 1;
+    }
+    name
+}
+
+/// Migration to project versions: the flat `design/v<N>/` become `design/v1/r<N>/`, tagged with
+/// the version they belong to (index.json entries and each manifest). Repo copies are untouched.
+pub fn migrate_design(project_dir: &Path, version_id: &str, version_title: &str) -> Result<()> {
+    let design = project_dir.join("design");
+    let Ok(rd) = fs::read_dir(&design) else { return Ok(()) };
+    let mut idx = read_index(project_dir);
+    if idx.versions.iter().any(|e| !e.dir.is_empty()) {
+        return Ok(()); // already migrated
+    }
+    let olds: Vec<(u32, PathBuf)> = rd
+        .flatten()
+        .filter(|e| e.path().is_dir())
+        .filter_map(|e| Some((e.file_name().to_string_lossy().strip_prefix('v')?.parse::<u32>().ok()?, e.path())))
+        .filter(|(_, p)| p.join("manifest.json").is_file() || DOC_NAMES.iter().any(|n| p.join(n).is_file()))
+        .collect();
+    if !olds.is_empty() {
+        let tmp = design.join(format!(".migrate-{}", ulid::Ulid::generate()));
+        fs::create_dir_all(&tmp).map_err(|e| AppError::io("prepare the design folder", e))?;
+        for (n, p) in &olds {
+            fs::rename(p, tmp.join(format!("r{n}"))).map_err(|e| AppError::io(format!("move {}", p.display()), e))?;
+        }
+        let target = design.join("v1");
+        fs::rename(&tmp, &target).map_err(|e| AppError::io("move the design revisions into design/v1", e))?;
+        for (n, _) in &olds {
+            let m = target.join(format!("r{n}")).join("manifest.json");
+            if let Some(mut v) = fs::read_to_string(&m).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()).filter(Value::is_object) {
+                v["revision"] = json!(n);
+                v["project_version"] = json!({ "id": version_id, "title": version_title });
+                write_json(&m, &v)?;
+            }
+        }
+    }
+    if idx.versions.is_empty() && olds.is_empty() {
+        return Ok(());
+    }
+    for e in &mut idx.versions {
+        e.dir = "v1".into();
+        e.version_id = version_id.into();
+        e.version_title = version_title.into();
+    }
+    write_json(&design.join("index.json"), &idx)
 }
 
 /// Everything one version holds, ready to write.
@@ -299,11 +420,12 @@ pub struct Pack {
 /// (atomically). Missing asset sources are skipped and reported.
 pub fn write_version(project_dir: &Path, pack: &Pack) -> Result<(PathBuf, Vec<String>)> {
     let design = project_dir.join("design");
-    let target = version_dir(project_dir, pack.entry.version);
+    let target = revision_dir(project_dir, &pack.entry.dir, pack.entry.version);
     if target.exists() {
-        return Err(AppError::Invalid(format!("design/v{} already exists", pack.entry.version)));
+        return Err(AppError::Invalid(format!("{} already exists", target.display())));
     }
-    let tmp = design.join(format!(".v{}.{}.tmp", pack.entry.version, ulid::Ulid::generate()));
+    let parent = target.parent().unwrap_or(&design).to_path_buf();
+    let tmp = parent.join(format!(".r{}.{}.tmp", pack.entry.version, ulid::Ulid::generate()));
     let mut warnings = Vec::new();
     let res = (|| -> Result<()> {
         fs::create_dir_all(tmp.join("assets")).map_err(|e| AppError::io("create the design folder", e))?;
@@ -324,30 +446,39 @@ pub fn write_version(project_dir: &Path, pack: &Pack) -> Result<(PathBuf, Vec<St
         return Err(e);
     }
     let mut idx = read_index(project_dir);
-    idx.versions.retain(|v| v.version != pack.entry.version);
+    idx.versions.retain(|v| !(v.version == pack.entry.version && v.dir == pack.entry.dir));
     idx.versions.push(pack.entry.clone());
-    idx.versions.sort_by_key(|v| v.version);
+    idx.versions.sort_by(|a, b| a.created.cmp(&b.created).then(a.version.cmp(&b.version)));
     write_json(&design.join("index.json"), &idx)?;
     Ok((target, warnings))
 }
 
-/// Reads one doc of a version (for the Design view). Only the known doc names can be read.
-pub fn read_doc(project_dir: &Path, version: u32, name: &str) -> Result<String> {
+/// Reads one doc of a revision (for the Design view). Only the known doc names can be read.
+pub fn read_doc_in(project_dir: &Path, dir: &str, rev: u32, name: &str) -> Result<String> {
     check_doc_name(name)?;
-    let path = version_dir(project_dir, version).join(name);
-    fs::read_to_string(&path).map_err(|e| if e.kind() == std::io::ErrorKind::NotFound { AppError::NotFound(format!("design/v{version}/{name}")) } else { AppError::io(format!("read {}", path.display()), e) })
+    if !dir.is_empty() && (dir.contains(['/', '\\']) || dir.starts_with('.')) {
+        return Err(AppError::Invalid(format!("invalid design folder {dir:?}")));
+    }
+    let path = revision_dir(project_dir, dir, rev).join(name);
+    fs::read_to_string(&path).map_err(|e| if e.kind() == std::io::ErrorKind::NotFound { AppError::NotFound(format!("{}", path.display())) } else { AppError::io(format!("read {}", path.display()), e) })
 }
 
-/// The latest version's manifest and each doc's headings (for the CHANGELOG and change summary).
+/// The revision a new one is compared against: its manifest and each doc's headings.
 pub struct Previous {
-    pub version: u32,
+    /// "v1 r3" (or "v3" in the flat layout).
+    pub label: String,
     pub manifest: Value,
     pub headings: Vec<(String, Vec<String>)>,
 }
 
-pub fn previous(project_dir: &Path) -> Option<Previous> {
-    let last = read_index(project_dir).versions.last()?.version;
-    let dir = version_dir(project_dir, last);
+/// The last revision stored under `design/<dir>/`; for a version's first revision, the last
+/// revision of the version it was created from (`from` = that version's id).
+pub fn previous_in(project_dir: &Path, dir: &str, from: Option<&str>) -> Option<Previous> {
+    let idx = read_index(project_dir);
+    let e = idx.versions.iter().filter(|e| e.dir == dir).max_by_key(|e| e.version).or_else(|| from.and_then(|f| idx.versions.iter().filter(|e| e.version_id == f).max_by_key(|e| e.version)))?;
+    let last = e.version;
+    let label = if e.dir.is_empty() { format!("v{last}") } else { format!("{} r{last}", if e.version_title.is_empty() { &e.dir } else { &e.version_title }) };
+    let dir = revision_dir(project_dir, &e.dir, last);
     let manifest = fs::read_to_string(dir.join("manifest.json")).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or(Value::Null);
     let headings = DOC_NAMES
         .iter()
@@ -356,7 +487,7 @@ pub fn previous(project_dir: &Path) -> Option<Previous> {
             Some((n.to_string(), text.lines().filter(|l| l.starts_with('#')).map(|l| l.trim().to_string()).collect()))
         })
         .collect();
-    Some(Previous { version: last, manifest, headings })
+    Some(Previous { label, manifest, headings })
 }
 
 // ---------- repo target ----------
@@ -482,7 +613,12 @@ pub struct Job {
     pub spec: ScopeSpec,
     pub label: String,
     pub cards: Vec<String>,
+    /// The revision number (r<N>; v<N> in the flat layout).
     pub version: u32,
+    /// The project version the pack is of ("" = none) and its folder under design/.
+    pub ver_id: String,
+    pub ver_title: String,
+    pub dir: String,
     pub gaps_in: Vec<Gap>,
     pub gaps_out: Option<Vec<Gap>>,
     /// Hash of memory.md when the job started ("" = none); recorded in the manifest.
@@ -522,11 +658,19 @@ pub fn start(app: &AppHandle, state: &AppState, slug: &str, mode: Mode, spec: Sc
     if cards.is_empty() {
         return Err(AppError::Invalid("Nothing to summarize: no cards match this scope and these stages.".into()));
     }
-    let label = scope_label(&data, &spec.scope);
-    let version = next_version(&dir);
+    let ver = job_version(&data, &spec);
+    let (ver_id, ver_title) = ver.as_ref().map(|f| (f.id.clone(), f.name())).unwrap_or_default();
+    let ddir = if ver_id.is_empty() { String::new() } else { dir_for(&dir, &ver_id, &ver_title) };
+    let label = match &ver {
+        Some(_) => format!("Version {ver_title} · {}", scope_label(&data, &spec.scope)),
+        None => scope_label(&data, &spec.scope),
+    };
+    let version = next_revision(&dir, &ddir);
+    let prev = previous_in(&dir, &ddir, ver.as_ref().and_then(|f| f.created_from.as_deref()));
+    let tag = rev_label(&ver_title, version);
     let mut prompt = match mode {
         Mode::Gaps => gap_prompt(&data, &label, &spec, &cards, &frames, memory.as_deref()),
-        Mode::Generate => gen_prompt(&data, &label, &spec, &cards, &frames, version, &gaps, previous(&dir).as_ref(), memory.as_deref()),
+        Mode::Generate => gen_prompt(&data, &label, &spec, &cards, &frames, &tag, &gaps, prev.as_ref(), memory.as_deref()),
     };
     if mode == Mode::Generate {
         let note = state.ws.lock().map(|ws| crate::artifacts::handoff(&ws, slug).prompt_note).unwrap_or_default();
@@ -541,7 +685,7 @@ pub fn start(app: &AppHandle, state: &AppState, slug: &str, mode: Mode, spec: Sc
         if g.is_some() {
             return Err(AppError::Invalid("A handoff session is already running.".into()));
         }
-        *g = Some(Job { id: id.clone(), slug: slug.into(), mode, model: model.clone(), spec, label, cards, version, gaps_in: gaps, gaps_out: None, memory_hash: memory.as_deref().map(crate::memory::hash_of).unwrap_or_default(), docs: BTreeMap::new(), read: HashSet::new(), viewed: HashSet::new(), images });
+        *g = Some(Job { id: id.clone(), slug: slug.into(), mode, model: model.clone(), spec, label, cards, version, ver_id, ver_title, dir: ddir, gaps_in: gaps, gaps_out: None, memory_hash: memory.as_deref().map(crate::memory::hash_of).unwrap_or_default(), docs: BTreeMap::new(), read: HashSet::new(), viewed: HashSet::new(), images });
     }
     if let Err(e) = crate::sidecar::ensure_started(app, state) {
         *lock_job(state)? = None;
@@ -550,6 +694,11 @@ pub fn start(app: &AppHandle, state: &AppState, slug: &str, mode: Mode, spec: Sc
     crate::sidecar::write_line(state, &json!({ "type": "oneshot_start", "job": id, "mode": mode, "prompt": prompt, "model": model }));
     emit(app, &id, json!({ "type": "progress", "step": "reading", "read": 0, "total": 0, "images": images }));
     Ok(id)
+}
+
+/// "v2 r3" for a version's revision, "v3" in the flat layout.
+pub fn rev_label(ver_title: &str, rev: u32) -> String {
+    if ver_title.is_empty() { format!("v{rev}") } else { format!("{ver_title} r{rev}") }
 }
 
 /// Stops the running handoff session; whatever it produced is dropped.
@@ -772,7 +921,8 @@ fn finalize(state: &AppState, job: &Job) -> Result<Value> {
         let ws = state.ws.lock().map_err(|_| AppError::Invalid("workspace lock poisoned".into()))?;
         let dir = ws.existing_project_dir(&job.slug)?;
         let data = ws.load_project(&job.slug)?;
-        let version = next_version(&dir).max(job.version);
+        let version = next_revision(&dir, &job.dir).max(job.version);
+        let tag = rev_label(&job.ver_title, version);
         let cards: Vec<&Card> = data.cards.iter().filter(|c| job.cards.contains(&c.meta.id)).collect();
         let mut assets: Vec<(String, PathBuf)> = Vec::new();
         for c in &cards {
@@ -797,10 +947,18 @@ fn finalize(state: &AppState, job: &Job) -> Result<Value> {
                 d.push('\n');
             }
         }
-        docs.entry(CHANGELOG.to_string()).or_insert_with(|| format!("# Changelog\n\n## v{version}\n\n{}\n", if version == 1 { "Initial version" } else { "Regenerated from the current cards." }));
+        docs.entry(CHANGELOG.to_string()).or_insert_with(|| format!("# Changelog\n\n## {tag}\n\n{}\n", if version == 1 { "Initial version" } else { "Regenerated from the current cards." }));
+        // The repo's CLAUDE.md block names the version it was built from.
+        if !job.ver_title.is_empty() {
+            if let Some(d) = docs.get_mut("CLAUDE.md") {
+                *d = format!("Design version: {} (revision r{version}, docs/design/)\n\n{}", job.ver_title, d.trim_start());
+            }
+        }
         let created = now();
         let manifest = json!({
             "version": version,
+            "revision": version,
+            "project_version": if job.ver_id.is_empty() { Value::Null } else { json!({ "id": job.ver_id, "title": job.ver_title }) },
             "created": created,
             "model": job.model,
             "scope": { "spec": job.spec.scope, "label": job.label },
@@ -812,7 +970,7 @@ fn finalize(state: &AppState, job: &Job) -> Result<Value> {
             "docs": docs.keys().collect::<Vec<_>>(),
             "assets": assets.iter().map(|(n, _)| n).collect::<Vec<_>>(),
         });
-        let entry = IndexEntry { version, created, model: job.model.clone(), scope: job.label.clone(), docs: docs.keys().cloned().collect(), cards: cards.len() };
+        let entry = IndexEntry { version, created, model: job.model.clone(), scope: job.label.clone(), docs: docs.keys().cloned().collect(), cards: cards.len(), version_id: job.ver_id.clone(), version_title: job.ver_title.clone(), dir: job.dir.clone() };
         let pack = Pack { docs, assets, manifest, entry };
         let (path, warnings) = write_version(&dir, &pack)?;
         let target = data.meta.handoff_target.clone().filter(|t| data.meta.handoff_target_confirmed.as_deref() == Some(t.as_str()));
@@ -823,7 +981,7 @@ fn finalize(state: &AppState, job: &Job) -> Result<Value> {
         Ok(r) => json!(r),
         Err(e) => json!({ "path": t, "error": e.to_string() }),
     });
-    Ok(json!({ "version": version, "dir": version_path.display().to_string(), "warnings": warnings, "repo": repo }))
+    Ok(json!({ "version": version, "label": rev_label(&job.ver_title, version), "design_dir": job.dir, "dir": version_path.display().to_string(), "warnings": warnings, "repo": repo }))
 }
 
 // ---------- prompts (the task message; the standing instructions live in the sidecar) ----------
@@ -896,9 +1054,9 @@ pub fn gap_prompt(data: &ProjectData, label: &str, spec: &ScopeSpec, cards: &[St
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn gen_prompt(data: &ProjectData, label: &str, spec: &ScopeSpec, cards: &[String], frames: &HashMap<String, String>, version: u32, gaps: &[Gap], prev: Option<&Previous>, memory: Option<&str>) -> String {
+pub fn gen_prompt(data: &ProjectData, label: &str, spec: &ScopeSpec, cards: &[String], frames: &HashMap<String, String>, version: &str, gaps: &[Gap], prev: Option<&Previous>, memory: Option<&str>) -> String {
     let mut out = format!(
-        "Write the handoff pack, version v{version}, for the project \"{}\".\nScope: {label}. Stages: {}.\n{}\nCards in scope ({}):\n{}\n",
+        "Write the handoff pack, {version}, for the project \"{}\".\nScope: {label}. Stages: {}.\n{}\nCards in scope ({}):\n{}\n",
         data.meta.name,
         stages_text(spec),
         memory_text(memory),
@@ -928,14 +1086,14 @@ pub fn gen_prompt(data: &ProjectData, label: &str, spec: &ScopeSpec, cards: &[St
     match prev {
         None => out.push_str("\nThis is the first version: CHANGELOG.md says \"Initial version\".\n"),
         Some(p) => {
-            out.push_str(&format!("\nPrevious version: v{}. Write CHANGELOG.md with a new top section \"## v{version}\" listing what changed since v{} (added, changed and removed material, in a few bullets), above the earlier entries summarized in one line each.\n", p.version, p.version));
+            out.push_str(&format!("\nPrevious revision: {}. Write CHANGELOG.md with a new top section \"## {version}\" listing what changed since {} (added, changed and removed material, in a few bullets), above the earlier entries summarized in one line each.\n", p.label, p.label));
             let old: Vec<(String, String, String)> = p.manifest.get("cards").and_then(Value::as_array).map(|a| a.iter().map(|c| (c["id"].as_str().unwrap_or_default().to_string(), c["title"].as_str().unwrap_or_default().to_string(), c["updated"].as_str().unwrap_or_default().to_string())).collect()).unwrap_or_default();
             let now_cards: Vec<&Card> = data.cards.iter().filter(|c| cards.contains(&c.meta.id)).collect();
             let added: Vec<String> = now_cards.iter().filter(|c| !old.iter().any(|o| o.0 == c.meta.id)).map(|c| format!("\"{}\"", c.meta.title)).collect();
             let changed: Vec<String> = now_cards.iter().filter(|c| old.iter().any(|o| o.0 == c.meta.id && o.2 != c.meta.updated)).map(|c| format!("\"{}\"", c.meta.title)).collect();
             let removed: Vec<String> = old.iter().filter(|o| !now_cards.iter().any(|c| c.meta.id == o.0)).map(|o| format!("\"{}\"", o.1)).collect();
             let list = |v: &Vec<String>| if v.is_empty() { "none".to_string() } else { v.join(", ") };
-            out.push_str(&format!("Cards added since v{}: {}\nCards edited since v{}: {}\nCards no longer in scope: {}\n", p.version, list(&added), p.version, list(&changed), list(&removed)));
+            out.push_str(&format!("Cards added since {}: {}\nCards edited since {}: {}\nCards no longer in scope: {}\n", p.label, list(&added), p.label, list(&changed), list(&removed)));
             out.push_str(&format!("Previous manifest: {}\n", serde_json::to_string(&p.manifest).unwrap_or_default()));
             out.push_str("Previous docs' headings:\n");
             for (doc, hs) in &p.headings {
@@ -955,7 +1113,7 @@ mod tests {
     use tempfile::TempDir;
 
     fn spec(scope: Scope) -> ScopeSpec {
-        ScopeSpec { scope, stages: vec![Stage::Mist, Stage::Reverie, Stage::Lucid, Stage::Dream], include_stickies: false }
+        ScopeSpec { scope, stages: vec![Stage::Mist, Stage::Reverie, Stage::Lucid, Stage::Dream], include_stickies: false, version: None }
     }
 
     fn pack(version: u32) -> Pack {
@@ -1085,9 +1243,9 @@ mod tests {
         }
         let d = TempDir::new().unwrap();
         write_version(d.path(), &pack(1)).unwrap();
-        assert!(read_doc(d.path(), 1, "01-gdd.md").is_ok());
-        assert!(read_doc(d.path(), 1, "manifest.json").is_err());
-        assert!(read_doc(d.path(), 1, "../../x").is_err());
+        assert!(read_doc_in(d.path(), "", 1, "01-gdd.md").is_ok());
+        assert!(read_doc_in(d.path(), "", 1, "manifest.json").is_err());
+        assert!(read_doc_in(d.path(), "", 1, "../../x").is_err());
     }
 
     #[test]

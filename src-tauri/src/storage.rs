@@ -11,6 +11,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+mod versions;
+pub use versions::{mentions, top_version, versions_of};
+
 /// Waits between retries of a file operation that hit "in use" (about 1.5s in total).
 const RETRY_DELAYS_MS: [u64; 6] = [50, 100, 200, 300, 400, 500];
 
@@ -434,6 +437,7 @@ impl Workspace {
             match fs::create_dir(&dir) {
                 Ok(()) => {
                     self.init_project_dir(&dir, name)?;
+                    Self::first_version(&dir)?;
                     return Ok(self.summary(&slug, &dir)?.0);
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
@@ -623,6 +627,12 @@ impl Workspace {
                 return Err(AppError::Invalid("only the current handoff folder can be confirmed".into()));
             }
             meta.handoff_target_confirmed = Some(c.trim().to_string());
+        }
+        if let Some(v) = patch.last_version {
+            if !Self::read_folders(&dir)?.iter().any(|f| f.id == v && f.is_version()) {
+                return Err(AppError::NotFound(format!("version {v}")));
+            }
+            meta.last_version = Some(v);
         }
         // The root canvas's "Tidy this folder?" hint, dismissed for good.
         if let Some(off) = patch.nudge_off {
@@ -829,8 +839,15 @@ impl Workspace {
     /// canvas; a card on two canvases keeps the first (root, then folders in order).
     pub fn load_project(&self, slug: &str) -> Result<ProjectData> {
         let dir = self.existing_project_dir(slug)?;
+        // The one-time move to versions: silent for a flat root; with top-level folders the UI asks.
+        let version_migration = Self::pending_migration(slug, &Self::read_folders(&dir)?);
+        if version_migration.is_none() {
+            self.migrate_versions(slug, None)?;
+        }
         let meta = read_json_or_default_meta(&dir.join("project.json"), slug)?;
         let (folders, folders_changed) = Self::clean_folders(Self::read_folders(&dir)?);
+        // Cards with no place go into the open version (the root only without versions).
+        let home = Self::open_version_in(&dir, &folders).map(|f| f.id);
         let mut canvas = Self::read_canvas(&dir)?;
         let mut canvases: BTreeMap<String, Canvas> = BTreeMap::new();
         for f in &folders {
@@ -867,8 +884,12 @@ impl Workspace {
         }
         for c in &cards {
             if !placed.contains(&c.meta.id) {
-                let p = Self::next_free_pos(&canvas);
-                canvas.cards.insert(c.meta.id.clone(), p);
+                let target = match home.as_ref().and_then(|h| canvases.get_mut(h)) {
+                    Some(t) => t,
+                    None => &mut canvas,
+                };
+                let p = Self::next_free_pos(target);
+                target.cards.insert(c.meta.id.clone(), p);
             }
         }
         if canvas != before_root {
@@ -883,7 +904,7 @@ impl Workspace {
             Self::write_folders(&dir, &folders)?;
         }
         let proposals = Self::read_proposals(&dir, &live);
-        Ok(ProjectData { slug: slug.into(), is_inbox: slug == INBOX_SLUG, meta, canvas, folders, canvases, cards, proposals, warnings })
+        Ok(ProjectData { slug: slug.into(), is_inbox: slug == INBOX_SLUG, meta, canvas, folders, canvases, cards, proposals, warnings, version_migration })
     }
 
     /// "Parent / Child" path of every folder by id.
@@ -1016,12 +1037,13 @@ impl Workspace {
 
     /// `None`/empty = no role. Known roles are "tech" and "decisions"; only one live card per
     /// project may hold each.
-    fn check_role(dir: &Path, role: Option<String>, except: Option<&str>) -> Result<Option<String>> {
+    /// `version`: the version the card is (or will be) in; roles are unique per version.
+    fn check_role(dir: &Path, role: Option<String>, except: Option<&str>, version: Option<&str>) -> Result<Option<String>> {
         let Some(role) = role.map(|r| r.trim().to_lowercase()).filter(|r| !r.is_empty()) else { return Ok(None) };
         if !ROLES.contains(&role.as_str()) {
             return Err(AppError::Invalid(format!("unknown card role {role:?}")));
         }
-        if let Some(other) = Self::role_card(dir, &role, except) {
+        if let Some(other) = Self::role_card(dir, &role, except, version) {
             let what = if role == ROLE_TECH { "a Tech & constraints card" } else if role == ROLE_DECISIONS { "a Project decisions card" } else { "a From Claude Code card" };
             return Err(AppError::Invalid(format!("this project already has {what} ({other})")));
         }
@@ -1029,8 +1051,19 @@ impl Workspace {
     }
 
     /// The id of the live card holding `role`, other than `except`.
-    fn role_card(dir: &Path, role: &str, except: Option<&str>) -> Option<String> {
-        Self::list_cards_in(dir).0.into_iter().find(|c| c.meta.role.as_deref() == Some(role) && Some(c.meta.id.as_str()) != except).map(|c| c.meta.id)
+    /// `version`: only that version's cards count (anywhere when None).
+    fn role_card(dir: &Path, role: &str, except: Option<&str>, version: Option<&str>) -> Option<String> {
+        let of = Self::card_versions_in(dir).unwrap_or_default();
+        Self::list_cards_in(dir)
+            .0
+            .into_iter()
+            .find(|c| c.meta.role.as_deref() == Some(role) && Some(c.meta.id.as_str()) != except && (version.is_none() || of.get(&c.meta.id).map(String::as_str) == version))
+            .map(|c| c.meta.id)
+    }
+
+    /// The version a card is in (None outside versions).
+    fn version_of_card(dir: &Path, id: &str) -> Option<String> {
+        Self::card_versions_in(dir).ok()?.remove(id)
     }
 
     fn check_attachments(list: Vec<Attachment>) -> Result<Vec<Attachment>> {
@@ -1058,7 +1091,11 @@ impl Workspace {
 
     pub fn create_card(&self, slug: &str, new: NewCard) -> Result<Card> {
         let dir = self.existing_project_dir(slug)?;
-        let role = Self::check_role(&dir, new.role, None)?;
+        let all_folders = Self::read_folders(&dir)?;
+        // No folder = the open version (the root only in a project without versions).
+        let folder = new.folder.clone().filter(|f| !f.is_empty()).or_else(|| Self::open_version_in(&dir, &all_folders).map(|f| f.id));
+        let in_version = folder.as_deref().and_then(|f| top_version(&all_folders, f));
+        let role = Self::check_role(&dir, new.role, None, in_version.as_deref())?;
         let attachments = Self::check_attachments(new.attachments.unwrap_or_default())?;
         let id = ulid::Ulid::generate().to_string();
         let stamp = now();
@@ -1083,12 +1120,12 @@ impl Workspace {
                 links: new.links.unwrap_or_default(),
                 branch: new.branch,
                 extra: new.merged_from.map(|ids| [("merged_from".to_string(), serde_json::json!(ids))].into_iter().collect()).unwrap_or_default(),
+                origin: new.origin.filter(|o| check_id(&o.card).is_ok()),
             },
             body: norm_body(&new.body.unwrap_or_default()),
         };
-        let folder = new.folder.filter(|f| !f.is_empty());
         if let Some(f) = &folder {
-            if !Self::read_folders(&dir)?.iter().any(|x| &x.id == f) {
+            if !all_folders.iter().any(|x| &x.id == f) {
                 return Err(AppError::NotFound(format!("folder {f}")));
             }
         }
@@ -1140,7 +1177,7 @@ impl Workspace {
             card.meta.kind = k;
         }
         if let Some(r) = patch.role {
-            card.meta.role = Self::check_role(&dir, Some(r), Some(id))?;
+            card.meta.role = Self::check_role(&dir, Some(r), Some(id), Self::version_of_card(&dir, id).as_deref())?;
         }
         if let Some(c) = patch.color {
             card.meta.color = Self::clean_color(Some(c));
@@ -1430,6 +1467,9 @@ impl Workspace {
         let dir = self.existing_project_dir(slug)?;
         let mut folders = Self::read_folders(&dir)?;
         let folder = folders.iter().find(|f| f.id == id).cloned().ok_or_else(|| AppError::NotFound(format!("folder {id}")))?;
+        if folder.is_version() && folders.iter().filter(|f| f.is_version()).count() == 1 {
+            return Err(AppError::Invalid("This is the project's only version; it can't be deleted.".into()));
+        }
         let ids = Self::subtree(&folders, id);
         let mut canvases = BTreeMap::new();
         let mut cards: Vec<String> = Vec::new();
@@ -1480,6 +1520,12 @@ impl Workspace {
         Self::write_folders(&dir, &folders)?;
         for f in &ids {
             let _ = fs::remove_file(Self::canvas_path(&dir, Some(f))?);
+        }
+        // The open version went: the newest one left opens.
+        let mut meta = read_json_or_default_meta(&dir.join("project.json"), slug)?;
+        if meta.last_version.as_deref() == Some(id) {
+            meta.last_version = versions_of(&folders).last().map(|f| f.id.clone());
+            write_json(&dir.join("project.json"), &meta)?;
         }
         Ok(item)
     }
@@ -1569,7 +1615,8 @@ impl Workspace {
             fs::rename(&tv, dir.join("cards").join(format!("{id}.variants"))).map_err(|e| AppError::io("restore variants", e))?;
         }
         // Back onto the canvas it was on (the root when that folder is gone).
-        let folder = item.folder.clone().filter(|f| Self::read_folders(&dir).is_ok_and(|l| l.iter().any(|x| &x.id == f)));
+        let all = Self::read_folders(&dir)?;
+        let folder = item.folder.clone().filter(|f| all.iter().any(|x| &x.id == f)).or_else(|| Self::open_version_in(&dir, &all).map(|f| f.id));
         let mut canvas = Self::read_canvas_at(&dir, folder.as_deref())?;
         let pos = if folder == item.folder { item.pos } else { None }.unwrap_or_else(|| Self::next_free_pos(&canvas));
         canvas.cards.insert(id.to_string(), pos);
@@ -1578,7 +1625,7 @@ impl Workspace {
         Self::write_trash(&dir, &idx)?;
         let mut card = Self::read_card_file(&dest, id)?;
         // A restored role card yields its role if another card took it meanwhile.
-        if card.meta.role.as_deref().is_some_and(|r| Self::role_card(&dir, r, Some(id)).is_some()) {
+        if card.meta.role.as_deref().is_some_and(|r| Self::role_card(&dir, r, Some(id), Self::version_of_card(&dir, id).as_deref()).is_some()) {
             card.meta.role = None;
             Self::write_card_file(&dest, &card)?;
         }

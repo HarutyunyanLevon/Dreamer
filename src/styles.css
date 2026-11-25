@@ -1496,3 +1496,20 @@ input.frame-tab { cursor: text; min-width: 180px; outline: 2px solid var(--accen
 .theme-swatch { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; color: var(--body); }
 .theme-swatch i { width: 14px; height: 14px; border-radius: 4px; border: 1px solid rgba(0, 0, 0, 0.12); display: inline-block; }
 @media (prefers-reduced-motion: reduce) { .artifact-run-bar.indeterminate > span { animation: none; width: 100%; opacity: 0.5; } }
+
+/* ----- project versions ----- */
+.version-badge { flex: none; width: 18px; height: 18px; border-radius: 6px; background: var(--accent); color: #fff; font-size: 11px; font-weight: 800; display: inline-grid; place-items: center; line-height: 1; }
+.side-folder .version-badge + span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.theme-picker-row.on { background: rgba(255, 255, 255, 0.75); }
+.theme-picker-row[aria-disabled="true"] { opacity: 0.5; cursor: default; }
+.menu-sep { height: 1px; margin: 4px 6px; background: rgba(0, 0, 0, 0.08); }
+.version-crumb { gap: 4px; }
+.version-field { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; color: var(--body); }
+.version-field .name-input, .version-field select { flex: 1; }
+.version-pickers { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.version-group h4 { font-family: var(--font-title); font-size: 15px; color: var(--ink); margin: 10px 0 4px; }
+.version-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 6px 10px; border-radius: 12px; background: rgba(255, 255, 255, 0.5); margin-bottom: 6px; }
+.version-row-title { border: 0; background: transparent; padding: 0; font-weight: 700; color: var(--ink); text-align: left; cursor: pointer; }
+.version-row-title:hover { text-decoration: underline; }
+.version-diff { flex-basis: 100%; }
+.origin-chip { font-size: 12px; }

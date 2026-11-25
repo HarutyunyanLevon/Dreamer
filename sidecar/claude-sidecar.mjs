@@ -233,6 +233,12 @@ function chatTools(s) {
       sendRaw(o);
     }
   };
+  // Project versions: every tool works in the open version (see the "Version:" context line) unless given another.
+  const VERSION_ARG = z
+    .string()
+    .optional()
+    .describe("Project version title (e.g. 'v1') to write into instead of the open one. Only when the user explicitly asked for that version in this message; otherwise omit.");
+  const VERSION_READ_ARG = z.string().optional().describe("Project version title (e.g. 'v1') to read from instead of the open one");
   const createCardTool = tool(
     "create_card",
     "Propose a new idea card on the user's canvas. It is always created as a ghost suggestion (dashed outline) " +
@@ -254,6 +260,7 @@ function chatTools(s) {
         .describe("Checklist items (kind 'checklist' only)"),
       branch_group: z.string().optional().describe("When proposing several alternative takes together (e.g. '3 takes'), use the exact same branch_group value on every one of them so Dreamer can group and compare them."),
       variant_of: z.string().optional().describe("The id of the card these takes branch from, if any."),
+      version: VERSION_ARG,
     },
     async (args) => {
       {
@@ -323,14 +330,14 @@ function chatTools(s) {
     "Read one card in full by id: title, kind, stage, tags, fields, body, checklist items, role, its links (with the " +
       "linked cards' titles) and its attachments (id, type, caption; for web clips also title, url and has_excerpt). " +
       "Use view_attachment to look at an image or read a clip's saved text.",
-    { id: z.string() },
+    { id: z.string(), version: VERSION_READ_ARG },
     async (args) => {
       {
         const lim = hitLimit("read");
         if (lim) return lim;
       }
       try {
-        return text(await requestTool("read_card", { id: args.id }));
+        return text(await requestTool("read_card", { id: args.id, version: args.version }));
       } catch (e) {
         return fail(e);
       }
@@ -346,6 +353,7 @@ function chatTools(s) {
       to: z.string().describe("Card id the link points to"),
       label: z.string().max(40).optional().describe("2-4 word label for the line, e.g. 'same boss', 'inverts'"),
       reason: z.string().optional().describe("One sentence on why they connect"),
+      version: VERSION_ARG,
     },
     async (args) => {
       {
@@ -353,7 +361,7 @@ function chatTools(s) {
         if (lim) return lim;
       }
       try {
-        const ok = await requestTool("propose_link", { from: args.from, to: args.to });
+        const ok = await requestTool("propose_link", { from: args.from, to: args.to, version: args.version });
         send({ type: "link_proposal", id: tid(), slug: ok.slug, from: args.from, to: args.to, label: args.label, reason: args.reason });
         return text(`Proposed a ghost link "${ok.fromTitle}" → "${ok.toTitle}". It awaits the user's Keep/Dismiss.`);
       } catch (e) {
@@ -373,6 +381,7 @@ function chatTools(s) {
       title: z.string().describe("Synthesized title"),
       body: z.string().describe("Synthesized markdown body"),
       tags: z.array(z.string()).optional(),
+      version: VERSION_ARG,
     },
     async (args) => {
       {
@@ -438,6 +447,7 @@ function chatTools(s) {
       stage: z.enum(["mist", "reverie", "lucid", "dream"]).optional(),
       captions: z.record(z.string(), z.string().max(200)).optional().describe("New captions keyed by attachment id"),
       reason: z.string().describe("One sentence on why, shown to the user"),
+      version: VERSION_ARG,
     },
     async (args) => {
       {
@@ -459,14 +469,14 @@ function chatTools(s) {
     "list_tree",
     "List the folders, frames and cards in scope, compactly: ids, titles, tags, stage, folder, position, pinned " +
       "and links. Call it once before propose_organize.",
-    { scope: z.enum(["folder", "project"]).optional().describe("folder (default): the open folder and below; project: everything") },
+    { scope: z.enum(["folder", "project"]).optional().describe("folder (default): the open folder and below; project: everything"), version: VERSION_READ_ARG },
     async (args) => {
       {
         const lim = hitLimit("any");
         if (lim) return lim;
       }
       try {
-        return text(await requestTool("list_tree", { scope: args.scope ?? "folder" }), 30000);
+        return text(await requestTool("list_tree", { scope: args.scope ?? "folder", version: args.version }), 30000);
       } catch (e) {
         return fail(e);
       }
@@ -593,6 +603,7 @@ function chatTools(s) {
       title: z.string().max(80),
       brief: z.string().describe("What to make and which question it answers"),
       source_card: z.string().optional().describe("The card it visualizes (id)"),
+      version: VERSION_ARG,
     },
     async (args) => {
       {
@@ -643,6 +654,11 @@ const SYSTEM_PROMPT = [
     "an existing card (title, body, tags, stage, captions) that the user keeps or dismisses. When asked to change, " +
     "rewrite or tidy a card, use propose_edit; never claim the card has changed. You have no file, shell, edit or " +
     "delete access, by design.",
+  "Project versions: a project can have versions (v1, v2, ...), each a full copy of the design; the context line " +
+    "\"Version: v2 (others: v1)\" says which one is open. Everything you read and write is in the open version. " +
+    "Read tools take an optional version to look at another one. Write tools take an optional version too, but only " +
+    "when the user's message names that version; if a write is refused, ask the user instead of retrying. Project " +
+    "memory is shared by all versions.",
   "Project memory: the [Project memory] block is what the user has decided (Decisions and Rejected are " +
     "authoritative; follow them, and never re-suggest a rejected idea). A separate automatic pass keeps it up to " +
     "date after your turns, so do not try to maintain it. Use remember(text, section?) and forget(text) ONLY when " +
@@ -729,8 +745,16 @@ const domainOf = (url) => {
   }
 };
 
-/** A short, human label for a tool call. `r` = {text, hasImage} once its result is in (and not an error). */
+const VERSIONED_WRITES = new Set(["create_card", "propose_edit", "propose_link", "merge_cards", "propose_artifact"]);
+/** A short, human label for a tool call. A write into another project version carries its tag ("· v1"). */
 function toolLabel(name, input, r) {
+  const label = toolLabelBase(name, input, r);
+  const v = typeof input?.version === "string" ? input.version.trim() : "";
+  return v && VERSIONED_WRITES.has(shortTool(name)) ? `${label} · ${clip(v, 24)}` : label;
+}
+
+/** `r` = {text, hasImage} once its result is in (and not an error). */
+function toolLabelBase(name, input, r) {
   const a = input ?? {};
   switch (shortTool(name)) {
     case "read_card": {

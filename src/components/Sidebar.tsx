@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type HTMLAttributes } from "react";
 import { api, type Folder, type ProjectSummary } from "../api";
-import { folderName, type Workspace } from "../state/useWorkspace";
+import { cardVersions, folderName, isVersion, type Workspace } from "../state/useWorkspace";
 import { Modal } from "../ui/Modal";
 import { useTheme } from "../theme/ThemeContext";
 import { IconDoc, IconFolder, IconInbox, IconPlus, IconPower, IconTrash } from "./Icons";
@@ -315,11 +315,17 @@ function useFolderTree(ws: Workspace) {
       ws.reparentFolder(id, target);
     },
   });
-  return { collapsed, toggle, folders, has: folders.length > 0, over, setOver, dropProps, count: (id: string) => Object.keys(d?.canvases[id]?.cards ?? {}).length };
+  const inVersion = d ? cardVersions(d) : new Map<string, string>();
+  /** Cards on a folder's canvas; for a version, every card in it. */
+  const count = (id: string) => (isVersion(folders.find((f) => f.id === id)) ? [...inVersion.values()].filter((v) => v === id).length : Object.keys(d?.canvases[id]?.cards ?? {}).length);
+  return { collapsed, toggle, folders, has: folders.length > 0, over, setOver, dropProps, count };
 }
 
 function FolderRows({ tree, ws, parent, depth }: { tree: ReturnType<typeof useFolderTree>; ws: Workspace; parent: string | null; depth: number }) {
-  const kids = tree.folders.filter((f) => f.parent === parent).sort((a, b) => folderName(a).localeCompare(folderName(b)));
+  // Versions newest first, then ordinary folders by name.
+  const kids = tree.folders
+    .filter((f) => f.parent === parent)
+    .sort((a, b) => Number(isVersion(b)) - Number(isVersion(a)) || (isVersion(a) ? b.created.localeCompare(a.created) : folderName(a).localeCompare(folderName(b))));
   if (!kids.length) return null;
   return (
     <div role="group">
@@ -327,6 +333,7 @@ function FolderRows({ tree, ws, parent, depth }: { tree: ReturnType<typeof useFo
         const hasKids = tree.folders.some((x) => x.parent === f.id);
         const open = !tree.collapsed.has(f.id);
         const n = tree.count(f.id);
+        const ver = isVersion(f);
         return (
           <div key={f.id}>
             <button
@@ -335,10 +342,10 @@ function FolderRows({ tree, ws, parent, depth }: { tree: ReturnType<typeof useFo
               style={{ paddingLeft: 10 + depth * 12 }}
               aria-current={ws.folder === f.id ? "true" : undefined}
               aria-expanded={hasKids ? open : undefined}
-              title={`Open ${folderName(f)} · drag onto another folder to move it`}
+              title={ver ? `Open version ${folderName(f)}` : `Open ${folderName(f)} · drag onto another folder to move it`}
               data-drop-folder={f.id}
               data-drop-project={ws.active ?? undefined}
-              draggable
+              draggable={!ver}
               onDragStart={(e) => {
                 e.dataTransfer.setData(DRAG_TYPE, f.id);
                 e.dataTransfer.effectAllowed = "move";
@@ -361,8 +368,9 @@ function FolderRows({ tree, ws, parent, depth }: { tree: ReturnType<typeof useFo
               >
                 ›
               </span>
-              <IconFolder />
+              {ver ? <span className="version-badge" aria-hidden="true">v</span> : <IconFolder />}
               <span>{folderName(f)}</span>
+              {ver && <span className="sr-only"> (version)</span>}
               {n > 0 && <span className="badge" aria-label={`${n} card${n === 1 ? "" : "s"}`}>{n}</span>}
             </button>
             {hasKids && open && <FolderRows tree={tree} ws={ws} parent={f.id} depth={depth + 1} />}

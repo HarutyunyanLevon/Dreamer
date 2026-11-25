@@ -278,6 +278,11 @@ export function createMockApi(): Api {
       return summary(p);
     },
     loadProject: async (slug) => data(need(slug)),
+    // shortcut: the in-memory demo has no project versions; the UI behaves as a flat project.
+    migrateVersions: async () => false,
+    newVersion: async () => {
+      throw new Error("Project versions need the desktop app.");
+    },
     saveCanvas: async (slug, canvas, folder) => {
       const p = need(slug);
       const c = { ...structuredClone(canvas), frames: structuredClone(canvas.frames ?? {}), folders: structuredClone(canvas.folders ?? {}), version: 3 };

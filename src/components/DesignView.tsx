@@ -28,6 +28,8 @@ export function DesignView({ ws, onClose, onNewVersion }: { ws: Workspace; onClo
   const count = ws.projects.find((p) => p.slug === slug)?.design_versions ?? 0;
   const [versions, setVersions] = useState<DesignVersion[] | null>(null);
   const [version, setVersion] = useState<number | null>(null);
+  /** The project version's folder under design/ ("" = the flat design/v<N>/ layout). */
+  const [dir, setDir] = useState("");
   const [doc, setDoc] = useState<string>(DESIGN_DOCS[0]);
   const [text, setText] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -44,7 +46,11 @@ export function DesignView({ ws, onClose, onNewVersion }: { ws: Workspace; onClo
       .then((v) => {
         if (!live) return;
         setVersions(v);
-        setVersion(v.length ? v[v.length - 1].version : null);
+        // The open project version's newest revision, else the newest of all.
+        const open = ws.data?.meta.last_version;
+        const pick = [...v].reverse().find((e) => open && e.version_id === open) ?? v[v.length - 1];
+        setDir(pick?.dir ?? "");
+        setVersion(pick ? pick.version : null);
       })
       .catch((e) => live && setError(String(e)));
     return () => {
@@ -52,7 +58,11 @@ export function DesignView({ ws, onClose, onNewVersion }: { ws: Workspace; onClo
     };
   }, [slug, count]);
 
-  const entry = versions?.find((v) => v.version === version) ?? null;
+  const entry = versions?.find((v) => v.version === version && (v.dir ?? "") === dir) ?? null;
+  const groups = [...new Map((versions ?? []).map((v) => [v.dir ?? "", v.version_title || v.dir || ""])).entries()];
+  const revisions = (versions ?? []).filter((v) => (v.dir ?? "") === dir);
+  const revLabel = (n: number) => (dir ? `r${n}` : `v${n}`);
+  const base = dir ? `design/${dir}/r${version}` : `design/v${version}`;
   const docs = entry ? DESIGN_DOCS.filter((d) => entry.docs.length === 0 || entry.docs.includes(d)) : [];
 
   useEffect(() => {
@@ -61,13 +71,13 @@ export function DesignView({ ws, onClose, onNewVersion }: { ws: Workspace; onClo
     setText(null);
     setError(null);
     api
-      .readDesignDoc(slug, version, doc)
+      .readDesignDoc(slug, version, doc, dir)
       .then((t) => live && setText(t))
       .catch((e) => live && setError(String(e)));
     return () => {
       live = false;
     };
-  }, [slug, version, doc]);
+  }, [slug, version, doc, dir]);
 
   const html = useMemo(() => (text === null ? "" : renderDoc(text)), [text]);
 
@@ -77,7 +87,7 @@ export function DesignView({ ws, onClose, onNewVersion }: { ws: Workspace; onClo
     if (!root || version === null) return;
     let live = true;
     root.querySelectorAll<HTMLImageElement>("img[data-asset]").forEach((img) => {
-      const rel = `design/v${version}/${img.dataset.asset}`;
+      const rel = `${base}/${img.dataset.asset}`;
       const key = `${slug}/${rel}`;
       const cached = images.current.get(key);
       if (cached) {
@@ -101,7 +111,7 @@ export function DesignView({ ws, onClose, onNewVersion }: { ws: Workspace; onClo
     return () => {
       live = false;
     };
-  }, [html, slug, version]);
+  }, [html, slug, version, base]);
 
   const onBodyClick = (e: React.MouseEvent) => {
     const a = (e.target as HTMLElement).closest("a");
@@ -133,20 +143,37 @@ export function DesignView({ ws, onClose, onNewVersion }: { ws: Workspace; onClo
 
   const discuss = () => {
     ws.setContextCard(null);
-    ws.requestChat({ thread: null, text: `About the design doc ${doc} (design v${version}): ` });
+    ws.requestChat({ thread: null, text: `About the design doc ${doc} (design ${dir ? `${groups.find((g) => g[0] === dir)?.[1]} ` : ""}${revLabel(version ?? 0)}): ` });
   };
 
   return (
     <Modal onClose={onClose} label="Design" size="lg" placement="canvas" className="design-view">
       <div className="design-head">
         <h3 className="dialog-title">Design</h3>
+        {groups.length > 1 && (
+          <label className="design-version">
+            <span className="sr-only">Project version</span>
+            <select
+              value={dir}
+              onChange={(e) => {
+                const last = (versions ?? []).filter((v) => (v.dir ?? "") === e.target.value).pop();
+                setDir(e.target.value);
+                setVersion(last ? last.version : null);
+              }}
+            >
+              {groups.map(([d, t]) => (
+                <option key={d} value={d}>{t || "Before versions"}</option>
+              ))}
+            </select>
+          </label>
+        )}
         {versions && versions.length > 0 && (
           <label className="design-version">
-            <span className="sr-only">Version</span>
+            <span className="sr-only">Revision</span>
             <select value={version ?? ""} onChange={(e) => setVersion(Number(e.target.value))}>
-              {[...versions].reverse().map((v) => (
+              {[...revisions].reverse().map((v) => (
                 <option key={v.version} value={v.version}>
-                  v{v.version} · {new Date(v.created).toLocaleDateString()} · {v.scope}
+                  {revLabel(v.version)} · {new Date(v.created).toLocaleDateString()} · {v.scope}
                 </option>
               ))}
             </select>
@@ -176,7 +203,7 @@ export function DesignView({ ws, onClose, onNewVersion }: { ws: Workspace; onClo
             {error ? <p className="setup-error">{error}</p> : text === null ? <p className="chat-sub">Loading…</p> : <div className="doc" dangerouslySetInnerHTML={{ __html: html }} />}
           </ScrollArea>
           <div className="editor-actions design-actions">
-            <button type="button" className="btn" onClick={() => void api.openDesignFolder(slug, entry.version).catch((e) => ws.setError(String(e)))}>Open folder</button>
+            <button type="button" className="btn" onClick={() => void api.openDesignFolder(slug, entry.version, entry.dir).catch((e) => ws.setError(String(e)))}>Open folder</button>
             <button type="button" className="btn" onClick={() => void copyPrompt()} title={CLAUDE_CODE_PROMPT}>{copied ? "Copied" : "Copy Claude Code prompt"}</button>
             <button type="button" className="btn" onClick={discuss} title="Open the project chat about this document">Discuss with Claude</button>
             <div className="side-spacer" />

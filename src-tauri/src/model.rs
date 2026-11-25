@@ -268,8 +268,20 @@ pub struct Frontmatter {
     /// Display order; the first image is the cover.
     #[serde(default, deserialize_with = "lenient_list")]
     pub attachments: Vec<Attachment>,
+    /// The card this one was copied from (a new project version, or "Apply to" in Compare). Set on
+    /// copy, never changed after.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<Origin>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
+}
+
+/// A card's lineage: the card it was copied from and the version (folder id) that card was in.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+pub struct Origin {
+    pub card: String,
+    #[serde(default)]
+    pub version: String,
 }
 
 impl Frontmatter {
@@ -349,9 +361,12 @@ pub struct NewCard {
     pub attachments: Option<Vec<Attachment>>,
     pub x: Option<f64>,
     pub y: Option<f64>,
-    /// The folder whose canvas the card lands on (None = the project root).
+    /// The folder whose canvas the card lands on (None = the open version, or the root without versions).
     #[serde(default)]
     pub folder: Option<String>,
+    /// Lineage of a card copied across versions (Compare's "Apply to").
+    #[serde(default)]
+    pub origin: Option<Origin>,
 }
 
 #[derive(Deserialize, Debug, Default)]
@@ -452,8 +467,25 @@ pub struct Folder {
     pub updated: String,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub nudge_off: bool,
+    /// "version" for a project version (always top-level); absent = an ordinary folder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// A version: the version it was copied from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_from: Option<String>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
+}
+
+pub const KIND_VERSION: &str = "version";
+
+impl Folder {
+    pub fn is_version(&self) -> bool {
+        self.kind.as_deref() == Some(KIND_VERSION) && self.parent.is_none()
+    }
+    pub fn name(&self) -> String {
+        if self.title.trim().is_empty() { "Untitled folder".into() } else { self.title.trim().to_string() }
+    }
 }
 
 /// folders.json.
@@ -543,6 +575,9 @@ pub struct ProjectMeta {
     /// while this equals `handoff_target`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub handoff_target_confirmed: Option<String>,
+    /// The project version (folder id) that opens by default; also the "open version" Claude works in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_version: Option<String>,
     /// Keys Dreamer doesn't know (hand edits, newer versions) survive a rewrite.
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
@@ -550,7 +585,7 @@ pub struct ProjectMeta {
 
 impl ProjectMeta {
     pub fn named(name: &str) -> ProjectMeta {
-        ProjectMeta { name: name.into(), theme: None, created: now_stamp(), handoff_target: None, handoff_target_confirmed: None, extra: BTreeMap::new() }
+        ProjectMeta { name: name.into(), theme: None, created: now_stamp(), handoff_target: None, handoff_target_confirmed: None, last_version: None, extra: BTreeMap::new() }
     }
 }
 
@@ -585,6 +620,9 @@ pub struct ProjectPatch {
     /// Hides the root canvas's "Tidy this folder?" hint (folders keep theirs in folders.json).
     #[serde(default)]
     pub nudge_off: Option<bool>,
+    /// The version that opens by default (must be a version folder).
+    #[serde(default)]
+    pub last_version: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -833,6 +871,9 @@ pub struct ProjectData {
     pub proposals: BTreeMap<String, Value>,
     /// Files that could not be read (shown to the user, never fatal).
     pub warnings: Vec<String>,
+    /// The root has ordinary top-level folders and no versions yet: the UI asks which are versions.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version_migration: Option<Value>,
 }
 
 #[cfg(test)]

@@ -82,6 +82,22 @@ pub fn load_project(state: State<AppState>, slug: String) -> Result<ProjectData>
     with_ws(&state, |ws| ws.load_project(&slug))
 }
 
+/// The one-time "Treat these folders as versions?" answer: the folder ids that become versions.
+#[tauri::command(async)]
+pub fn migrate_versions(state: State<AppState>, slug: String, versions: Vec<String>) -> Result<bool> {
+    with_ws(&state, |ws| ws.migrate_versions(&slug, Some(versions)))
+}
+
+/// "New version from <from>…": a full copy (see storage/versions.rs). Returns `{ version, cards }`.
+#[tauri::command(async)]
+pub fn new_version(state: State<AppState>, slug: String, from: String, title: String) -> Result<Value> {
+    let out = with_ws(&state, |ws| ws.new_version(&slug, &from, &title))?;
+    if let Ok(mut idx) = state.search.lock() {
+        idx.mark_dirty(Some(&slug));
+    }
+    Ok(out)
+}
+
 #[tauri::command(async)]
 pub fn save_canvas(state: State<AppState>, slug: String, canvas: Canvas, folder: Option<String>) -> Result<()> {
     with_ws(&state, |ws| ws.save_canvas(&slug, folder.as_deref().filter(|f| !f.is_empty()), &canvas))
@@ -302,16 +318,20 @@ pub fn list_design_versions(state: State<AppState>, slug: String) -> Result<Vec<
 }
 
 #[tauri::command(async)]
-pub fn read_design_doc(state: State<AppState>, slug: String, version: u32, name: String) -> Result<String> {
-    with_ws(&state, |ws| crate::handoff::read_doc(&ws.existing_project_dir(&slug)?, version, &name))
+pub fn read_design_doc(state: State<AppState>, slug: String, version: u32, name: String, dir: Option<String>) -> Result<String> {
+    with_ws(&state, |ws| crate::handoff::read_doc_in(&ws.existing_project_dir(&slug)?, dir.as_deref().unwrap_or(""), version, &name))
 }
 
-/// Shows one design version's folder in the file manager.
+/// Shows one design revision's folder in the file manager (`dir`: the version's folder under design/).
 #[tauri::command(async)]
-pub fn open_design_folder(state: State<AppState>, slug: String, version: u32) -> Result<()> {
-    let dir = with_ws(&state, |ws| Ok(crate::handoff::version_dir(&ws.existing_project_dir(&slug)?, version)))?;
+pub fn open_design_folder(state: State<AppState>, slug: String, version: u32, dir: Option<String>) -> Result<()> {
+    let d = dir.unwrap_or_default();
+    if d.contains(['/', '\\']) || d.starts_with('.') {
+        return Err(AppError::Invalid(format!("invalid design folder {d:?}")));
+    }
+    let dir = with_ws(&state, |ws| Ok(crate::handoff::revision_dir(&ws.existing_project_dir(&slug)?, &d, version)))?;
     if !dir.is_dir() {
-        return Err(AppError::NotFound(format!("design/v{version}")));
+        return Err(AppError::NotFound(format!("{}", dir.display())));
     }
     #[cfg(windows)]
     let program = "explorer";

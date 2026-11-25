@@ -238,6 +238,8 @@ pub fn run() {
             commands::update_project,
             commands::load_project,
             commands::save_canvas,
+            commands::migrate_versions,
+            commands::new_version,
             commands::save_layout,
             commands::delete_folder,
             commands::create_card,

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, type Card, type Gap, type HandoffEvent, type HandoffRepoResult, type HandoffScope, type HandoffSpec, type ProjectData } from "../api";
-import { folderChain, folderName, type Workspace } from "../state/useWorkspace";
+import { cardVersions, folderChain, folderName, versionOf, versionsOf, type Workspace } from "../state/useWorkspace";
 import { STAGES, STAGE_LABEL, type StageId } from "../theme/types";
 import { Modal } from "../ui/Modal";
 import { CARD_H, CARD_W } from "./cardGeometry";
@@ -110,7 +110,8 @@ const LINK_DEPTH = 2;
 
 /** The cards a spec covers. The core resolves the scope again when it runs; this is the preview. */
 export function cardsInScope(data: ProjectData, spec: HandoffSpec): Card[] {
-  const live = data.cards.filter((c) => !c.ghost);
+  const of = spec.version ? cardVersions(data) : null;
+  const live = data.cards.filter((c) => !c.ghost && (!of || of.get(c.id) === spec.version));
   const byId = new Map(live.map((c) => [c.id, c]));
   let base = new Set<string>();
   const s = spec.scope;
@@ -204,7 +205,10 @@ function HandoffDialog({
 
   const scope: HandoffScope =
     kind === "project" ? { kind } : kind === "selection" ? { kind, ids: selection } : kind === "frames" ? { kind, ids: [...frameIds] } : kind === "folder" ? { kind, id: scopeFolder ?? "" } : { kind: "card", id: fromCard?.id ?? "" };
-  const spec: HandoffSpec = { scope, stages: ALL_STAGES.filter((s) => stages.has(s)), include_stickies: stickies };
+  // Project versions: the pack is of one version, the open one by default.
+  const versions = versionsOf(data.folders);
+  const [version, setVersion] = useState<string | undefined>(() => versionOf(data.folders, initial.kind === "folder" ? initial.id : ws.folder)?.id ?? data.meta.last_version ?? versions[versions.length - 1]?.id);
+  const spec: HandoffSpec = { scope, stages: ALL_STAGES.filter((s) => stages.has(s)), include_stickies: stickies, ...(versions.length && version ? { version } : {}) };
   const inScope = cardsInScope(data, spec);
   const target = data.meta.handoff_target ?? null;
 
@@ -322,7 +326,7 @@ function HandoffDialog({
   const locked = running || starting || busy;
   const scopeEmpty = (kind === "frames" && frameIds.size === 0) || inScope.length === 0;
   const scopeOptions: { kind: HandoffScope["kind"]; label: string; disabled?: string }[] = [
-    { kind: "project", label: "Whole project" },
+    { kind: "project", label: versions.length ? "Whole version" : "Whole project" },
     { kind: "selection", label: selection.length ? `Selection (${selection.length})` : "Selection", disabled: selection.length ? undefined : "Select cards on the canvas first" },
     { kind: "frames", label: "Frames", disabled: frames.length ? undefined : "This project has no frames" },
   ];
@@ -333,6 +337,20 @@ function HandoffDialog({
     <Modal onClose={close} label="Summarize: handoff pack" size="md" className="handoff-dialog">
       <h3 className="dialog-title">Summarize into a handoff pack</h3>
       <p className="chat-sub handoff-lede">Claude turns the cards into design docs, a roadmap and a CLAUDE.md that Claude Code can build from. Each run is saved as a new version.</p>
+
+      {versions.length > 1 && (
+        <fieldset className="handoff-group" disabled={locked}>
+          <legend>Version</legend>
+          <div className="seg" role="radiogroup" aria-label="Project version">
+            {versions.map((v) => (
+              <button key={v.id} type="button" role="radio" aria-checked={version === v.id} className={"chip" + (version === v.id ? " on" : "")} onClick={() => setVersion(v.id)}>
+                {folderName(v)}
+              </button>
+            ))}
+          </div>
+          <p className="chat-sub">Saved as the next revision of {folderName(versions.find((v) => v.id === version))} (design/&lt;version&gt;/r&lt;N&gt;/).</p>
+        </fieldset>
+      )}
 
       <fieldset className="handoff-group" disabled={locked}>
         <legend>Scope</legend>
@@ -508,7 +526,7 @@ interface RunState {
   written: number;
   doc: string | null;
   note: string | null;
-  result: { version: number; dir: string; warnings: string[]; repo: HandoffRepoResult | null } | null;
+  result: { version: number; label?: string; designDir?: string; dir: string; warnings: string[]; repo: HandoffRepoResult | null } | null;
   error: string | null;
 }
 
@@ -523,7 +541,7 @@ function reduceRun(prev: RunState, e: HandoffEvent): RunState {
     case "note":
       return { ...r, note: e.note || r.note };
     case "done":
-      return e.mode === "generate" ? { ...r, phase: "done", result: { version: e.version, dir: e.dir, warnings: e.warnings, repo: e.repo } } : r;
+      return e.mode === "generate" ? { ...r, phase: "done", result: { version: e.version, label: e.label, designDir: e.design_dir, dir: e.dir, warnings: e.warnings, repo: e.repo } } : r;
     case "error":
       return { ...r, error: e.message };
     default:
@@ -553,7 +571,7 @@ function HandoffProgress({ run, onCancel, onClose, onOpen }: { run: RunState; on
     <section className="glass handoff-progress" aria-label="Handoff pack progress" aria-live="polite" data-wheel-boundary="">
       <div className="handoff-progress-head">
         <div className="orb small" aria-hidden="true" />
-        <strong>{r ? `Design v${r.version} is ready` : run.error ? "The handoff pack failed" : "Writing the handoff pack"}</strong>
+        <strong>{r ? `Design ${r.label ?? `v${r.version}`} is ready` : run.error ? "The handoff pack failed" : "Writing the handoff pack"}</strong>
       </div>
       {!r && !run.error && (
         <div className="handoff-activity scroll scroll-y">
@@ -568,7 +586,7 @@ function HandoffProgress({ run, onCancel, onClose, onOpen }: { run: RunState; on
       {run.error && <p className="setup-error" role="alert">{run.error} Nothing was written.</p>}
       {r && (
         <div className="handoff-result">
-          <p className="chat-sub">Saved in the project under design/v{r.version}.</p>
+          <p className="chat-sub">Saved in the project under {r.designDir ? `design/${r.designDir}/r${r.version}` : `design/v${r.version}`}.</p>
           {r.repo && (r.repo.error ? <p className="setup-error">Copying to {r.repo.path} failed: {r.repo.error}</p> : <p className="chat-sub">Copied to {r.repo.path} (docs/design/ and CLAUDE.md).</p>)}
           {[...r.warnings, ...(r.repo?.warnings ?? [])].map((w) => (
             <p key={w} className="chat-sub">{w}</p>
