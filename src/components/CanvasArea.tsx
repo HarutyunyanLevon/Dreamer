@@ -22,6 +22,7 @@ import { ContextMenu, type MenuSection } from "./ContextMenu";
 import { menuFor, type MenuEnv, type MenuTarget } from "./canvasMenus";
 import { CardAttachments, ClipPopover, Lightbox, droppedUrl, imageFiles, isClip, isImage } from "./Attachments";
 import { asUrl } from "../util/media";
+import { looksLikeBundle, openImport } from "./Import";
 import { TrashView } from "./TrashView";
 import { VersionMenu, openVersion } from "./Versions";
 import { ProposalView } from "./ProposalView";
@@ -886,28 +887,77 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
     async (e: React.DragEvent) => {
       e.preventDefault();
       const files = imageFiles(e.dataTransfer.files);
+      const md = Array.from(e.dataTransfer.files).filter((f) => /\.md$/i.test(f.name));
+      if (!files.length && md.length) {
+        const at = worldAt(e.clientX, e.clientY);
+        for (const f of md) {
+          const text = await f.text();
+          if (looksLikeBundle(text)) return openImport(text, { at: [at.x, at.y] });
+        }
+        ws.toast("That file isn't a Dreamer bundle.");
+        return;
+      }
       await addAt(e.clientX, e.clientY, files, files.length ? null : droppedUrl(e.dataTransfer), e.target as Element);
     },
-    [addAt],
+    [addAt, worldAt, ws],
+  );
+
+  /** A text card from pasted text: first line = title (max 80), rest = body; long text gets the "Split into cards" chip. */
+  const textCardAt = useCallback(
+    async (text: string, at: { x: number; y: number }) => {
+      const t = text.trim();
+      const [first, ...rest] = t.split("\n");
+      const short = first.trim().length <= 80;
+      await ws.createCard({
+        title: short ? first.trim() : `${first.trim().slice(0, 77).trimEnd()}…`,
+        body: short ? rest.join("\n").trim() : t,
+        ...(t.length > 600 ? { fields: { split_offer: true } } : {}),
+        ...at,
+      });
+    },
+    [ws],
   );
 
   // Paste on the canvas (nothing focused, no popup): onto the card under the pointer, else a new card there.
   const addAtRef = useRef(addAt);
   addAtRef.current = addAt;
+  const worldAtRef = useRef(worldAt);
+  worldAtRef.current = worldAt;
+  const textCardRef = useRef(textCardAt);
+  textCardRef.current = textCardAt;
+  const wsRef2 = useRef(ws);
+  wsRef2.current = ws;
   useEffect(() => {
     const onPaste = (e: ClipboardEvent) => {
       if (dialogOpen() || !rootRef.current) return;
       const t = e.target as HTMLElement | null;
       if (t?.closest?.("input, textarea, select, [contenteditable]")) return;
-      const files = imageFiles(e.clipboardData?.items);
-      const url = files.length ? null : asUrl(e.clipboardData?.getData("text/plain"));
-      if (!files.length && !url) return;
+      const cd = e.clipboardData;
+      const text = cd?.getData("text/plain") ?? "";
+      const files = imageFiles(cd?.items);
+      const others = files.length ? [] : Array.from(cd?.files ?? []);
+      const url = files.length || others.length ? null : asUrl(text);
+      if (!files.length && !url && !others.length && !text.trim()) return;
       const { x, y } = lastPointer.current;
       const r = rootRef.current.getBoundingClientRect();
       const inside = x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
       const px = inside ? x : r.left + r.width / 2;
       const py = inside ? y : r.top + r.height / 2;
       e.preventDefault();
+      const w = worldAtRef.current(px, py);
+      // bundle -> image -> files -> URL -> text
+      if (!files.length && looksLikeBundle(text)) return openImport(text, { at: [w.x, w.y] });
+      if (others.length) {
+        void (async () => {
+          for (const f of others) {
+            const t = /\.md$/i.test(f.name) ? await f.text() : "";
+            if (looksLikeBundle(t)) return openImport(t, { at: [w.x, w.y] });
+          }
+          wsRef2.current.toast("Only images and .dreamer.md files can be pasted.");
+        })();
+        return;
+      }
+      if (!files.length && !url) return void textCardRef.current(text, w);
       void addAtRef.current(px, py, files, url, inside ? document.elementFromPoint(px, py) : null);
     };
     window.addEventListener("paste", onPaste);
@@ -1026,11 +1076,10 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
         ws.toast("There's nothing to paste.");
         return;
       }
-      const [first, ...rest] = t.split("\n");
-      const short = first.length <= 80;
-      await ws.createCard({ title: short ? first.trim() : `${first.slice(0, 77).trimEnd()}…`, body: short ? rest.join("\n").trim() : t, ...at });
+      if (looksLikeBundle(t)) return openImport(t, { at: [at.x, at.y] });
+      await textCardAt(t, at);
     },
-    [ws],
+    [ws, textCardAt],
   );
 
   /** Shift+F10 / Menu key: the menu for the selection, the open card, the selected frame, or the canvas. */

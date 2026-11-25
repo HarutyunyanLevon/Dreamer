@@ -103,6 +103,14 @@ export const tauriApi: Api = {
   autostartEnabled: () => invoke("autostart_enabled"),
   setAutostart: (enabled) => invoke("set_autostart", { enabled }),
   hideToTray: () => invoke("hide_to_tray"),
+  parseBundle: (text, target) => invoke("parse_bundle", { text, target: target ?? null }),
+  applyBundle: (text, target) => invoke("apply_bundle", { text, target: target ?? null }),
+  undoBundle: (result) => invoke("undo_bundle", { result }),
+  scanImports: () => invoke("scan_imports"),
+  readImport: (path) => invoke("read_import", { path }),
+  archiveImport: (path) => invoke("archive_import", { path }),
+  hotkeyStatus: () => invoke("hotkey_status"),
+  splitText: (text) => invoke("split_text", { text }),
   onTrayNotice: (cb) => listen("tray-notice", () => cb()),
   onChange: async (cb) => {
     const un = await listen<ChangeEvent[]>("workspace-changed", (e) => cb(e.payload));

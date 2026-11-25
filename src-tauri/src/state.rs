@@ -7,6 +7,11 @@ use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_global_shortcut::GlobalShortcutExt;
 
+/// The registered "Clipboard to Inbox" shortcut (the handler tells the two shortcuts apart by it).
+pub static CLIPBOARD_SHORTCUT: Mutex<Option<tauri_plugin_global_shortcut::Shortcut>> = Mutex::new(None);
+/// Why the last registration of [quick capture, clipboard] failed.
+pub static HOTKEY_ERRORS: Mutex<[Option<String>; 2]> = Mutex::new([None, None]);
+
 /// Remembers where the workspace lives (app config dir, not inside the workspace itself).
 #[derive(Serialize, Deserialize, Default)]
 struct AppConfig {
@@ -42,7 +47,10 @@ impl AppState {
         let cfg: AppConfig = std::fs::read_to_string(&config_path).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
         let root = cfg.workspace_root.map(PathBuf::from).unwrap_or_else(default_root);
         let ws = Workspace::open(&root)?;
-        let hotkey = ws.get_settings()?.hotkey;
+        let (hotkey, clip_hotkey) = {
+            let s = ws.get_settings()?;
+            (s.hotkey, s.clipboard_hotkey)
+        };
         let state = AppState {
             ws: Mutex::new(ws),
             claude: crate::sidecar::ClaudeState::default(),
@@ -52,7 +60,7 @@ impl AppState {
             config_path,
         };
         // The file watcher starts with the main window's first show (lib.rs), so an autostart boot stays light.
-        Self::register_hotkey(app, &hotkey);
+        Self::register_hotkeys(app, &hotkey, &clip_hotkey);
         Ok(state)
     }
 
@@ -191,11 +199,34 @@ impl AppState {
 
     /// Replace the globally registered quick-capture shortcut. Best-effort: an invalid or already-taken
     /// combo logs a warning instead of failing the whole settings update.
-    pub fn register_hotkey(app: &AppHandle, hotkey: &str) {
+    /// Registers both global shortcuts (quick capture, "Clipboard to Inbox"). The error of each
+    /// (None = fine) is kept for the settings page (`hotkey_status`).
+    pub fn register_hotkeys(app: &AppHandle, capture: &str, clipboard: &str) {
         let gs = app.global_shortcut();
         let _ = gs.unregister_all();
-        if let Err(e) = gs.register(hotkey) {
-            eprintln!("[dreamer] could not register hotkey {hotkey:?}: {e}");
+        let mut errs: [Option<String>; 2] = [None, None];
+        if let Err(e) = gs.register(capture) {
+            eprintln!("[dreamer] could not register hotkey {capture:?}: {e}");
+            errs[0] = Some(e.to_string());
+        }
+        match clipboard.parse::<tauri_plugin_global_shortcut::Shortcut>() {
+            Ok(sc) => {
+                if let Err(e) = gs.register(sc) {
+                    eprintln!("[dreamer] could not register hotkey {clipboard:?}: {e}");
+                    errs[1] = Some(e.to_string());
+                } else if let Ok(mut c) = CLIPBOARD_SHORTCUT.lock() {
+                    *c = Some(sc);
+                }
+            }
+            Err(e) => errs[1] = Some(e.to_string()),
+        }
+        if errs[1].is_some() {
+            if let Ok(mut c) = CLIPBOARD_SHORTCUT.lock() {
+                *c = None;
+            }
+        }
+        if let Ok(mut s) = HOTKEY_ERRORS.lock() {
+            *s = errs;
         }
     }
 }

@@ -1,6 +1,10 @@
 import { DESIGN_DOCS, GAP_CHECKLIST, type Api, type ArtifactView, type Attachment, type Canvas, type Card, type CardRole, type ChangeEvent, type ChatThreadFile, type ChecklistItem, type DesignVersion, type Folder, type HandoffEvent, type HandoffEventBody, type MemoryEvent, type MemoryLogEntry, type MemoryView, type NewCard, type ProjectData, type ProjectSummary, type SearchHit, type Settings, type TrashItem } from "./types";
 
 /** Same rules as the Rust core: media paths stay under media/, clips need a url. */
+const noDesktop = async (): Promise<never> => {
+  throw new Error("This works in the desktop app only.");
+};
+
 function checkAttachment(a: Attachment) {
   const paths = a.type === "image" ? [a.path] : [a.favicon, a.thumb, a.excerpt].filter((p): p is string => !!p);
   for (const p of paths) {
@@ -137,7 +141,7 @@ function mockParse(text: string): [string, string[]][] {
 const mockRender = (s: [string, string[]][]) => s.map(([n, items]) => `## ${n}\n${items.map((i) => `- ${i}\n`).join("")}`).join("\n");
 
 export function createMockApi(): Api {
-  const settings: Settings = { version: 1, theme: "pearl-glow", hotkey: "Ctrl+Shift+Space", last_project: null, show_projects: true, show_chat: true, tray_notice_shown: false, start_with_windows: true, start_hidden: true, model_chat: "sonnet", model_router: true, model_fast: "haiku", model_deep: "opus", model_export: "opus", model_memory: "haiku", compact_tokens: 50000, memory_cap: 600, local_chat: true, local_model: "qwen3.5:35b-a3b", spritecook_url: "https://api.spritecook.ai/mcp/", credit_cap: 4 };
+  const settings: Settings = { version: 1, theme: "pearl-glow", hotkey: "Ctrl+Shift+Space", clipboard_hotkey: "Ctrl+Alt+Shift+V", last_project: null, show_projects: true, show_chat: true, tray_notice_shown: false, start_with_windows: true, start_hidden: true, model_chat: "sonnet", model_router: true, model_fast: "haiku", model_deep: "opus", model_export: "opus", model_memory: "haiku", compact_tokens: 50000, memory_cap: 600, local_chat: true, local_model: "qwen3.5:35b-a3b", spritecook_url: "https://api.spritecook.ai/mcp/", credit_cap: 4 };
   let mockKey = "";
   /** Artifacts by "<slug>/<id>" (browser dev only: no versions are ever generated here). */
   const artifacts = new Map<string, ArtifactView>();
@@ -231,6 +235,7 @@ export function createMockApi(): Api {
     updateSettings: async (patch) => {
       if (patch.theme) settings.theme = patch.theme;
       if (patch.hotkey) settings.hotkey = patch.hotkey;
+      if (patch.clipboard_hotkey) settings.clipboard_hotkey = patch.clipboard_hotkey;
       if (patch.last_project !== undefined) settings.last_project = patch.last_project || null;
       if (patch.show_projects !== undefined) settings.show_projects = patch.show_projects;
       if (patch.show_chat !== undefined) settings.show_chat = patch.show_chat;
@@ -679,6 +684,14 @@ export function createMockApi(): Api {
     autostartEnabled: async () => settings.start_with_windows,
     setAutostart: async (enabled) => ((settings.start_with_windows = enabled), enabled),
     hideToTray: async () => {},
+    parseBundle: noDesktop,
+    applyBundle: noDesktop,
+    undoBundle: noDesktop,
+    scanImports: async () => [],
+    readImport: noDesktop,
+    archiveImport: async () => {},
+    hotkeyStatus: async () => [null, null],
+    splitText: noDesktop,
     onTrayNotice: async () => () => {},
     onChange: async (cb) => {
       listeners.add(cb);

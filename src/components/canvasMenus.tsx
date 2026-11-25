@@ -5,6 +5,7 @@ import type { Rect } from "./cardGeometry";
 import type { MenuItem, MenuSection } from "./ContextMenu";
 import { CONVERTIBLE, KIND_LABEL, SWATCHES, SWATCH_LABEL, hasStage, labelSize, swatchOf, type LabelSize } from "./kinds";
 import { isClip, isImage } from "./Attachments";
+import { pickBundle } from "./Import";
 import type { ArtifactType } from "../api";
 import { ARTIFACT_LABEL, ARTIFACT_TYPES, artifactType } from "./artifacts/prompts";
 
@@ -194,6 +195,8 @@ function canvasMenu(p: { x: number; y: number }, env: MenuEnv): MenuSection[] {
         },
         { label: "New folder", run: () => env.newFolder(p) },
         { label: "Paste", hint: "Ctrl+V", run: () => env.paste(p) },
+        { label: "New card from clipboard", run: () => env.paste(p) },
+        { label: "Import bundle…", run: () => pickBundle([p.x - 120, p.y - 80]) },
       ],
     },
     {
@@ -583,6 +586,7 @@ function frameMenu(id: string, env: MenuEnv): MenuSection[] {
           ],
         },
         { label: "Select contents", disabled: empty, run: () => env.select(members) },
+        { label: "New card from clipboard", run: () => env.paste({ x: f.x + f.w / 2, y: f.y + f.h / 2 }) },
         {
           label: "Turn into folder",
           run: () => {

@@ -5,6 +5,7 @@ import { Modal } from "../ui/Modal";
 import { useTheme } from "../theme/ThemeContext";
 import { IconDoc, IconFolder, IconInbox, IconPlus, IconPower, IconTrash } from "./Icons";
 import { ThemeEditor } from "./ThemeEditor";
+import { openHotkeys, pickBundle } from "./Import";
 import { ScrollArea } from "../ui/Scroll";
 
 interface Props {
@@ -168,6 +169,12 @@ export function Sidebar({ projects, active, onSelect, onCreate, onDelete, design
                 )}
               </button>
             )}
+            {p.slug === active && (
+              <button type="button" className="side-row side-sub" title="Add cards from a .dreamer.md bundle (or paste one on the canvas)" onClick={() => pickBundle()}>
+                <IconDoc />
+                <span>Import bundle…</span>
+              </button>
+            )}
           </div>
         ))}
       </ScrollArea>
@@ -254,6 +261,12 @@ export function Sidebar({ projects, active, onSelect, onCreate, onDelete, design
         </button>
       )}
 
+      {api.kind === "tauri" && (
+        <button type="button" className="side-quit" title="Global shortcuts: quick capture and Clipboard to Inbox" onClick={openHotkeys}>
+          <IconPlus />
+          Hotkeys…
+        </button>
+      )}
       {api.kind === "tauri" && (
         <button
           type="button"

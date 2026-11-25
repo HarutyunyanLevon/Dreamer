@@ -272,8 +272,21 @@ pub struct Frontmatter {
     /// copy, never changed after.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<Origin>,
+    /// The bundle and ref this card was imported from (a re-sent bundle updates it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub import: Option<ImportRef>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
+}
+
+/// Where an imported card came from (`.dreamer.md` bundle id + the card's ref in it).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+pub struct ImportRef {
+    pub bundle_id: String,
+    #[serde(rename = "ref")]
+    pub r#ref: String,
+    #[serde(default)]
+    pub source: String,
 }
 
 /// A card's lineage: the card it was copied from and the version (folder id) that card was in.
@@ -367,6 +380,11 @@ pub struct NewCard {
     /// Lineage of a card copied across versions (Compare's "Apply to").
     #[serde(default)]
     pub origin: Option<Origin>,
+    #[serde(default)]
+    pub import: Option<ImportRef>,
+    /// A bundle's build block, kept in the frontmatter as-is.
+    #[serde(default)]
+    pub build: Option<Value>,
 }
 
 #[derive(Deserialize, Debug, Default)]
@@ -630,6 +648,9 @@ pub struct Settings {
     pub version: u32,
     pub theme: String,
     pub hotkey: String,
+    /// "Clipboard to Inbox" global shortcut.
+    #[serde(default = "default_clip_hotkey")]
+    pub clipboard_hotkey: String,
     #[serde(default)]
     pub last_project: Option<String>,
     /// Left panel (projects) shown. Older files without the key show it.
@@ -749,12 +770,16 @@ fn default_model_chat() -> String {
 fn default_model_export() -> String {
     DEFAULT_MODEL_EXPORT.into()
 }
+fn default_clip_hotkey() -> String {
+    "Ctrl+Alt+Shift+V".into()
+}
 impl Default for Settings {
     fn default() -> Self {
         Settings {
             version: 1,
             theme: "pearl-glow".into(),
             hotkey: "Ctrl+Shift+Space".into(),
+            clipboard_hotkey: default_clip_hotkey(),
             last_project: None,
             show_projects: true,
             show_chat: true,
@@ -786,6 +811,7 @@ impl Default for Settings {
 pub struct SettingsPatch {
     pub theme: Option<String>,
     pub hotkey: Option<String>,
+    pub clipboard_hotkey: Option<String>,
     /// Empty string clears it.
     pub last_project: Option<String>,
     pub show_projects: Option<bool>,

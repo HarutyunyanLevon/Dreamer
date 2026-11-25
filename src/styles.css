@@ -1513,3 +1513,24 @@ input.frame-tab { cursor: text; min-width: 180px; outline: 2px solid var(--accen
 .version-row-title:hover { text-decoration: underline; }
 .version-diff { flex-basis: 100%; }
 .origin-chip { font-size: 12px; }
+
+/* ---------- .dreamer.md import, clipboard cards ---------- */
+.hotkey-toast { padding: 14px 18px; font-weight: 600; width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.import-pill {
+  position: fixed; z-index: 50; left: 50%; top: 18px; transform: translateX(-50%);
+  display: flex; align-items: center; gap: 10px; padding: 8px 10px 8px 18px; border-radius: 28px; font-weight: 600;
+}
+.import-pill > span { min-width: 0; overflow-wrap: anywhere; }
+.import-pickers { display: flex; flex-wrap: wrap; gap: 12px; margin: 8px 0; }
+.import-pickers label, .hotkey-row { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--muted); font-weight: 600; flex: 1; min-width: 150px; }
+.import-pickers select, .import-pickers input, .hotkey-row input { padding: 7px 10px; border-radius: 12px; border: 1px solid var(--line, rgba(0,0,0,.15)); background: rgba(255,255,255,.6); color: var(--ink); font: inherit; }
+.import-list { list-style: none; margin: 8px 0; padding: 0; max-height: 40vh; overflow: auto; display: flex; flex-direction: column; gap: 6px; }
+.import-list li { display: flex; align-items: baseline; gap: 10px; }
+.import-title { flex: 1; min-width: 0; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.import-badge { flex: none; font-size: 11px; font-weight: 700; padding: 2px 9px; border-radius: 10px; background: var(--accent-soft); color: var(--accent); }
+.import-badge.update { background: rgba(120, 140, 220, .2); }
+.import-badge.replace { background: rgba(200, 160, 80, .25); }
+.import-warn ul { margin: 6px 0 0; padding-left: 18px; font-size: 12px; color: var(--muted); }
+.modal-foot { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
+.split-chip { margin: 8px 0 0; }
+.split-menu { display: flex; gap: 6px; margin-top: 6px; }

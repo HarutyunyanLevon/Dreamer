@@ -163,6 +163,8 @@ export interface Card {
   merged_from?: string[];
   /** The card it was copied from (a new project version, or Compare's "Apply to"); never changes. */
   origin?: Origin;
+  /** The .dreamer.md bundle and ref this card was imported from. */
+  import?: { bundle_id: string; ref: string; source: string };
   body: string;
   /** Any other frontmatter keys found in the file are passed through untouched. */
   [extra: string]: unknown;
@@ -337,6 +339,42 @@ export interface OrganizePlanData {
   pipeline?: { groups: { id: string; title: string; purpose: string }[]; backend?: string; problems?: string[] } & Record<string, unknown>;
 }
 
+export interface ImportTarget {
+  project?: string;
+  version?: string;
+  /** "" = no default frame. */
+  frame?: string;
+  at?: [number, number];
+  open_project?: string;
+}
+export interface ImportPlan {
+  header: { bundle_id: string; title: string; project?: string; version?: string; frame?: string; source: string; created: string };
+  project: string;
+  version: string | null;
+  frame: string | null;
+  unresolved: ("project" | "version")[];
+  projects: { slug: string; name: string; versions: { id: string; title: string }[]; open_version: string | null }[];
+  frames: string[];
+  cards: { ref: string; title: string; stage: StageId; action: "new" | "update" | "replace"; card_id: string | null; frame: string | null; has_build: boolean }[];
+  warnings: string[];
+}
+export interface ImportResult {
+  project: string;
+  folder: string | null;
+  created: string[];
+  proposals: string[];
+  replaced: string[];
+  frames: string[];
+  warnings: string[];
+}
+export interface ImportOffer {
+  path: string;
+  title: string;
+  source: string;
+  count: number;
+  project: string | null;
+}
+
 /** A change Claude proposed for one card (propose_edit). Only the listed keys change. */
 export interface EditProposal {
   title?: string;
@@ -345,6 +383,8 @@ export interface EditProposal {
   stage?: StageId;
   /** New captions keyed by attachment id. */
   captions?: Record<string, string>;
+  /** From an imported bundle: what was built (shown as part of the diff). */
+  build?: Record<string, unknown>;
   reason?: string;
   created?: string;
 }
@@ -353,6 +393,8 @@ export interface Settings {
   version: number;
   theme: string;
   hotkey: string;
+  /** Global "Clipboard to Inbox" shortcut. */
+  clipboard_hotkey: string;
   last_project: string | null;
   /** Left panel (projects) shown. */
   show_projects: boolean;
@@ -403,6 +445,7 @@ export interface SpritecookKeyStatus {
 export interface SettingsPatch {
   theme?: string;
   hotkey?: string;
+  clipboard_hotkey?: string;
   /** Empty string clears it. */
   last_project?: string;
   show_projects?: boolean;
@@ -655,6 +698,17 @@ export interface Api {
   setAutostart(enabled: boolean): Promise<boolean>;
   /** Hide the main window to the tray and remember the tray notice was seen. */
   hideToTray(): Promise<void>;
+  /** .dreamer.md bundles: plan (no writes), apply, undo, and the watched drop folders. */
+  parseBundle(text: string, target?: ImportTarget): Promise<ImportPlan>;
+  applyBundle(text: string, target?: ImportTarget): Promise<ImportResult>;
+  undoBundle(result: ImportResult): Promise<void>;
+  scanImports(): Promise<ImportOffer[]>;
+  readImport(path: string): Promise<string>;
+  archiveImport(path: string): Promise<void>;
+  /** Why each global shortcut failed to register: [quick capture, clipboard to Inbox]. */
+  hotkeyStatus(): Promise<[string | null, string | null]>;
+  /** Split long text into cards on the local model (invented cards are dropped). */
+  splitText(text: string): Promise<{ cards: { title: string; body: string; tags: string[] }[]; warnings: string[] }>;
   /** The main window's X was clicked for the first time: show the one-time tray notice. */
   onTrayNotice(cb: () => void): Promise<() => void>;
   /** Starts the handoff gap check or generation (one at a time); returns the job id its events carry. */

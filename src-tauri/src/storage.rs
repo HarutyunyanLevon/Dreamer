@@ -11,7 +11,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+mod import;
 mod versions;
+pub use import::{ImportOffer, ImportPlan, ImportResult, Target};
 pub use versions::{mentions, top_version, versions_of};
 
 /// Waits between retries of a file operation that hit "in use" (about 1.5s in total).
@@ -277,6 +279,12 @@ impl Workspace {
                 return Err(AppError::Invalid("hotkey cannot be empty".into()));
             }
             s.hotkey = h;
+        }
+        if let Some(h) = patch.clipboard_hotkey {
+            if h.trim().is_empty() {
+                return Err(AppError::Invalid("hotkey cannot be empty".into()));
+            }
+            s.clipboard_hotkey = h;
         }
         if let Some(p) = patch.last_project {
             s.last_project = if p.is_empty() { None } else { Some(p) };
@@ -1119,8 +1127,9 @@ impl Workspace {
                 ghost: new.ghost.unwrap_or(false),
                 links: new.links.unwrap_or_default(),
                 branch: new.branch,
-                extra: new.merged_from.map(|ids| [("merged_from".to_string(), serde_json::json!(ids))].into_iter().collect()).unwrap_or_default(),
+                extra: new.merged_from.map(|ids| ("merged_from".to_string(), serde_json::json!(ids))).into_iter().chain(new.build.map(|b| ("build".to_string(), b))).collect(),
                 origin: new.origin.filter(|o| check_id(&o.card).is_ok()),
+                import: new.import,
             },
             body: norm_body(&new.body.unwrap_or_default()),
         };

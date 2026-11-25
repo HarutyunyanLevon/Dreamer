@@ -1,5 +1,7 @@
 mod artifacts;
+mod bundle;
 mod claude_setup;
+mod clipboard;
 mod clip;
 mod commands;
 mod credentials;
@@ -116,6 +118,8 @@ fn show_main_window(app: &AppHandle) {
         .title("Dreamer")
         .inner_size(1440.0, 900.0)
         .min_inner_size(1100.0, 600.0)
+        // Without this Windows swallows file drops, so the page never sees dropped images or bundles.
+        .disable_drag_drop_handler()
         .build();
     let Ok(w) = built else { return };
     // Heavy work starts with the first show: file watcher and QUESTIONS.md import.
@@ -178,9 +182,13 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
-                .with_handler(|app, _shortcut, event| {
+                .with_handler(|app, shortcut, event| {
                     if event.state == ShortcutState::Pressed {
-                        show_capture_window(app);
+                        if state::CLIPBOARD_SHORTCUT.lock().ok().and_then(|c| *c) == Some(*shortcut) {
+                            clipboard::clipboard_to_inbox(app);
+                        } else {
+                            show_capture_window(app);
+                        }
                     }
                 })
                 .build(),
@@ -318,6 +326,14 @@ pub fn run() {
             commands::spritecook_balance,
             commands::spritecook_key_status,
             commands::spritecook_set_key,
+            commands::parse_bundle,
+            commands::apply_bundle,
+            commands::undo_bundle,
+            commands::scan_imports,
+            commands::read_import,
+            commands::archive_import,
+            commands::hotkey_status,
+            commands::split_text,
         ])
         .build(context())
         .expect("error while building Dreamer")

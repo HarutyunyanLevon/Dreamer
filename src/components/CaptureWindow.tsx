@@ -49,6 +49,13 @@ export function CaptureWindow() {
     };
   }, []);
 
+  /** Fills the field from the clipboard (first line; a single-line field can't hold more). */
+  const paste = async () => {
+    const t = (await navigator.clipboard.readText().catch(() => "")).trim().split(/\r?\n/)[0] ?? "";
+    if (t) setText(t.slice(0, 200));
+    inputRef.current?.focus();
+  };
+
   const add = async () => {
     const title = text.trim();
     if (!title || busy) return;
@@ -104,6 +111,9 @@ export function CaptureWindow() {
         />
         <div className="capture-foot">
           <span className="capture-hint">{error ? "" : "Lands in your Inbox as a Mist card."}</span>
+          <button type="button" className="btn" onClick={() => void paste()} title="Fill from the clipboard (Ctrl+V works too)">
+            Paste clipboard
+          </button>
           <button type="button" className="btn primary" disabled={!text.trim() || busy} onClick={() => void add()} title="Add to the Inbox (Enter)">
             Add
           </button>

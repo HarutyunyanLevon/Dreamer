@@ -44,11 +44,11 @@ pub fn get_settings(state: State<AppState>) -> Result<Settings> {
 
 #[tauri::command(async)]
 pub fn update_settings(app: AppHandle, state: State<AppState>, patch: SettingsPatch) -> Result<Settings> {
-    let rehook = patch.hotkey.clone();
+    let rehook = patch.hotkey.is_some() || patch.clipboard_hotkey.is_some();
     let before = with_ws(&state, |ws| ws.get_settings())?.spritecook_url;
     let settings = with_ws(&state, |ws| ws.update_settings(patch))?;
-    if rehook.is_some() {
-        AppState::register_hotkey(&app, &settings.hotkey);
+    if rehook {
+        AppState::register_hotkeys(&app, &settings.hotkey, &settings.clipboard_hotkey);
     }
     // The sidecar gets the SpriteCook server at spawn: a new URL needs a fresh one.
     if settings.spritecook_url != before {
@@ -787,4 +787,48 @@ pub fn artifact_theme_css(state: State<AppState>, slug: String, id: String) -> R
 #[tauri::command(async)]
 pub fn artifact_themes(state: State<AppState>, slug: String) -> Result<Vec<Value>> {
     with_ws(&state, |ws| Ok(crate::artifacts::themes(ws, &slug)))
+}
+
+// ----- bundles, clipboard, drop folders -----
+
+#[tauri::command(async)]
+pub fn parse_bundle(state: State<AppState>, text: String, target: Option<crate::storage::Target>) -> Result<crate::storage::ImportPlan> {
+    with_ws(&state, |ws| ws.plan_bundle(&text, &target.unwrap_or_default()))
+}
+
+#[tauri::command(async)]
+pub fn apply_bundle(state: State<AppState>, text: String, target: Option<crate::storage::Target>) -> Result<crate::storage::ImportResult> {
+    with_ws(&state, |ws| ws.apply_bundle(&text, &target.unwrap_or_default()))
+}
+
+#[tauri::command(async)]
+pub fn undo_bundle(state: State<AppState>, result: crate::storage::ImportResult) -> Result<()> {
+    with_ws(&state, |ws| ws.undo_import(&result))
+}
+
+#[tauri::command(async)]
+pub fn scan_imports(state: State<AppState>) -> Result<Vec<crate::storage::ImportOffer>> {
+    with_ws(&state, |ws| Ok(ws.scan_imports()))
+}
+
+#[tauri::command(async)]
+pub fn read_import(state: State<AppState>, path: String) -> Result<String> {
+    with_ws(&state, |ws| ws.read_import(&path))
+}
+
+#[tauri::command(async)]
+pub fn archive_import(state: State<AppState>, path: String) -> Result<()> {
+    with_ws(&state, |ws| ws.archive_import(&path))
+}
+
+/// Why each global shortcut failed to register: [quick capture, clipboard], None = fine.
+#[tauri::command]
+pub fn hotkey_status() -> [Option<String>; 2] {
+    crate::state::HOTKEY_ERRORS.lock().map(|e| e.clone()).unwrap_or([None, None])
+}
+
+/// "Split into cards" on the local model. Runs off the main thread (it can take a minute).
+#[tauri::command(async)]
+pub fn split_text(state: State<AppState>, text: String) -> Result<crate::clipboard::SplitResult> {
+    crate::clipboard::split_local(&state, &text)
 }

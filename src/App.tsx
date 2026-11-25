@@ -10,13 +10,24 @@ import { SearchPalette } from "./components/SearchPalette";
 import { ShaderBackground } from "./components/ShaderBackground";
 import { Sidebar } from "./components/Sidebar";
 import { VersionsHost } from "./components/Versions";
+import { ImportHost } from "./components/Import";
 import { useEffect, useState } from "react";
 import { useWorkspace } from "./state/useWorkspace";
 import { ThemeProvider } from "./theme/ThemeContext";
 
-const isCapture = typeof window !== "undefined" && new URLSearchParams(window.location.search).has("capture");
+const query = typeof window !== "undefined" ? new URLSearchParams(window.location.search) : new URLSearchParams();
+const isCapture = query.has("capture");
+const toastMsg = query.has("toast") ? query.get("msg") ?? "" : null;
 
 export default function App() {
+  // The small self-closing window of the "Clipboard to Inbox" hotkey (Rust closes it).
+  if (toastMsg !== null) {
+    return (
+      <ThemeProvider>
+        <div className="capture-popup"><div className="glass hotkey-toast" role="status">{toastMsg}</div></div>
+      </ThemeProvider>
+    );
+  }
   if (isCapture) {
     return (
       <ThemeProvider>
@@ -75,6 +86,7 @@ function MainApp() {
       <HandoffHost ws={ws} />
       <MemoryHost ws={ws} />
       <VersionsHost ws={ws} />
+      <ImportHost ws={ws} />
       <PanelTabs left={panels.left} right={panels.right} onLeft={panels.toggleLeft} onRight={panels.toggleRight} />
       <TrayNotice />
       {searchOpen && <SearchPalette ws={ws} onClose={() => setSearchOpen(false)} />}
