@@ -446,4 +446,3 @@ Full diagnosis, verdicts and numbers: `docs/reliability-report.md`.
 - **Design view:** a project-version picker (shown with more than one) and a revision picker inside it; it opens on the open version's newest revision.
 - **The in-memory demo (mock API) has no versions**; New version there shows an error.
 - **Tests:** Rust `storage::versions::tests` (migration flat/with folders, copy + lineage + links + media refcount + undo/restore, origin chains); `npm run test:versions` (Compare's lineage matching).
-- **Not pushed:** `git push` needed approval in the unattended run; the commits are local on `reliability`.
