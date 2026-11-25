@@ -56,6 +56,8 @@ pub struct ClaudeState {
     pipelines: Mutex<std::collections::HashMap<String, Arc<AtomicBool>>>,
     /// Build runs in progress, by run id. See build_run.rs.
     pub build: Mutex<std::collections::HashMap<String, crate::build_run::Run>>,
+    /// The running repo scan, if any. See scan.rs.
+    pub scan: Mutex<Option<crate::scan::Job>>,
 }
 
 /// One sidecar turn the app's watchdog keeps an eye on.
@@ -110,6 +112,7 @@ impl Default for ClaudeState {
             folder: Mutex::new(None),
             setup: Default::default(),
             handoff: Mutex::new(None),
+            scan: Mutex::new(None),
             pending_ctx: Default::default(),
             memory: Default::default(),
             router: Default::default(),
@@ -430,6 +433,7 @@ fn fail_in_flight(app: &AppHandle, generation: u64, code: Option<i32>, tail: &[S
             crate::handoff::finish(&app, &state, &json!({ "type": "oneshot_done", "job": job, "ok": false, "error": what }));
         }
         crate::build_run::on_sidecar_gone(&app, &what);
+        crate::scan::on_sidecar_gone(&app, &state, &what);
         for job in crate::memory::running_jobs(&state) {
             if Some(&job) != keep.as_ref() {
                 crate::memory::on_done(&app, &job, false);
@@ -522,6 +526,8 @@ fn handle_sidecar_message(app: &AppHandle, msg: Value) {
             crate::harness::fault_tool_delay(&tool);
             let result = if tool == "build_permission" {
                 crate::build_run::permission(&app, &state, &input)
+            } else if tool.starts_with("scan_") {
+                crate::scan::run_tool(&app, &state, &tool, input)
             } else if tool.starts_with("handoff_") {
                 crate::handoff::run_tool(&app, &state, &tool, input)
             } else if matches!(tool.as_str(), "remember" | "forget") {
@@ -535,6 +541,11 @@ fn handle_sidecar_message(app: &AppHandle, msg: Value) {
             };
             write_line(&state, &reply);
         });
+        return;
+    }
+    if msg.get("type").and_then(Value::as_str).is_some_and(|t| t == "scan_step" || t == "scan_done") {
+        let app = app.clone();
+        std::thread::spawn(move || crate::scan::on_message(&app, &app.state::<AppState>(), &msg));
         return;
     }
     if msg.get("type").and_then(Value::as_str) == Some("oneshot_done") {

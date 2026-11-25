@@ -26,6 +26,9 @@
 //                                    -- a handoff pack session: its own one-turn query, not a chat
 //                                       thread; tools are handoff_* requests carrying the job id
 //        {type:"oneshot_cancel", job}                      -- interrupt it; Rust drops its output
+//        {type:"scan_start", job, cwd, prompt, model}   -- repo scan: Read/Glob/Grep in cwd, tools scan_* (list_cards,
+//                                       report_progress, emit_bundle); ends with scan_done {job, ok, error?}.
+//                                       Cancel with oneshot_cancel.
 //        {type:"build_start", run, cwd, prompt, model}  -- a build run's task: Claude Code itself in the repo
 //                                       (its CLAUDE.md and .claude settings), every tool call gated by Rust
 //                                       (tool_request build_permission). One session per task.
@@ -2386,6 +2389,105 @@ function cancelOneshot(job) {
   }
 }
 
+// ---- Repo scan: one query in the linked repo (Read, Glob, Grep only) that ends in one emit_bundle ----
+
+const SCAN_SYSTEM = [
+  "You scan a code repository (your working directory) for Dreamer, a game-design idea app, and report what is " +
+    "ALREADY BUILT as cards in one .dreamer.md bundle. You can only Read, Glob and Grep. Skip .git, node_modules, " +
+    "build/, dist/, Library/, Intermediate/, Binaries/, .vs/ and third-party or vendor folders. Start with list_cards " +
+    "(the cards Dreamer already has, and its tags), then look at the repo (README, manifests, top-level layout, then the " +
+    "code that implements each feature). Call report_progress(note) now and then with a few words on what you are on. " +
+    "When done, call emit_bundle(markdown) exactly once, then end with one short sentence.",
+  "Find user-facing features and core systems, not files or classes: 'Harpoon dash', not 'PlayerController.cpp'. One card " +
+    "per feature. Every card has stage built and a build block. Never invent: the body says what exists and how it " +
+    "behaves, taken from the code. No plans, no ideas, no guesses; if you are unsure what something does, leave it out or " +
+    "mark the build status partial and say what is missing in build.notes. Titles are concrete and at most 60 characters.",
+  "If an existing card (from list_cards) describes the same feature, put its id in the card's id key: Dreamer shows " +
+    "it as an update proposal that adds the build info. Otherwise leave id out. Reuse the existing tags (lowercase, at " +
+    "most 4 per card). Put each card in a frame named for its area (the frame key), for example Combat, Fishing, UI.",
+  "Format (nothing before or after it):\n---\ndreamer_bundle: 1\nbundle_id: scan-<yyyy-mm-dd>\ntitle: Repo scan\n" +
+    "source: dreamer-scan\ncreated: <ISO time>\n---\n<!-- card -->\n---\nref: <unique-kebab-case>\nid: <existing card id, " +
+    "only to update>\ntitle: <title>\nstage: built\ntags: [a, b]\nframe: <Area>\nbuild:\n  status: built | partial\n  " +
+    "files: [<1-5 main repo-relative files>]\n  notes: <one line>\n---\n<markdown body>\n<!-- card -->\n...\n" +
+    "Never put <!-- card --> inside a body. Keep the card count within the limit you are given: when there are more " +
+    "features, keep the most important and merge small ones.",
+].join("\n\n");
+
+function scanTools(job) {
+  const call = (name, input) => requestTool(`scan_${name}`, { ...input, job });
+  const wrap = (fn) => async (args) => {
+    try {
+      return await fn(args);
+    } catch (e) {
+      return fail(e);
+    }
+  };
+  return [
+    tool("list_cards", "The cards Dreamer already has in the open version (id, title, stage, tags, frame) and every tag in use.", {}, wrap(async () => text(await call("list_cards", {})))),
+    tool("report_progress", "Tell the user what you are on (a few words, shown in the progress panel).", { note: z.string() }, wrap(async (a) => text(await call("report_progress", a)))),
+    tool("emit_bundle", "Hand over the finished bundle, once. A rejected bundle comes back with what to fix.", { markdown: z.string() }, wrap(async (a) => text(await call("emit_bundle", a)))),
+  ];
+}
+
+function startScan(msg) {
+  const { job, cwd, prompt } = msg;
+  const model = typeof msg.model === "string" && msg.model ? msg.model : null;
+  const tools = scanTools(job);
+  const turns = makeTurnQueue();
+  const entry = { q: null, turns, cancelled: false };
+  oneshots.set(job, entry);
+  try {
+    entry.q = query({
+      prompt: turns,
+      options: {
+        cwd,
+        systemPrompt: { type: "custom", prompt: SCAN_SYSTEM },
+        // Only these built-in tools exist; Rust's scan_permission also keeps them inside the repo.
+        tools: ["Read", "Glob", "Grep"],
+        allowedTools: tools.map((t) => `mcp__scan__${t.name}`),
+        canUseTool: async (toolName, input) => {
+          try {
+            const r = await requestTool("scan_permission", { job, tool: toolName, input }, 15000);
+            return r?.behavior === "allow" ? { behavior: "allow", updatedInput: input } : { behavior: "deny", message: r?.message || "Denied." };
+          } catch (e) {
+            return { behavior: "deny", message: `Dreamer could not check this tool call (${e?.message ?? e}).` };
+          }
+        },
+        permissionMode: "default",
+        settingSources: [],
+        maxTurns: 200,
+        mcpServers: { scan: createSdkMcpServer({ name: "scan", version: "1.0.0", tools }) },
+        includePartialMessages: true,
+        ...(model ? { model } : {}),
+      },
+    });
+  } catch (e) {
+    oneshots.delete(job);
+    send({ type: "scan_done", job, ok: false, error: `Claude could not start: ${e?.message ?? e}` });
+    return;
+  }
+  turns.push({ type: "user", message: { role: "user", content: [{ type: "text", text: prompt }] }, parent_tool_use_id: null });
+  const tracker = makeTracker((o) => !entry.cancelled && o.type === "step" && send({ type: "scan_step", job, step: o.step }));
+  (async () => {
+    let done = null;
+    try {
+      for await (const m of entry.q) {
+        tracker.on(m);
+        if (m.type === "result") {
+          tracker.finish(m.is_error);
+          done = m.subtype === "success" && !m.is_error ? { ok: true } : { ok: false, error: `Claude could not finish the scan (${m.subtype}${m.is_error && m.result ? `: ${m.result}` : ""}).` };
+          turns.end();
+        }
+      }
+    } catch (e) {
+      if (!done) done = { ok: false, error: e?.message ?? String(e) };
+    }
+    oneshots.delete(job);
+    if (entry.cancelled) done = { ok: false, cancelled: true, error: "Cancelled." };
+    send({ type: "scan_done", job, ...(done ?? { ok: false, error: "Claude stopped without a result." }) });
+  })();
+}
+
 // ---- Build runs: Claude Code works on a saved task inside the repo ----
 //
 // Its own query() per task: cwd = the repo, the claude_code system prompt and the repo's project
@@ -2902,6 +3004,8 @@ rl.on("line", (line) => {
     startOneshot(msg);
   } else if (msg.type === "memory_start") {
     startMemory(msg);
+  } else if (msg.type === "scan_start") {
+    startScan(msg);
   } else if (msg.type === "build_start") {
     startBuild(msg);
   } else if (msg.type === "build_cancel") {

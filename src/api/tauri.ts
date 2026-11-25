@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { Api, BuildEvent, BuildUpdate, ChangeEvent, HandoffEvent, MemoryEvent } from "./types";
+import type { Api, BuildEvent, BuildUpdate, ChangeEvent, HandoffEvent, MemoryEvent, ScanEvent } from "./types";
 
 function mimeFor(rel: string): string {
   const ext = rel.split(".").pop()?.toLowerCase();
@@ -122,6 +122,12 @@ export const tauriApi: Api = {
   applyBundle: (text, target) => invoke("apply_bundle", { text, target: target ?? null }),
   undoBundle: (result) => invoke("undo_bundle", { result }),
   scanImports: () => invoke("scan_imports"),
+  scanStart: (slug, folder, max, model) => invoke("scan_start", { slug, folder, max, model }),
+  scanCancel: () => invoke("scan_cancel"),
+  onScanEvent: (cb) => listen<ScanEvent>("scan-event", (e) => cb(e.payload)),
+  skillStatus: () => invoke("skill_status"),
+  skillInstall: () => invoke("skill_install"),
+  skillRemove: () => invoke("skill_remove"),
   readImport: (path) => invoke("read_import", { path }),
   archiveImport: (path) => invoke("archive_import", { path }),
   hotkeyStatus: () => invoke("hotkey_status"),

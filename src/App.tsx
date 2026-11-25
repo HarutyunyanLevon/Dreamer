@@ -14,6 +14,7 @@ import { ShaderBackground } from "./components/ShaderBackground";
 import { Sidebar } from "./components/Sidebar";
 import { VersionsHost } from "./components/Versions";
 import { ImportHost } from "./components/Import";
+import { ScanHost } from "./components/Scan";
 import { useEffect, useState } from "react";
 import { useWorkspace } from "./state/useWorkspace";
 import { ThemeProvider } from "./theme/ThemeContext";
@@ -97,6 +98,7 @@ function MainApp() {
       <MemoryHost ws={ws} />
       <VersionsHost ws={ws} />
       <ImportHost ws={ws} />
+      <ScanHost ws={ws} />
       <PanelTabs left={panels.left} right={panels.right} onLeft={panels.toggleLeft} onRight={panels.toggleRight} />
       <TrayNotice />
       {searchOpen && <SearchPalette ws={ws} onClose={() => setSearchOpen(false)} />}

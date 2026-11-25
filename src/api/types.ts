@@ -852,6 +852,13 @@ export interface Api {
   applyBundle(text: string, target?: ImportTarget): Promise<ImportResult>;
   undoBundle(result: ImportResult): Promise<void>;
   scanImports(): Promise<ImportOffer[]>;
+  /** Scan the linked repo (or one folder of it) for built features; the bundle arrives as a scan event. */
+  scanStart(slug: string, folder: string | null, max: number, model: string | null): Promise<string>;
+  scanCancel(): Promise<void>;
+  onScanEvent(cb: (e: ScanEvent) => void): Promise<() => void>;
+  skillStatus(): Promise<SkillStatus>;
+  skillInstall(): Promise<SkillStatus>;
+  skillRemove(): Promise<SkillStatus>;
   readImport(path: string): Promise<string>;
   archiveImport(path: string): Promise<void>;
   /** Why each global shortcut failed to register: [quick capture, clipboard to Inbox]. */
@@ -935,4 +942,20 @@ export interface Api {
   spritecookKeyStatus(): Promise<SpritecookKeyStatus>;
   /** Stores the SpriteCook API key in the OS credential store; "" removes it. */
   spritecookSetKey(key: string): Promise<SpritecookKeyStatus>;
+}
+
+/** Repo scan (scan_start): events on "scan-event". `bundle` arrives before `done`. */
+export type ScanEvent = { job: string } & (
+  | { type: "progress"; note: string }
+  | { type: "step"; label: string }
+  | { type: "bundle"; bundle: string }
+  | { type: "done" }
+  | { type: "error"; message: string }
+);
+
+/** The Claude Code card skill (dreamer-cards) in %USERPROFILE%\.claude\skills. */
+export interface SkillStatus {
+  /** edited: differs from every version Dreamer shipped, so it is never replaced silently. */
+  state: "missing" | "current" | "outdated" | "edited";
+  path: string;
 }

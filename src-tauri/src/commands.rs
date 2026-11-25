@@ -455,6 +455,32 @@ pub fn open_logs_folder() -> Result<()> {
     Ok(())
 }
 
+/// Scan the linked repo into a bundle; `folder` limits it to a subfolder. Events: "scan-event".
+#[tauri::command(async)]
+pub fn scan_start(app: AppHandle, state: State<AppState>, slug: String, folder: Option<String>, max: Option<usize>, model: Option<String>) -> Result<String> {
+    crate::scan::start(&app, &state, &slug, folder, max, model)
+}
+
+#[tauri::command(async)]
+pub fn scan_cancel(state: State<AppState>) -> Result<()> {
+    crate::scan::cancel(&state)
+}
+
+#[tauri::command(async)]
+pub fn skill_status() -> Result<crate::skill_card::Status> {
+    crate::skill_card::status()
+}
+
+#[tauri::command(async)]
+pub fn skill_install() -> Result<crate::skill_card::Status> {
+    crate::skill_card::install()
+}
+
+#[tauri::command(async)]
+pub fn skill_remove() -> Result<crate::skill_card::Status> {
+    crate::skill_card::remove()
+}
+
 /// Native folder picker (the handoff repo target). `None` when the user cancelled.
 #[tauri::command(async)]
 pub fn pick_folder(app: AppHandle, title: Option<String>) -> Option<String> {

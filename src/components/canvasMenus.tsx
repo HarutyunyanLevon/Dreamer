@@ -6,6 +6,7 @@ import type { MenuItem, MenuSection } from "./ContextMenu";
 import { CONVERTIBLE, KIND_LABEL, SWATCHES, SWATCH_LABEL, hasStage, labelSize, swatchOf, type LabelSize } from "./kinds";
 import { isClip, isImage } from "./Attachments";
 import { pickBundle } from "./Import";
+import { openScan } from "./Scan";
 import type { ArtifactType } from "../api";
 import { ARTIFACT_LABEL, ARTIFACT_TYPES, artifactType } from "./artifacts/prompts";
 
@@ -225,6 +226,7 @@ function canvasMenu(p: { x: number; y: number }, env: MenuEnv): MenuSection[] {
                     ),
                 },
                 { label: "Summarize project…", run: () => env.ws.openHandoff({ kind: "project" }) },
+                { label: "Scan repo for built features…", run: openScan },
               ],
             },
           ],

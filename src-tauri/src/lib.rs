@@ -20,8 +20,10 @@ mod organize_pipeline;
 mod proc_guard;
 mod questions;
 mod router;
+mod scan;
 mod search;
 mod sidecar;
+mod skill_card;
 mod sidecar_log;
 mod state;
 mod status;
@@ -233,6 +235,7 @@ pub fn run() {
             }
             // Find and prepare a local model (Ollama) if one is installed; never blocks startup.
             ollama::spawn_auto_setup(app.handle());
+            skill_card::auto_update();
             let hidden = is_autostart_launch() && settings.as_ref().is_none_or(|s| s.start_hidden);
             if !hidden {
                 show_main_window(app.handle());
@@ -352,6 +355,11 @@ pub fn run() {
             commands::apply_bundle,
             commands::undo_bundle,
             commands::scan_imports,
+            commands::scan_start,
+            commands::scan_cancel,
+            commands::skill_status,
+            commands::skill_install,
+            commands::skill_remove,
             commands::read_import,
             commands::archive_import,
             commands::hotkey_status,

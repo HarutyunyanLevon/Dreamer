@@ -4,6 +4,7 @@ import type { Workspace } from "../state/useWorkspace";
 import { Modal } from "../ui/Modal";
 import { ScrollArea } from "../ui/Scroll";
 import { renderDoc } from "../util/markdown";
+import { openScan } from "./Scan";
 import { TasksPanel } from "./TaskPrompt";
 
 /** What "Copy Claude Code prompt" puts on the clipboard. */
@@ -183,6 +184,7 @@ export function DesignView({ ws, onClose, onNewVersion }: { ws: Workspace; onClo
         )}
         <div className="side-spacer" />
         <button type="button" className={"btn" + (showTasks ? " on" : "")} aria-pressed={showTasks} onClick={() => setShowTasks((v) => !v)} title="Build tasks saved in the linked repo">Tasks</button>
+        <button type="button" className="btn" onClick={openScan} title="Read the linked repo and propose Built cards for what exists">Scan repo…</button>
         <button type="button" className="btn" onClick={onNewVersion}>New version</button>
       </div>
       {showTasks && <TasksPanel ws={ws} />}

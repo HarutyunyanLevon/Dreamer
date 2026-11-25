@@ -11,7 +11,7 @@ import { DECISIONS_TITLE, TECH_TEMPLATE, TECH_TITLE } from "./kinds";
 import { ActivitySummary, LiveActivity, Tokens, fmtTokens, modelLabel } from "./Activity";
 import { isCloudModel } from "../api/claude";
 import type { LocalStatus, ModelTier } from "../api/claude";
-import type { SpritecookKeyStatus } from "../api";
+import type { SkillStatus, SpritecookKeyStatus } from "../api";
 import { claudeApi } from "../api/claudeIndex";
 import { LocalSetup } from "./LocalSetup";
 import { ThreadMenu } from "./chat/ThreadMenu";
@@ -1043,6 +1043,43 @@ function ContextMeter({ tokens, window, compactTokens }: { tokens: number; windo
 const MODEL_SUGGESTIONS = ["sonnet", "opus", "haiku", "fable"];
 
 /** Settings: which Claude model the chat and the handoff pack use (aliases or full model ids). */
+/** "Claude Code card skill": installs dreamer-cards into the user's ~/.claude/skills (asks before writing). */
+function SkillRow({ onError }: { onError: (e: string) => void }) {
+  const [st, setSt] = useState<SkillStatus | null>(null);
+  const [ask, setAsk] = useState(false);
+  useEffect(() => {
+    api.skillStatus().then(setSt).catch(() => setSt(null));
+  }, []);
+  const run = (f: () => Promise<SkillStatus>) => {
+    setAsk(false);
+    f().then(setSt).catch((e) => onError(String(e)));
+  };
+  const state = st?.state;
+  return (
+    <div className="model-form">
+      <div>
+        Claude Code card skill{" "}
+        <span className="chat-sub">
+          {state === "current" ? "installed" : state === "outdated" ? "installed (updates at next start)" : state === "edited" ? "Update available (your edited copy differs)" : state === "missing" ? "not installed" : "needs the desktop app"}
+        </span>
+      </div>
+      <p className="chat-sub">Lets Claude Code write Dreamer cards (a .dreamer.md bundle) when you ask it to log ideas or built features.</p>
+      {ask && st && <p className="chat-sub">{state === "edited" ? "This replaces your edited copy at " : "This writes "}<code>{st.path}</code></p>}
+      <div className="editor-actions">
+        {st && (state === "missing" || state === "edited" || state === "outdated") && (
+          <button type="button" className="btn" onClick={() => (ask ? run(api.skillInstall) : setAsk(true))}>
+            {ask ? "Confirm" : state === "missing" ? "Install" : "Update"}
+          </button>
+        )}
+        {st && state !== "missing" && (
+          <button type="button" className="btn" onClick={() => run(api.skillRemove)}>Remove</button>
+        )}
+        {ask && <button type="button" className="btn" onClick={() => setAsk(false)}>Not now</button>}
+      </div>
+    </div>
+  );
+}
+
 function ModelSettings({ onClose, onError }: { onClose: () => void; onError: (e: string) => void }) {
   const [chatModel, setChatModel] = useState<string | null>(null);
   const [exportModel, setExportModel] = useState("");
@@ -1147,6 +1184,8 @@ function ModelSettings({ onClose, onError }: { onClose: () => void; onError: (e:
           Project memory cap (words)
           <input className="name-input" inputMode="numeric" value={memoryCap} disabled={chatModel === null} placeholder="600" onChange={(e) => setMemoryCap(e.target.value)} />
         </label>
+        <h4 className="settings-sub" id="integrations-settings">Integrations</h4>
+        <SkillRow onError={onError} />
         <h4 className="settings-sub" id="spritecook-settings">SpriteCook (artifact images)</h4>
         <label>
           API key {scKey?.hasKey ? <span className="chat-sub">saved: {scKey.masked}</span> : <span className="chat-sub">not set: themes and mockups still work, images don't</span>}
