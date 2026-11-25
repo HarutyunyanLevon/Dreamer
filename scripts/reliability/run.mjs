@@ -17,7 +17,7 @@ import { fileURLToPath } from "node:url";
 const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const ALL_LOCAL = "S1,S2,S3,S4,S5,S6";
 const CLAUDE = "S7-chat,S7-think,S7-retry";
-const FAULTS = "S8-kill-ollama,S8-tool-delay,S8-kill-claude-code,S8-silent-local,S8-stall-local,S8-silent-claude,S8-error-claude";
+const FAULTS = "S8-kill-ollama,S8-tool-delay,S8-kill-claude-code,S8-silent-local,S8-stall-local,S8-silent-claude,S8-error-claude,S10-repair,S10-double";
 
 const args = process.argv.slice(2);
 const pass = [];

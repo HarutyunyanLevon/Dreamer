@@ -67,6 +67,8 @@
 //        {type:"build_done", run, ok, error?, cancelled?, stalled?} -- its task ended
 //        (remember / forget are chat tools: tool_request with the running turn id attached)
 import { createInterface } from "node:readline";
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { spawn as spawnChild } from "node:child_process";
 import { createServer as createHttpServer, request as httpRequest } from "node:http";
 import { createSdkMcpServer, query as sdkQuery, tool } from "@anthropic-ai/claude-agent-sdk";
@@ -191,6 +193,10 @@ const fail = (e) => ({ content: [{ type: "text", text: `Error: ${e.message}` }],
 // read_card / view_attachment, and at most 4 calls of any kind. Search and listing are not tools
 // any more: Rust attaches related cards to each message. ----
 const LIMIT_MSG = "limit reached, answer with what you have";
+/** Results Dreamer's own guards produce (a limit, an ended turn, a question already asked): normal results, never a failed call. */
+const GUARD_RE = /^(Error: )?(limit reached|this turn has ended|The question was already asked)/;
+const guard = (msg) => ({ content: [{ type: "text", text: msg }] });
+const ASKED_MSG = "The question was already asked and is shown to the user. Do not call any tool; end your turn now and write nothing.";
 function makeLimits(text = "", artifact = false) {
   // /merge and /describe read several cards / images by design: larger allowance.
   const merge = /^[/](merge|describe)/.test(text);
@@ -207,7 +213,9 @@ function makeLimits(text = "", artifact = false) {
  */
 function turnGate(s, kind) {
   const t = s.turn;
-  if (!t || t.ended || t.s !== s) return fail(new Error("this turn has ended; stop now and write nothing more"));
+  if (!t || t.ended || t.s !== s) return guard("this turn has ended; stop now and write nothing more");
+  // ask_question ends the turn: a later call in it does nothing.
+  if (t.questionAsked) return guard(ASKED_MSG);
   const l = t.limits;
   if (l.calls >= l.maxCalls || (kind === "read" && l.reads >= l.maxReads)) {
     l.hit = true;
@@ -216,9 +224,11 @@ function turnGate(s, kind) {
     // then hung. The third refused call ends the turn instead.
     if (l.hits >= 3) {
       dlog(`limit_loop turn=${t.id} hits=${l.hits}`);
-      setImmediate(() => failTurn(t, "limit", "The model kept calling tools after its limit and was stopped."));
+      // With something to show (a question, a ghost card, text) the turn simply ends there.
+      const tr = s.tracker?.turn === t ? s.tracker : null;
+      setImmediate(() => ((tr?.actions() ?? 0) > 0 || t.text.trim() ? endTurnEarly(s, t, "limit") : failTurn(t, "limit", "The model kept calling tools after its limit and was stopped.")));
     }
-    return fail(new Error(l.hits >= 2 ? `${LIMIT_MSG}. Do not call any more tools: write your answer now.` : LIMIT_MSG));
+    return guard(l.hits >= 2 ? `${LIMIT_MSG}. Do not call any more tools: write your answer now.` : LIMIT_MSG);
   }
   l.calls++;
   if (kind === "read") l.reads++;
@@ -317,7 +327,10 @@ function chatTools(s) {
       // turnId ties the question to the reply it belongs to, so the UI shows it once, as the
       // question card, instead of also showing any streamed text for that turn. `item` tells the UI
       // where the answer goes (handoff gap interview: Tech card or Project decisions card).
-      send({ type: "question", id: `q${++reqSeq}`, turnId: tid(), question: args.question, choices: args.choices, item: args.handoff_item || undefined });
+      // Seen live: the local model fills handoff_item in a plain card grill, which sent the answer to
+      // the Project decisions card instead of the card. It counts only inside a gap interview.
+      const item = gapThreads.has(threadOf(s.key)) ? args.handoff_item || undefined : undefined;
+      send({ type: "question", id: `q${++reqSeq}`, turnId: tid(), question: args.question, choices: args.choices, item });
       // Anything the model writes after asking is noise ("the question is above"): drop it, so the
       // turn is the question card and nothing else.
       if (T()) T().questionAsked = true;
@@ -681,7 +694,8 @@ const SYSTEM_PROMPT = [
     GRILL_ITEMS.map((x, i) => `${i + 1}. ${x}`).join("; ") +
     ". On each turn, call ask_question exactly once and write NO other text: no preamble, no restating the question, " +
     "no reaction to the previous answer, no praise or encouragement, no commentary on the option the user chose. " +
-    "Questions and options are neutral and specific (2-5 options). The user's answers are recorded in the card's " +
+    "Questions and options are neutral and specific (2-5 options). Never ask a question listed in [Answered so far] " +
+    "again; move to the next open branch, or say the grill is done. The user's answers are recorded in the card's " +
     "notes automatically. When every item has been covered, do not ask another question and do not write a summary " +
     "in chat: call create_card exactly once to propose a spec card with title 'Spec: <card title>', stage 'lucid', " +
     "tags including 'spec', a link to the selected card with label 'spec of', and a markdown body with one short " +
@@ -860,6 +874,9 @@ function makeTracker(out, label = "") {
   let done = zeroUsage(); // API calls finished in this turn
   let cur = null; // the API call in progress (or the last one)
   let thinkN = 0;
+  let asked = false; // an ask_question succeeded in this turn
+  let realErrors = 0; // tool errors that were not a Dreamer guard (malformed args, unknown tool, a refused request)
+  let repaired = false; // a successful call came after a real error
   const usage = () => {
     const c = cur ?? zeroUsage();
     return { input: done.input + c.input, cacheRead: done.cacheRead + c.cacheRead, cacheCreate: done.cacheCreate + c.cacheCreate, output: done.output + c.output };
@@ -884,7 +901,11 @@ function makeTracker(out, label = "") {
     /** Each API call's own token counts, in order. */
     calls: callList,
     /** Tool calls of this turn that came back as errors (malformed input, failed request). */
-    toolErrors: () => [...steps.values()].filter((s) => s.kind === "tool" && s.status === "error").length,
+    toolErrors: () => realErrors,
+    /** A successful tool call came after the turn's real tool error (the in-turn repair worked). */
+    repaired: () => repaired,
+    /** ask_question succeeded in this turn (its result is recorded). */
+    asked: () => asked,
     /** Tool calls still running (each keeps its own time limit in the watchdog). */
     running: () => [...steps.values()].filter((s) => s.kind === "tool" && s.status === "running"),
     /** Calls that did the turn's job (a ghost card, a question, a proposal): no local retry after them. */
@@ -968,6 +989,13 @@ function makeTracker(out, label = "") {
           if (!s || s.status !== "running") continue;
           const txt = resultText(b.content);
           dlog(`${label} tool_result ${s.tool} call#${s.call} bytes=${sizeOfContent(b.content)} text=${txt.length}${Array.isArray(b.content) && b.content.some((x) => x?.type === "image") ? " +image" : ""}${b.is_error ? " (error)" : ""}`);
+          // Per-call diagnostics: what was asked, what came back, whether a Dreamer guard answered, and where it sits relative to ask_question.
+          const guard = GUARD_RE.test(txt);
+          const pos = asked ? "after_ask" : s.tool === "ask_question" && !b.is_error ? "ask" : "before_ask";
+          dlog(`${label} tool_call #${s.call} name=${s.tool} pos=${pos} guard=${guard ? "yes" : "no"} error=${b.is_error ? "yes" : "no"} args=${JSON.stringify(clip(JSON.stringify(s.input ?? {}), 300))} result=${JSON.stringify(clip(txt, 300))}`);
+          if (s.tool === "ask_question" && !b.is_error && !guard) asked = true;
+          if (b.is_error && !guard) realErrors++;
+          else if (realErrors > 0 && !guard) repaired = true;
           s.status = b.is_error ? "error" : "done";
           s.endedAt = Date.now();
           if (b.is_error) s.detail = clip(txt.replace(/^Error:\s*/, ""), 200);
@@ -1044,6 +1072,11 @@ const MAX_LIVE = 3;
 const AUTO_COMPACT_TOKENS = Number(process.env.DREAMER_COMPACT_TOKENS) || 60000;
 const sessions = new Map();
 let sessionSeq = 0;
+/** Threads in a handoff gap interview (ask_question's handoff_item counts only there). */
+const gapThreads = new Set();
+const threadOf = (key) => String(key).replace(/#[^#]*$/, "");
+/** Claude Code's built-in tools: a local session never offers them (a 9B model hallucinates Write, Bash, Task…). */
+const BUILTIN_TOOLS = ["Agent", "Task", "Bash", "BashOutput", "KillShell", "Edit", "MultiEdit", "Write", "Read", "Glob", "Grep", "LS", "NotebookEdit", "NotebookRead", "TodoWrite", "WebFetch", "WebSearch", "ExitPlanMode", "SlashCommand", "Skill", "ListMcpResourcesTool", "ReadMcpResourceTool"];
 
 const WEB_TOOLS = ["WebSearch", "WebFetch"];
 
@@ -1530,6 +1563,47 @@ const proxyUrl = (sid, upstream) => (proxyPort ? `http://127.0.0.1:${proxyPort}/
 /** Estimated tokens of a request (chars / 3.5, the same rough rate the diagnostics use). */
 const estTokens = (chars) => Math.round(chars / 3.5);
 
+/** "choices: array of strings, 2-5 items (required); question: string (required)" from a JSON schema. */
+function schemaHint(schema) {
+  const req = new Set(schema?.required ?? []);
+  const type = (p) =>
+    p?.enum ? `one of ${p.enum.join(" | ")}` : p?.type === "array" ? `array of ${p.items?.type ?? "value"}s${p.minItems != null || p.maxItems != null ? `, ${p.minItems ?? 0}-${p.maxItems ?? "any"} items` : ""}` : (p?.type ?? "value");
+  return Object.entries(schema?.properties ?? {})
+    .map(([k, p]) => `${k}: ${type(p)}${req.has(k) ? " (required)" : ""}`)
+    .join("; ");
+}
+
+/**
+ * The fix hint for a real failed call of a local model, or null: an unknown tool gets the list of
+ * tools it can call, invalid args get the tool's expected args. Guards are not errors, so never here.
+ */
+function repairHint(name, text, tools) {
+  if (!name || !tools.has(name) || /No such tool available/i.test(text)) return `Unknown tool ${name ?? "?"}. Available: ${[...tools.keys()].filter((n) => String(n).startsWith("mcp__dreamer__")).join(", ")}. Call one of these, or answer in text.`;
+  if (/InputValidationError|Invalid arguments|invalid_type|validation|-32602|expected/i.test(text)) return `Invalid args for ${name}. Expected: ${schemaHint(tools.get(name).input_schema)}. Call it again once with valid args.`;
+  return null;
+}
+
+/**
+ * One in-turn repair for local models: each failed call (malformed args, unknown tool) goes back to
+ * the model with a short fix hint. Rewritten in every request (Claude Code resends the history), so
+ * the transcript itself is untouched. Claude turns never pass through this proxy.
+ */
+function addRepairHints(body) {
+  const tools = new Map((body.tools ?? []).map((x) => [x?.name, x]));
+  const called = new Map();
+  for (const m of body.messages ?? []) {
+    if (!Array.isArray(m?.content)) continue;
+    for (const b of m.content) {
+      if (b?.type === "tool_use") called.set(b.id, b.name);
+      if (b?.type !== "tool_result" || !b.is_error) continue;
+      const hint = repairHint(called.get(b.tool_use_id), resultText(b.content), tools);
+      if (!hint) continue;
+      if (Array.isArray(b.content)) b.content.push({ type: "text", text: hint });
+      else b.content = `${b.content ?? ""}\n${hint}`;
+    }
+  }
+}
+
 function tuneLocalRequest(buf, sid) {
   let body;
   try {
@@ -1538,6 +1612,7 @@ function tuneLocalRequest(buf, sid) {
     return buf;
   }
   if (!body || typeof body !== "object") return buf;
+  addRepairHints(body);
   body.thinking = { type: "disabled" };
   for (const [k, v] of Object.entries(LOCAL_SAMPLING)) if (body[k] == null) body[k] = v;
   body.max_tokens = Math.min(Number(body.max_tokens) || LOCAL_MAX_TOKENS, LOCAL_MAX_TOKENS);
@@ -1548,7 +1623,20 @@ function tuneLocalRequest(buf, sid) {
   const t = s?.turn && !s.turn.ended ? s.turn : null;
   const est = estTokens(sys + tools + msgs);
   if (t) t.diag.maxEstTokens = Math.max(t.diag.maxEstTokens ?? 0, est);
-  dlog(`local_call session=${sid} turn=${t?.id ?? "-"} est_prompt_tokens=${est} num_ctx=${t?.numCtx ?? "?"} system_chars=${sys} tools_chars=${tools} messages_chars=${msgs} tools=${body.tools?.length ?? 0}`);
+  // How much of the thread the model actually receives: messages in this request, and how many are the user's own words.
+  const list = Array.isArray(body.messages) ? body.messages : [];
+  const userText = list.filter((m) => m?.role === "user" && (typeof m.content === "string" || (m.content ?? []).some((c) => c?.type === "text"))).length;
+  // Anything offered that is not Dreamer's own tool (a Claude Code built-in would show here).
+  const foreign = (body.tools ?? []).map((x) => x?.name).filter((n) => n && !String(n).startsWith("mcp__dreamer__"));
+  dlog(`local_call session=${sid} turn=${t?.id ?? "-"} est_prompt_tokens=${est} num_ctx=${t?.numCtx ?? "?"} system_chars=${sys} tools_chars=${tools} messages_chars=${msgs} tools=${body.tools?.length ?? 0} messages=${list.length} user_text_messages=${userText} other_tools=${foreign.join(",") || "none"}`);
+  // Harness only: keep the last request of each turn, so a test can check what the model saw.
+  if (process.env.DREAMER_DUMP_PROMPTS && t) {
+    try {
+      writeFileSync(join(process.env.DREAMER_DUMP_PROMPTS, `${t.id}.json`), JSON.stringify({ system: body.system, messages: list }));
+    } catch {
+      /* diagnostics only */
+    }
+  }
   return Buffer.from(JSON.stringify(body));
 }
 
@@ -1676,7 +1764,7 @@ function openSession(key, resume, model, think = false, local = null, artifact =
       ...BASE_OPTIONS,
       // Local models get no web tools (WebSearch/WebFetch run server-side at Anthropic) and no
       // thinking budget; a web or Think turn is routed to Claude instead.
-      ...(local ? { tools: [] } : {}),
+      ...(local ? { tools: [], disallowedTools: BUILTIN_TOOLS } : {}),
       thinking: thinkingOption(local ? false : think),
       canUseTool: webGate(s),
       mcpServers: { dreamer: makeServer(s) },
@@ -1868,16 +1956,48 @@ function failTurn(t, reason, message, { noRetry = false } = {}) {
   if (!t || t.ended) return;
   const s = t.s;
   const tr = s?.tracker?.turn === t ? s.tracker : null;
-  if (s && !s.closed) closeSession(s, reason);
-  if (t.local && !noRetry && t.attempt === 1 && (tr?.actions() ?? 0) === 0 && s) return localRetry(t, reason, s);
+  // A second real tool error: the model is fine, its call is not. Keep the session and its history.
+  const keep = reason === "tool";
+  if (s && !s.closed) {
+    if (keep) settle(s, t);
+    else closeSession(s, reason);
+  }
+  if (t.local && !noRetry && !keep && t.attempt === 1 && (tr?.actions() ?? 0) === 0 && s) return localRetry(t, reason, s);
   tr?.finish(true);
-  const fallback = reason === "stalled" ? "stalled" : reason === "empty" ? "empty" : reason === "limit" ? "tool" : "error";
+  const fallback = reason === "stalled" ? "stalled" : reason === "empty" ? "empty" : reason === "limit" || reason === "tool" ? "tool" : "error";
   if (t.local) {
-    emit(t, { type: "message_done", text: message, isError: true, backend: "local", model: t.model ?? undefined, fallback, endReason: reason, attempt: t.attempt, ...(t.attempt > 1 ? { localRetried: true } : {}), durationMs: Date.now() - t.startedAt });
+    // The session id goes back too, so the thread's next turn resumes the session that has its history.
+    emit(t, { type: "message_done", text: message, isError: true, backend: "local", model: t.model ?? undefined, fallback, endReason: reason, attempt: t.attempt, ...(s?.sessionId && t.attempt === 1 ? { sessionId: s.sessionId } : {}), ...(t.attempt > 1 ? { localRetried: true } : {}), durationMs: Date.now() - t.startedAt });
   } else {
     emit(t, { type: "error", message, endReason: reason });
   }
   markEnded(t, reason);
+}
+
+/** Stops what a session generates for turn `t` but keeps the session; one that does not settle is closed. */
+function settle(s, t) {
+  s.q.interrupt?.().catch(() => {});
+  setTimeout(() => {
+    if (s.busy && !s.closed && s.turn === t) closeSession(s, "wedged");
+  }, 8000).unref?.();
+}
+
+/**
+ * The turn is done before the model stopped: ask_question succeeded (the question card is the
+ * answer), or the model looped on a limit after it had produced something. It ends as a normal
+ * turn and the session stays, so the user's answer goes to the session that asked.
+ */
+function endTurnEarly(s, t, why) {
+  if (t.ended || t.s !== s) return;
+  dlog(`turn_end_early turn=${t.id} why=${why}`);
+  finishTurn(s, t, { type: "result", subtype: "success", is_error: false, result: "", session_id: s.sessionId, num_turns: 0 });
+  if (!s.closed) settle(s, t);
+}
+
+/** A local turn's second real tool error (malformed args, unknown tool) fails it: one repair per turn. */
+function checkRepairs(s, t) {
+  const tr = s.tracker?.turn === t ? s.tracker : null;
+  if (t.local && !t.ended && (tr?.toolErrors() ?? 0) >= 2) failTurn(t, "tool", "The local model made two invalid tool calls in a row.");
 }
 
 const RETRY_LABEL = { error: "it failed", empty: "it came back empty", stalled: "it stopped responding", limit: "it looped on tools" };
@@ -1915,6 +2035,7 @@ function localRetry(t, reason, old) {
 /** A saved session that can't be resumed (deleted, expired): start the thread afresh and replay the turn. */
 function restartFresh(s) {
   const t = s.turn;
+  dlog(`session_restart session=${s.sid} key=${s.key} turn=${t?.id ?? "-"} why=resume_failed`);
   closeSession(s);
   if (!t || t.ended || t.s !== s) return;
   let fresh;
@@ -1927,8 +2048,10 @@ function restartFresh(s) {
   fresh.web = s.web;
   fresh.escalated = s.escalated;
   attach(t, fresh);
-  // A fresh session knows nothing: replay the waiting turn with the full context.
-  const replay = t.pendingFull ?? s.pending;
+  // A fresh session knows nothing: replay the waiting turn with the full context (local: plus the
+  // thread's visible history, the same text the automatic local retry gets).
+  dlog(`session_restart_replay turn=${t.id} sent=${s.local && t.retryFull ? "retryText" : "fullText"}`);
+  const replay = (s.local ? t.retryFull : null) ?? t.pendingFull ?? s.pending;
   fresh.pending = replay;
   fresh.turns.push(replay);
 }
@@ -1949,7 +2072,8 @@ function localFallback(t, msg, text, tr) {
   if (!t.local) return null;
   if (msg.is_error) return "error";
   if (t.visionBlocked) return "vision";
-  if ((tr?.toolErrors() ?? 0) > 0 || t.limits.hit) return "tool";
+  const errors = tr?.toolErrors() ?? 0;
+  if (errors >= 2 || (errors === 1 && !tr.repaired())) return "tool";
   if (!t.questionAsked && !String(text ?? "").trim() && (tr?.actions() ?? 0) === 0) return "empty";
   return null;
 }
@@ -2067,6 +2191,8 @@ function pump(s) {
             s.tracker.turn = t;
           }
           s.tracker.on(msg);
+          if (msg.type === "user" && t.questionAsked && s.tracker.asked()) endTurnEarly(s, t, "question");
+          else if (msg.type === "user") checkRepairs(s, t);
         }
         if (msg.type === "stream_event" && msg.event?.type === "content_block_delta" && msg.event.delta?.type === "text_delta") {
           s.answered = true;
@@ -2831,6 +2957,10 @@ async function handleUserMessage(msg) {
   }
   const t = newTurn(msg, { local, artifact, model });
   current = t;
+  // A handoff gap interview lasts until another command starts in that thread.
+  const thread = msg.thread || "default";
+  if (/^\/grill-me handoff/.test(msg.text ?? "")) gapThreads.add(thread);
+  else if (/^\//.test(msg.text ?? "")) gapThreads.delete(thread);
   // An escalation always starts fresh (a leftover from an interrupted one is dropped).
   if (escalated && sessions.get(key)) closeSession(sessions.get(key));
   let s = sessions.get(key);

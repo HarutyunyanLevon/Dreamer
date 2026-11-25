@@ -238,3 +238,66 @@ was changed there.
   automatically (reason "unavailable"), as before. That predates this work; say if it should ask first.
 - The memory pass after each chat turn runs on Claude (Haiku), local turns included, as before.
 
+
+## 6. Local /grill-me: failure notes and repeated questions
+
+Symptom: on `dreamer-qwen3.5:9b`, every grill turn showed "5 steps", a question card and "A tool
+call by the local model failed. Retry with Claude"; answered questions came back later.
+
+Evidence: the installed app's `sidecar.log` for the reported grill (card "HO: level JSON schema
+with validation", 2026-11-25 22:00–22:06), plus the harness's new **S9** (that card, copied:
+`/grill-me` then 5 answers, the first choice each time, 5 runs; memory pass off) on the old pipeline
+("before") and the new one ("after"). New diagnostics: one `tool_call` line per call (name, args
+≤ 300 chars, result, `guard=`, `error=`, position relative to ask_question), `local_call …
+messages= user_text_messages= other_tools=`, `session_restart`, `turn_end_early`, and the last
+model request of every local turn (`DREAMER_DUMP_PROMPTS`, harness only).
+
+| # | Suspect | Verdict | Evidence |
+|---|---|---|---|
+| A | Guard limits counted as model failures | **Confirmed** | `localFallback` returned `tool` on any `is_error` result or `limits.hit`, and the guard returned `is_error`. App log: of 9 local failure notes, 6 were the 47-byte "Error: limit reached…" guard; all 4 reported grill turns were ask_question ×4 + the 5th refused by the 4-call cap = "5 steps". S9 before: 6 of 15 turns had a failure note, all from guard results (8 guard results tagged `error=yes`, 0 real errors). |
+| B | ask_question result treated as an error, or calls after it | **Confirmed (calls after it)**; the result itself was never an error | App log: 4 question events per turn (q2–q5, q6–q9, …); Sonnet did it too (turn `…-7`, 5 calls). The UI shows one card per reply, the last, so 3 of 4 asked questions were never seen. S9 before: 33 tool calls *after* a successful ask_question (23 more ask_question, 2 create_card, 8 refused), 8 of 10 question turns put up 2–4 cards. |
+| C | Malformed args, unknown or built-in tool names | **Ruled out for grill** | App log: 1 real error in all local turns (a create_card the model fixed in its next call); 0 unknown tools, 0 built-in names. S9 before and after: 0. Local sessions already had `tools: []`; the only non-Dreamer tool offered is Claude Code's `DeferredToolPlaceholder`. |
+| D | History lost after a failed turn | **Ruled out** (as observed); restart path hardened | App log: one session `s3` for the whole grill (`turn_start … session=live`, same `pid`), `messages_chars` 29k → 71k, answers sent into that session. S9 before: 5 fresh (first turn of each run) + 10 live, 0 restarts, 0 local retries. Risks fixed anyway: a local failure did not return the session id (a failed *first* turn made the next one compact), and a restarted session got the full context but only the last 6 messages. |
+| E | Grill state not in the local prompt | **Confirmed (contributes)** | The answer turn sent only the bare choice ("user=28" chars); nothing said which question it answered, and with 4 questions asked per turn the model had 3 unanswered ones in its history. S9 before: 1 explicit repeat (run 5: "What should happen when validation fails?" asked again the next turn) and 5 answer turns where the model asked nothing. |
+| — | (found) `handoff_item` filled in a plain grill | **Confirmed** | S9 before: the 9B set `handoff_item` (e.g. "core experience") on plain grill questions; the UI then writes such an answer to the Project decisions card, not the card. |
+| — | Qwen thinking breaks tool calls | **Ruled out** | The proxy has sent `thinking: disabled` on every local request since section 3; ~100 output tokens per call, 0 unparsable tool calls in any grill turn. Nothing changed. |
+
+Fixes (details in docs/decisions.md, "Local grill reliability"): guards are normal results;
+ask_question ends the turn (interrupt, session kept, later calls refused as "already asked");
+`[Answered so far]` on every grill turn plus a "never re-ask" rule; `handoff_item` only in a gap
+interview; one in-turn repair with a fix hint for real local errors (second error → "Retry with
+Claude", session kept); built-ins also in `disallowedTools`; restarts get the thread's history
+(12k chars); a grey "One step failed · Details" note when the turn produced something.
+
+**S9, 5 runs each (30 turns planned per side):**
+
+| | Before | After |
+|---|---|---|
+| Runs passing all checks | 0/5 | 4/5 |
+| Turns run / with a failure note | 15 / 6 | 30 / 0 |
+| Question cards per question turn | 2–4 in 8 of 10 | exactly 1 in 30 of 30 |
+| Tool calls after a successful ask_question | 33 | 0 |
+| Guard results / real tool errors | 8 / 0 | 0 / 0 |
+| Answer turns with no question | 5 | 0 |
+| Repeats flagged | 1 | 1 (a follow-up, see below) |
+| Sessions: fresh / live / restarted | 5 / 10 / 0 | 5 / 25 / 0 |
+| Previous Q + answer in the next prompt | not checked (runs ended early) | 25 of 25 |
+| Turn median / p95 | 10.1 s / 13.0 s (first baseline) | 1.8 s / 2.7 s |
+
+Before runs stopped early when an answer turn put up no question, hence 15 turns. The one flagged
+"repeat" after the fix is run 3: "What should the visual editor include?" (answered "Room templates
+with drag-and-drop items") followed by "What *else* should the visual editor include?". The
+answered pair was in that turn's `[Answered so far]`; it is a follow-up on the same branch, which
+the word-overlap check (Jaccard ≥ 0.8) counts as a repeat. Left as a fail rather than loosening the
+check. Turns got ~5× faster because each one is now a single model call.
+
+**S10 (scripted fake local model, 2 runs each): 4/4.** `repair`: a malformed ask_question
+(`choices` as a string) comes back as Claude Code's "MCP error -32602: Input validation error…"
+plus "Invalid args for mcp__dreamer__ask_question. Expected: question: string (required); choices:
+array of strings, 2-5 items (required)…"; the fixed call follows, one question card, no note.
+`double`: malformed, then `Write` ("No such tool available: Write. Write is disabled for this
+session" + "Unknown tool Write. Available: …") → "Retry with Claude"; the next turn runs in the
+same live session and its prompt holds the first turn.
+
+Side effect to know: the interrupt that ends a question turn leaves "[Request interrupted by user]"
+in the session transcript before the user's answer. It did not confuse the 9B in 25 answer turns.

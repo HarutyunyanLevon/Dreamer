@@ -296,6 +296,11 @@ pub fn with_block(block: Option<String>, user: &str) -> String {
 /// and answer pairs. Starts after the last "compacted" divider (the thread's earlier summary, if
 /// any, leads), skips search chips, and keeps the most recent `TRANSCRIPT_MAX_CHARS`.
 pub fn transcript(file: &Value) -> String {
+    transcript_capped(file, TRANSCRIPT_MAX_CHARS)
+}
+
+/// [`transcript`], keeping only the most recent `max` chars (a restarted local session gets this as its history).
+pub fn transcript_capped(file: &Value, max: usize) -> String {
     let mut out: Vec<String> = Vec::new();
     if let Some(s) = file.get("summary").and_then(Value::as_str).filter(|s| !s.trim().is_empty()) {
         out.push(format!("Earlier summary: {}", s.trim()));
@@ -304,8 +309,8 @@ pub fn transcript(file: &Value) -> String {
     let joined = out.join("
 ");
     let n = joined.chars().count();
-    if n > TRANSCRIPT_MAX_CHARS {
-        joined.chars().skip(n - TRANSCRIPT_MAX_CHARS).collect()
+    if n > max {
+        joined.chars().skip(n - max).collect()
     } else {
         joined
     }
@@ -333,6 +338,48 @@ fn transcript_lines(file: &Value) -> Vec<String> {
         }
     }
     out
+}
+
+/// History a restarted local session gets (chars, newest kept): enough for a long grill, small for a 9B model.
+pub const RESTART_HISTORY_CHARS: usize = 12_000;
+
+/// Pairs kept in [`answered_block`] (the newest), and chars per question / answer.
+const ANSWERED_MAX: usize = 40;
+const ANSWERED_Q_CHARS: usize = 300;
+const ANSWERED_A_CHARS: usize = 200;
+
+/// The `[Answered so far]` block of a grill turn: every question already asked in this thread with
+/// the chosen answer (oldest first; `current` is the pair this turn answers, which the saved
+/// thread may not hold yet), then the card's memory lines. None when there is nothing to list.
+pub fn answered_block(file: &Value, current: Option<(&str, &str)>, card_memory: &str) -> Option<String> {
+    let mut pairs: Vec<(String, String)> = file
+        .get("messages")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|m| {
+            let q = m.get("question")?;
+            Some((q.get("question")?.as_str()?.trim().to_string(), q.get("answered")?.as_str()?.trim().to_string()))
+        })
+        .filter(|(q, a)| !q.is_empty() && !a.is_empty())
+        .collect();
+    if let Some((q, a)) = current.map(|(q, a)| (q.trim(), a.trim())).filter(|(q, a)| !q.is_empty() && !a.is_empty()) {
+        if pairs.last().is_none_or(|(lq, _)| lq != q) {
+            pairs.push((q.to_string(), a.to_string()));
+        }
+    }
+    let memory: Vec<&str> = card_memory.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    if pairs.is_empty() && memory.is_empty() {
+        return None;
+    }
+    let skip = pairs.len().saturating_sub(ANSWERED_MAX);
+    let mut out = vec!["[Answered so far]".to_string()];
+    out.extend(pairs[skip..].iter().map(|(q, a)| format!("- Q: {} -> A: {}", cap_chars(q, ANSWERED_Q_CHARS), cap_chars(a, ANSWERED_A_CHARS))));
+    if !memory.is_empty() {
+        out.push("Card memory:".into());
+        out.extend(memory.iter().map(|l| format!("- {}", cap_chars(l.trim_start_matches(['-', '*', ' ']), ANSWERED_Q_CHARS))));
+    }
+    Some(out.join("\n"))
 }
 
 /// Characters kept per message in [`recent_turns`].
@@ -373,6 +420,30 @@ mod tests {
 
     fn base() -> Vec<OverviewCard> {
         vec![oc("a", "Alpha", "1", Stage::Mist, false), oc("b", "Beta", "1", Stage::Mist, false)]
+    }
+
+    #[test]
+    fn answered_block_lists_pairs_current_and_memory() {
+        let file = json!({ "messages": [
+            { "role": "user", "text": "/grill-me" },
+            { "role": "claude", "text": "", "question": { "question": "Who plays?", "choices": ["Kids", "Adults"], "answered": "Adults" } },
+            { "role": "user", "text": "Adults" },
+            { "role": "claude", "text": "", "question": { "question": "Unanswered?", "choices": ["a", "b"] } },
+            { "role": "claude", "text": "", "question": { "question": "Play order?", "choices": ["List", "None"], "answered": "List" } },
+        ] });
+        let b = answered_block(&file, Some(("Platform?", "PC")), "- The levels list JSON defines the play order.\n\n").unwrap();
+        assert_eq!(b, "[Answered so far]\n- Q: Who plays? -> A: Adults\n- Q: Play order? -> A: List\n- Q: Platform? -> A: PC\nCard memory:\n- The levels list JSON defines the play order.");
+        // The pair this turn answers is not listed twice when the saved thread already has it.
+        let again = answered_block(&file, Some(("Play order?", "List")), "").unwrap();
+        assert_eq!(again.matches("Play order?").count(), 1);
+        assert!(answered_block(&json!({ "messages": [] }), None, "").is_none());
+    }
+
+    #[test]
+    fn transcript_capped_keeps_the_newest() {
+        let file = json!({ "messages": [{ "role": "user", "text": "old ".repeat(50) }, { "role": "user", "text": "newest" }] });
+        let t = transcript_capped(&file, 20);
+        assert!(t.ends_with("User: newest") && t.chars().count() == 20, "{t}");
     }
 
     #[test]

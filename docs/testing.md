@@ -477,3 +477,15 @@ Manual, in the app:
 1. Send a message, then stop Ollama from the tray while it answers: within ~90 s the reply ends with "The local model stopped responding…" and Retry with Claude (one automatic local retry first, shown as a step). No spinner stays.
 2. Stop a reply, send another message in the same thread at once: it answers normally (no wait behind the stopped one).
 3. /organize in a folder of 30+ cards: "Grouping…", "Assigning 1/3…", "Laying out…", then a plan with frames, a layout and retags, and no folder ops. Apply, then Undo.
+
+## Local grill reliability (branch `reliability`)
+Harness: `npm run reliability -- --scenarios S9 --runs 5 --project <slug> --card <card id>` grills that card (a copy in the temp workspace; a card in the Trash is restored in the copy only): `/grill-me`, then 5 answers (always the first choice), each appended to the card's notes as the chat panel does. A run passes when no turn has a failure note, each turn puts up exactly one question card, no question repeats (same words, Jaccard ≥ 0.8), and each turn's last model request contains the previous question and its answer (the sidecar keeps the last request of every local turn in `prompts/<turn>.json`). `--scenarios S10-repair,S10-double` (also in `--faults`) script a fake local model: a malformed ask_question then the fixed one (one question, no note, the fix hint was sent), or a malformed call then `Write` ("Retry with Claude", and the next turn's prompt still holds the first turn). sidecar.log has a `tool_call` line per call (name, args ≤ 300 chars, result, `guard=`, `error=`, position against ask_question), `local_call … messages= user_text_messages= other_tools=`, `turn_start … session=live|resume|fresh`, `turn_end_early`, `session_restart`.
+
+`cargo test`: `ctx::tests::answered_block_lists_pairs_current_and_memory`, `transcript_capped_keeps_the_newest`.
+
+Manual, in the app on the local model:
+1. Select a card, run `/grill-me`. Exactly one question card appears, with no note under it. Answer 5 times: each answer goes into the card's notes as **Q:**/**A:**, the next question comes, and none repeats an answered one. sidecar.log: one `ask_question` per turn (`turn_end_early … why=question`), `turn_start … session=live` with the same `sid` on every turn, and `send_message … answered=` growing.
+2. Answers stay on the card: during a plain card grill, no "Project decisions" card is created or changed.
+3. `/grill-me handoff` from the handoff gap check still records answers on the Tech / Project decisions cards.
+4. A local reply that produced text or a card and then had a failed step: a grey "One step failed · Details" line; Details lists the failed step; ⋯ › Retry with Claude works. A local reply with nothing usable keeps the red banner with Retry with Claude.
+5. After a red-banner local failure, send another message in the same thread: the model still knows the earlier messages (ask "what did I answer first?").

@@ -16,6 +16,7 @@ import { claudeApi } from "../api/claudeIndex";
 import { LocalSetup } from "./LocalSetup";
 import { RESTART_LABEL, useOllamaRestart } from "../state/useOllamaRestart";
 import { ThreadMenu } from "./chat/ThreadMenu";
+import { Popover } from "./chat/Popover";
 import { PanelMenu } from "./chat/PanelMenu";
 import { ModelChip } from "./chat/ModelChip";
 import { ActionMenu, filterActions, type ChatAction } from "./chat/ActionMenu";
@@ -751,7 +752,12 @@ function ChatBubble({
     />
   ) : null;
   const localFailed = message.role === "claude" && !live && message.backend === "local" && (!!message.fallback || (message.isError && !message.failure));
-  const retryClaude = localFailed && (
+  // A turn that still produced something usable (text, a question card, a ghost card, a change)
+  // shows a small grey note; the red banner is only for a turn with nothing to show.
+  const usable = !!message.text?.trim() || !!message.question || !!message.organize || !!message.proposals?.length || !!message.steps?.some((s) => s.kind === "tool" && s.status === "done" && USABLE_TOOLS.has(s.tool ?? ""));
+  const retryClaude = localFailed && usable ? (
+    <StepFailedNote message={message} retryDisabled={retryDisabled} onRetryWithClaude={onRetryWithClaude} />
+  ) : localFailed && (
     <div className="chat-failure">
       <div className="chat-failure-line">
         <span>{FALLBACK_TEXT[message.fallback ?? "error"]}</span>
@@ -985,6 +991,53 @@ function BalanceChip({ onSettings }: { onSettings: () => void }) {
     >
       ◈ {label}
     </button>
+  );
+}
+
+/** Tools whose success is visible output of a turn (see `usable` above). */
+const USABLE_TOOLS = new Set(["create_card", "ask_question", "propose_link", "merge_cards", "propose_edit", "propose_organize", "propose_artifact", "escalate_artifact", "remember", "forget"]);
+
+/** "One step failed · Details", with "Retry with Claude" in a ⋯ menu: the turn's output stands. */
+function StepFailedNote({ message, retryDisabled, onRetryWithClaude }: { message: ChatMessage; retryDisabled: boolean; onRetryWithClaude: () => void }) {
+  const [open, setOpen] = useState(false);
+  const [details, setDetails] = useState(false);
+  const btn = useRef<HTMLButtonElement | null>(null);
+  const failed = message.steps?.filter((s) => s.kind === "tool" && s.status === "error") ?? [];
+  return (
+    <div className="step-failed">
+      <div className="step-failed-line">
+        <span>One step failed</span>
+        <span aria-hidden="true">·</span>
+        <button type="button" className="memory-act" aria-expanded={details} onClick={() => setDetails((v) => !v)}>
+          Details
+        </button>
+        <button ref={btn} type="button" className="step-failed-more" aria-haspopup="menu" aria-expanded={open} aria-label="More actions" title="More actions" onClick={() => setOpen((v) => !v)}>
+          ⋯
+        </button>
+      </div>
+      {details && (
+        <div className="step-failed-details">
+          {failed.length ? failed.map((s) => <div key={s.sid}>{s.label || s.tool}{s.detail ? `: ${s.detail}` : ""}</div>) : FALLBACK_TEXT[message.fallback ?? "error"]}
+        </div>
+      )}
+      {open && (
+        <Popover anchor={btn} onClose={() => setOpen(false)} label="Reply actions">
+          <button
+            type="button"
+            role="menuitem"
+            className="menu-item cm-item"
+            disabled={retryDisabled}
+            title="Send this message to Claude once, with a recap of the thread; the next message is local again"
+            onClick={() => {
+              setOpen(false);
+              onRetryWithClaude();
+            }}
+          >
+            <span className="cm-label">Retry with Claude</span>
+          </button>
+        </Popover>
+      )}
+    </div>
   );
 }
 

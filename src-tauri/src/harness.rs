@@ -69,6 +69,8 @@ pub enum FakeMode {
     Error500,
     /// Streams a complete short answer.
     Ok,
+    /// Answers request n with the n-th reply of the script, then plain text: ("tool:<name>", json args) or ("text", text).
+    Script(&'static [(&'static str, &'static str)]),
 }
 
 pub struct FakeServer {
@@ -126,6 +128,7 @@ fn fake_conn(mut s: TcpStream, mode: FakeMode, stop: Arc<AtomicBool>, requests: 
             let _ = std::fs::write(PathBuf::from(dir).join(format!("request-{n}.json")), serde_json::to_string_pretty(&shape).unwrap());
         }
     }
+    let n = *requests.lock().unwrap() as usize;
     let hold = |stop: &AtomicBool| {
         while !stop.load(Ordering::SeqCst) {
             std::thread::sleep(Duration::from_millis(200));
@@ -152,6 +155,25 @@ fn fake_conn(mut s: TcpStream, mode: FakeMode, stop: Arc<AtomicBool>, requests: 
         FakeMode::Error500 => {
             let b = json!({"type":"error","error":{"type":"api_error","message":"fake server error"}}).to_string();
             let _ = write!(s, "HTTP/1.1 500 Internal Server Error\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{b}", b.len());
+        }
+        FakeMode::Script(script) => {
+            let (kind, arg) = script.get(n - 1).copied().unwrap_or(("text", "Done."));
+            let _ = (|| -> std::io::Result<()> {
+                s.write_all(head.as_bytes())?;
+                sse(&mut s, "message_start", json!({"type":"message_start","message":{"id":format!("msg_fake{n}"),"type":"message","role":"assistant","model":"fake","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":10,"output_tokens":1}}}))?;
+                let stop = if let Some(name) = kind.strip_prefix("tool:") {
+                    sse(&mut s, "content_block_start", json!({"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":format!("toolu_fake{n}"),"name":name,"input":{}}}))?;
+                    sse(&mut s, "content_block_delta", json!({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":arg}}))?;
+                    "tool_use"
+                } else {
+                    sse(&mut s, "content_block_start", json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}))?;
+                    sse(&mut s, "content_block_delta", json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":arg}}))?;
+                    "end_turn"
+                };
+                sse(&mut s, "content_block_stop", json!({"type":"content_block_stop","index":0}))?;
+                sse(&mut s, "message_delta", json!({"type":"message_delta","delta":{"stop_reason":stop,"stop_sequence":null},"usage":{"output_tokens":6}}))?;
+                sse(&mut s, "message_stop", json!({"type":"message_stop"}))
+            })();
         }
         FakeMode::Ok => {
             let _ = (|| -> std::io::Result<()> {
@@ -290,6 +312,8 @@ pub struct TurnResult {
     pub foreign_events: usize,
     pub plan: Option<Value>,
     pub question: bool,
+    /// Every question card this turn put up (ask_question calls that reached the UI), in order.
+    pub questions: Vec<(String, Vec<String>)>,
     #[serde(skip)]
     pub text: String,
 }
@@ -303,6 +327,10 @@ pub struct TurnOpts {
     pub retry_with_claude: bool,
     pub organize: Option<(String, Option<crate::router::Backend>)>,
     pub organize_extra: Option<Value>,
+    /// The selected card's block, as the chat panel's formatContext builds it.
+    pub context: Option<String>,
+    /// The question this turn answers (a grill-me choice).
+    pub question: Option<String>,
 }
 
 #[derive(Default)]
@@ -320,6 +348,8 @@ pub struct Driver {
     seq: u64,
     /// Ids of turns that already ended (late events for them are counted, not acted on).
     ended: BTreeSet<String>,
+    /// S9: each card's notes before the first run.
+    orig: HashMap<String, String>,
     pub cap: Duration,
 }
 
@@ -331,7 +361,8 @@ pub enum Act {
 }
 
 fn event_turn(v: &Value) -> Option<String> {
-    v.get("id").and_then(Value::as_str).or_else(|| v.get("turnId").and_then(Value::as_str)).map(str::to_string)
+    // A question event's own id is the question's; its turn is in turnId.
+    v.get("turnId").and_then(Value::as_str).or_else(|| v.get("id").and_then(Value::as_str)).map(str::to_string)
 }
 
 impl Driver {
@@ -362,14 +393,14 @@ impl Driver {
             slug: self.slug.clone(),
             id: id.clone(),
             text: o.text.clone(),
-            context: None,
+            context: o.context.clone(),
             thread: o.thread.clone(),
             folder: o.folder.clone(),
             resume,
             web: false,
             selection: Vec::new(),
             memory: false,
-            question: None,
+            question: o.question.clone(),
             think: o.think,
             pin: None,
             resume_local,
@@ -402,6 +433,7 @@ impl Driver {
             foreign_events: 0,
             plan: None,
             question: false,
+            questions: Vec::new(),
             text: String::new(),
         };
         // send_message may block (Ollama readiness check, sidecar spawn): off this thread, like a Tauri command.
@@ -478,7 +510,12 @@ impl Driver {
                     }
                 }
                 "compacted" => r.compacted = true,
-                "question" => r.question = true,
+                "question" => {
+                    r.question = true;
+                    let q = v.get("question").and_then(Value::as_str).unwrap_or_default().to_string();
+                    let c = v.get("choices").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect()).unwrap_or_default();
+                    r.questions.push((q, c));
+                }
                 "organize_proposal" => r.plan = v.get("plan").cloned(),
                 "model_note" => {
                     if v.get("localRetry").and_then(Value::as_bool) == Some(true) {
@@ -558,9 +595,23 @@ impl Driver {
         }
         self.ended.insert(id.clone());
         let t = self.threads.entry(o.thread.clone()).or_default();
-        t.messages.push(json!({ "id": id, "role": "claude", "text": r.text, "isError": !matches!(r.end, End::Done) }));
+        // Like the chat panel: the reply shows the last question card the turn put up.
+        let mut m = json!({ "id": id, "role": "claude", "text": r.text, "isError": !matches!(r.end, End::Done) });
+        if let Some((q, c)) = r.questions.last() {
+            m["text"] = json!("");
+            m["question"] = json!({ "question": q, "choices": c });
+        }
+        t.messages.push(m);
         self.save_thread(&o.thread);
         r
+    }
+
+    /// The user picked `choice` on the thread's last question card (the chat panel's answerQuestion).
+    fn mark_answered(&mut self, thread: &str, choice: &str) {
+        if let Some(m) = self.threads.get_mut(thread).and_then(|t| t.messages.iter_mut().rev().find(|m| m.get("question").is_some())) {
+            m["question"]["answered"] = json!(choice);
+        }
+        self.save_thread(thread);
     }
 
     /// Cards in the project, by title (ghosts included).
@@ -874,6 +925,143 @@ fn s6(d: &mut Driver, run: usize) -> RunRecord {
     rec("S6", run, ok, note, turns)
 }
 
+/// Lowercase words of a question, for spotting a repeat.
+fn words(q: &str) -> BTreeSet<String> {
+    q.to_lowercase().split(|c: char| !c.is_alphanumeric()).filter(|w| w.len() > 2).map(str::to_string).collect()
+}
+
+/// The same question again: identical, or nearly the same words (Jaccard >= 0.8).
+fn is_repeat(a: &str, b: &str) -> bool {
+    let (x, y) = (words(a), words(b));
+    let union = x.union(&y).count();
+    a.trim().eq_ignore_ascii_case(b.trim()) || (union > 0 && x.intersection(&y).count() as f64 / union as f64 >= 0.8)
+}
+
+/// All strings of a JSON value, joined (what the model saw, for a contains check).
+fn all_text(v: &Value, out: &mut String) {
+    match v {
+        Value::String(s) => {
+            out.push_str(s);
+            out.push('\n');
+        }
+        Value::Array(a) => a.iter().for_each(|x| all_text(x, out)),
+        Value::Object(o) => o.values().for_each(|x| all_text(x, out)),
+        _ => {}
+    }
+}
+
+/// S9: a local /grill-me on one card, then 5 answers (the first choice each time), the way the
+/// chat panel does it: the answer is appended to the card's notes, then sent as the next turn.
+/// Checks: no failure note, one question card per turn, no repeated question, and each answer
+/// (with its question) in the next turn's last model request.
+fn s9(d: &mut Driver, run: usize, card: Option<&str>, dump: &Path) -> RunRecord {
+    let Some(id) = card else { return rec("S9", run, false, "no --card given", vec![]) };
+    d.reset_thread(id);
+    let c = match d.state().ws.lock().unwrap().read_card(&d.slug, id) {
+        Ok(c) => c,
+        Err(e) => return rec("S9", run, false, format!("card {id}: {e}"), vec![]),
+    };
+    // Every run starts from the card as it was before the first run.
+    let base = d.orig.entry(id.to_string()).or_insert_with(|| c.body.clone()).clone();
+    let title = c.meta.title.clone();
+    let mut body = base;
+    let _ = d.state().ws.lock().unwrap().update_card(&d.slug, id, crate::model::CardPatch { body: Some(body.clone()), ..Default::default() });
+    let stage = serde_json::to_value(c.meta.stage).ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
+    let tags = if c.meta.tags.is_empty() { String::new() } else { format!(", tags: {}", c.meta.tags.join(", ")) };
+    let ctx = |body: &str| format!("[Selected card] \"{title}\" (id {id}, stage: {stage}{tags})\n{}", if body.is_empty() { "(no notes yet)" } else { body });
+    let mut turns: Vec<TurnResult> = Vec::new();
+    let mut asked: Vec<String> = Vec::new();
+    let mut problems: Vec<String> = Vec::new();
+    let mut o = TurnOpts { thread: id.into(), text: "/grill-me".into(), context: Some(ctx(&body)), ..Default::default() };
+    let mut prev: Option<(String, String)> = None;
+    for k in 0..6 {
+        let t = d.turn(&o, |_, _, _| Act::None);
+        if t.end != End::Done || t.fallback.is_some() {
+            problems.push(format!("turn {k}: {:?} fallback={:?}", t.end, t.fallback));
+        }
+        if t.questions.len() > 1 {
+            problems.push(format!("turn {k}: {} question cards", t.questions.len()));
+        }
+        // What the model saw in this turn's last request: the previous question and its answer.
+        if let Some((q, a)) = &prev {
+            let mut seen = String::new();
+            if let Some(v) = std::fs::read_to_string(dump.join(format!("{}.json", t.id))).ok().and_then(|x| serde_json::from_str::<Value>(&x).ok()) {
+                all_text(&v, &mut seen);
+            }
+            if !(seen.contains(a.as_str()) && seen.contains(q.as_str())) {
+                problems.push(format!("turn {k}: previous answer not in the prompt"));
+            }
+        }
+        let shown = t.questions.last().cloned();
+        turns.push(t);
+        let Some((q, choices)) = shown else {
+            if k < 5 {
+                problems.push(format!("turn {k}: no question"));
+            }
+            break;
+        };
+        if let Some(old) = asked.iter().find(|x| is_repeat(x, &q)) {
+            problems.push(format!("turn {k}: repeated \"{old}\""));
+        }
+        asked.push(q.clone());
+        if k == 5 {
+            break;
+        }
+        let choice = choices.first().cloned().unwrap_or_else(|| "Yes".into());
+        d.mark_answered(id, &choice);
+        body = format!("{body}{}**Q:** {q}\n**A:** {choice}", if body.is_empty() { "" } else { "\n\n" });
+        let _ = d.state().ws.lock().unwrap().update_card(&d.slug, id, crate::model::CardPatch { body: Some(body.clone()), ..Default::default() });
+        o = TurnOpts { thread: id.into(), text: choice.clone(), context: Some(ctx(&body)), question: Some(q.clone()), ..Default::default() };
+        prev = Some((q, choice));
+    }
+    let ok = problems.is_empty() && turns.len() == 6;
+    let cards: Vec<usize> = turns.iter().map(|t| t.questions.len()).collect();
+    rec("S9", run, ok, format!("{} turns, question cards per turn {cards:?}; {}", turns.len(), if problems.is_empty() { "clean".into() } else { problems.join("; ") }), turns)
+}
+
+/// Last model request of a turn (the sidecar's prompt dump), as one searchable string.
+fn prompt_of(dump: &Path, turn: &str) -> String {
+    let mut seen = String::new();
+    if let Some(v) = std::fs::read_to_string(dump.join(format!("{turn}.json"))).ok().and_then(|x| serde_json::from_str::<Value>(&x).ok()) {
+        all_text(&v, &mut seen);
+    }
+    seen
+}
+
+const ASK_BAD: (&str, &str) = ("tool:mcp__dreamer__ask_question", r#"{"question":"Which platform comes first?","choices":"PC, mobile"}"#);
+const ASK_OK: (&str, &str) = ("tool:mcp__dreamer__ask_question", r#"{"question":"Which platform comes first?","choices":["PC","Mobile"]}"#);
+const WRITE: (&str, &str) = ("tool:Write", r#"{"file_path":"notes.txt","content":"x"}"#);
+static REPAIR: [(&str, &str); 2] = [ASK_BAD, ASK_OK];
+static DOUBLE: [(&str, &str); 2] = [ASK_BAD, WRITE];
+
+/// S10: forced bad tool calls from the "local model" (a scripted fake server). `repair`: a malformed
+/// ask_question, then the fixed one: the turn must end clean with one question card, and the second
+/// request must carry the fix hint. `double`: a malformed call, then an unknown tool (Write): the
+/// turn fails with "Retry with Claude", and the next turn still sees the first turn in its prompt.
+fn s10(d: &mut Driver, run: usize, part: &str, dump: &Path) -> RunRecord {
+    d.reset_thread("project");
+    let fake = fake_server(FakeMode::Script(if part == "repair" { &REPAIR } else { &DOUBLE }));
+    sidecar::shutdown(&d.state());
+    set_env("DREAMER_FAKE_LOCAL_URL", Some(&fake.url));
+    let first_text = format!("Ask me one question about the platform ({run}).");
+    let a = d.turn(&plain("project", &first_text), |_, _, _| Act::None);
+    let seen_a = prompt_of(dump, &a.id);
+    let r = if part == "repair" {
+        let hinted = seen_a.contains("Invalid args for mcp__dreamer__ask_question");
+        let ok = a.end == End::Done && a.fallback.is_none() && a.questions.len() == 1 && hinted;
+        rec("S10-repair", run, ok, format!("{:?} fallback={:?} questions={} hint_sent={hinted} tools={:?}", a.end, a.fallback, a.questions.len(), a.tools), vec![a])
+    } else {
+        let b = d.turn(&plain("project", "PC."), |_, _, _| Act::None);
+        let history = prompt_of(dump, &b.id).contains(&first_text);
+        let hinted = seen_a.contains("Unknown tool Write") || prompt_of(dump, &b.id).contains("Unknown tool Write");
+        let ok = a.fallback.as_deref() == Some("tool") && b.end == End::Done && history;
+        rec("S10-double", run, ok, format!("first={:?} fallback={:?} next={:?} next_has_history={history} write_hint={hinted} tools={:?}", a.end, a.fallback, b.end, a.tools), vec![a, b])
+    };
+    sidecar::shutdown(&d.state());
+    set_env("DREAMER_FAKE_LOCAL_URL", None);
+    r
+}
+
 /// S7: Claude smoke tests (real Claude, small model, short prompts).
 fn s7(d: &mut Driver, run: usize, part: &str) -> RunRecord {
     d.reset_thread("project");
@@ -1033,6 +1221,8 @@ struct Args {
     project: String,
     cap: Duration,
     label: String,
+    /// S9: the card to grill (its id).
+    card: Option<String>,
 }
 
 fn parse_args() -> Args {
@@ -1044,6 +1234,7 @@ fn parse_args() -> Args {
         project: "colonizeearth".into(),
         cap: Duration::from_secs(600),
         label: "run".into(),
+        card: None,
     };
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -1057,6 +1248,7 @@ fn parse_args() -> Args {
             "--project" => a.project = v,
             "--cap" => a.cap = Duration::from_secs(v.parse().unwrap_or(600)),
             "--label" => a.label = v,
+            "--card" => a.card = Some(v),
             _ => {
                 i += 1;
                 continue;
@@ -1082,6 +1274,10 @@ pub fn main() {
     let a = parse_args();
     std::fs::create_dir_all(&a.out).expect("create the output folder");
     set_env("DREAMER_LOG_DIR", Some(&a.out.join("logs").display().to_string()));
+    // The sidecar keeps the last model request of each local turn here (S9 checks what the model saw).
+    let dump = a.out.join("prompts");
+    std::fs::create_dir_all(&dump).ok();
+    set_env("DREAMER_DUMP_PROMPTS", Some(&dump.display().to_string()));
     let root = a.out.join("workspace");
     // Copy the workspace (settings + the one project), never touching the original.
     let src_root = a.source.canonicalize().unwrap_or(a.source.clone());
@@ -1090,6 +1286,13 @@ pub fn main() {
     let dst = root.join("projects").join(&a.project);
     copy_dir(&src, &dst, &["chats"]).expect("copy the project");
     std::fs::copy(a.source.join("workspace.json"), root.join("workspace.json")).expect("copy workspace.json");
+    // S9: a card that sits in the Trash is grilled on a restored copy (only in this temp workspace).
+    if let Some(id) = &a.card {
+        let (card, trashed) = (dst.join("cards").join(format!("{id}.md")), dst.join("trash").join(format!("{id}.md")));
+        if !card.exists() && trashed.exists() {
+            std::fs::rename(&trashed, &card).expect("restore the S9 card in the copy");
+        }
+    }
     let flat = format!("{}-flat", a.project);
     copy_dir(&src, &root.join("projects").join(&flat), &["chats"]).expect("copy the project for S3");
     let n_flat = build_flat_fixture(&root.join("projects").join(&flat)).expect("S3 fixture");
@@ -1109,7 +1312,7 @@ pub fn main() {
             let _ = tx.lock().unwrap().send((Instant::now(), v));
         }
     });
-    let mut d = Driver { app: handle.clone(), slug: a.project.clone(), rx, threads: HashMap::new(), seq: 0, ended: BTreeSet::new(), cap: a.cap };
+    let mut d = Driver { app: handle.clone(), slug: a.project.clone(), rx, threads: HashMap::new(), seq: 0, ended: BTreeSet::new(), orig: HashMap::new(), cap: a.cap };
     let settings = d.state().ws.lock().unwrap().get_settings().unwrap_or_default();
     let local = d.state().ollama.check_again(&crate::ollama::LocalCfg::from_settings(&settings));
     let header = json!({
@@ -1131,6 +1334,9 @@ pub fn main() {
                 "S4" => s4(&mut d, run),
                 "S5" => s5(&mut d, run),
                 "S6" => s6(&mut d, run),
+                "S9" => s9(&mut d, run, a.card.as_deref(), &dump),
+                "S10-repair" => s10(&mut d, run, "repair", &dump),
+                "S10-double" => s10(&mut d, run, "double", &dump),
                 "S7-chat" => s7(&mut d, run, "chat"),
                 "S7-think" => s7(&mut d, run, "think"),
                 "S7-retry" => s7(&mut d, run, "retry"),

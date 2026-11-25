@@ -1528,6 +1528,22 @@ pub fn send_message(app: &AppHandle, state: &AppState, turn: Turn) -> Result<()>
     if let Some(c) = &card_ctx {
         parts.push(format!("[This card]\n{c}"));
     }
+    // A grill turn says what is settled (the model re-asked answered questions without it): every
+    // question asked in this thread with its chosen answer, plus the card's memory lines.
+    let grill = turn.question.is_some() || turn.text.starts_with("/grill-me");
+    let answered = grill
+        .then(|| {
+            let memory = card.as_ref().map_or_else(String::new, |c| {
+                // The memory pass adds its lines to the card's pending proposal, not its saved notes.
+                let proposed = state.ws.lock().ok().and_then(|ws| ws.read_proposal(&turn.slug, &c.meta.id)).and_then(|p| p.get("body").and_then(Value::as_str).map(str::to_string));
+                crate::memory::decisions_of(proposed.as_deref().unwrap_or(&c.body))
+            });
+            crate::ctx::answered_block(&file, turn.question.as_deref().map(|q| (q, turn.text.as_str())), &memory)
+        })
+        .flatten();
+    if let Some(a) = &answered {
+        parts.push(a.clone());
+    }
     // An escalation gets the local model's recap of the thread (the sidecar writes it into the
     // slot) plus the last few messages, never the whole transcript.
     let transcript = crate::ctx::transcript(&file);
@@ -1568,10 +1584,8 @@ pub fn send_message(app: &AppHandle, state: &AppState, turn: Turn) -> Result<()>
     let full_text = if parts.is_empty() { turn.text.clone() } else { format!("{}\n\n---\n\n{}", parts.join("\n\n"), turn.text) };
     // A live session gets the change block plus the related cards; the full text above is for a
     // new one. An escalation always opens a fresh session, so it always sends the full text.
-    let delta_block = match (block, related_block.clone()) {
-        (Some(b), Some(r)) => Some(format!("{b}\n\n{r}")),
-        (b, r) => b.or(r),
-    };
+    let delta_block = [answered.clone(), block, related_block.clone()].into_iter().flatten().collect::<Vec<_>>();
+    let delta_block = (!delta_block.is_empty()).then(|| delta_block.join("\n\n"));
     let delta_text = if route.escalated { full_text.clone() } else { crate::ctx::with_block(delta_block, &turn.text) };
     // "Version: v2 (others: v1)" heads every message (it is short, and the open version can change between turns).
     let (full_text, delta_text) = match vs.header() {
@@ -1582,7 +1596,7 @@ pub fn send_message(app: &AppHandle, state: &AppState, turn: Turn) -> Result<()>
     // Sizes only, never content: what each part of this turn weighs (chars), for diagnosing context bloat.
     let n = |o: Option<&String>| o.map_or(0, |s| s.chars().count());
     crate::sidecar_log::line(&format!(
-        "send_message {} thread={} resume={} compact={} chars: memory={} digest={} this_card={} (raw {}) related={} ({} cards) earlier={} user={} delta_block={} | text={} fullText={}",
+        "send_message {} thread={} resume={} compact={} chars: memory={} digest={} this_card={} (raw {}) related={} ({} cards) earlier={} answered={} user={} delta_block={} | text={} fullText={}",
         turn.id,
         key,
         if is_local { turn.resume_local.is_some() } else { turn.resume.is_some() },
@@ -1594,6 +1608,7 @@ pub fn send_message(app: &AppHandle, state: &AppState, turn: Turn) -> Result<()>
         n(related_block.as_ref()),
         fresh.len(),
         file.get("summary").and_then(Value::as_str).map_or(0, |s| s.chars().count()),
+        n(answered.as_ref()),
         turn.text.chars().count(),
         delta_text.chars().count().saturating_sub(turn.text.chars().count()),
         delta_text.chars().count(),
@@ -1652,11 +1667,14 @@ pub fn send_message(app: &AppHandle, state: &AppState, turn: Turn) -> Result<()>
     if is_local {
         let vision = local.as_ref().and_then(|l| l.vision).unwrap_or(false);
         msg["local"] = json!({ "baseUrl": crate::ollama::base_url(), "vision": vision, "numCtx": crate::ollama::NUM_CTX });
-        // The automatic local retry runs in a fresh session: the full context plus the thread's
-        // last messages (a fresh session has no history of its own).
-        let retry = match crate::ctx::recent_turns(&file, ESCALATION_RECENT) {
-            Some(r) => format!("{}\n\n[Last messages in this thread]\n{r}\n\n---\n\n{}", parts.join("\n\n"), turn.text),
-            None => full_text.clone(),
+        // A restarted local session (the automatic retry, or a resume that failed) is fresh: the
+        // full context plus the thread's visible history (text, question + answer pairs, capped).
+        let history = crate::ctx::transcript_capped(&file, crate::ctx::RESTART_HISTORY_CHARS);
+        let retry = if history.trim().is_empty() {
+            full_text.clone()
+        } else {
+            let head = vs.header().map(|h| format!("{h}\n\n")).unwrap_or_default();
+            format!("{head}{}\n\n[This thread so far]\n{history}\n\n---\n\n{}", parts.join("\n\n"), turn.text)
         };
         msg["retryText"] = json!(retry);
     }
