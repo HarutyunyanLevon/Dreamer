@@ -11,6 +11,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+pub mod build;
 mod import;
 mod versions;
 pub use import::{ImportOffer, ImportPlan, ImportResult, Target};
@@ -379,7 +380,7 @@ impl Workspace {
 
     fn card_count(dir: &Path) -> usize {
         fs::read_dir(dir.join("cards"))
-            .map(|rd| rd.filter_map(|e| e.ok()).filter(|e| e.path().extension().is_some_and(|x| x == "md")).count())
+            .map(|rd| rd.filter_map(|e| e.ok()).filter(|e| e.path().extension().is_some_and(|x| x == "md") && !e.file_name().to_string_lossy().ends_with(".built.md")).count())
             .unwrap_or(0)
     }
 
@@ -831,7 +832,7 @@ impl Workspace {
                 continue;
             }
             let Some(stem) = path.file_stem().map(|s| s.to_string_lossy().into_owned()) else { continue };
-            if stem.starts_with('.') {
+            if stem.starts_with('.') || stem.ends_with(".built") {
                 continue;
             }
             match check_id(&stem).and_then(|_| Self::read_card_file(&path, &stem)) {
@@ -1160,6 +1161,7 @@ impl Workspace {
         let dir = self.existing_project_dir(slug)?;
         let path = Self::card_path(&dir, id)?;
         let mut card = Self::read_card_file(&path, id)?;
+        let was_built = card.meta.stage == Stage::Built;
         if let Some(t) = patch.title {
             let t = t.trim();
             card.meta.title = if t.is_empty() { "Untitled".into() } else { t.to_string() };
@@ -1197,6 +1199,7 @@ impl Workspace {
         if let Some(a) = patch.attachments {
             card.meta.attachments = Self::check_attachments(a)?;
         }
+        build::on_save(&dir, &mut card, was_built)?;
         card.meta.updated = now();
         Self::write_card_file(&path, &card)?;
         if card.meta.role.as_deref() == Some(crate::model::ROLE_CC_QUESTIONS) {
@@ -1664,6 +1667,15 @@ impl Workspace {
         // An artifact's files go with its card, once the card is gone for good.
         let cards = dir.join("cards");
         crate::artifacts::sweep(&dir, &|id| cards.join(format!("{id}.md")).is_file());
+        // Snapshots of cards that are gone for good.
+        if let Ok(rd) = fs::read_dir(&cards) {
+            for e in rd.filter_map(|e| e.ok()) {
+                let name = e.file_name().to_string_lossy().into_owned();
+                if name.strip_suffix(".built.md").is_some_and(|id| !cards.join(format!("{id}.md")).is_file()) {
+                    let _ = fs::remove_file(e.path());
+                }
+            }
+        }
         Ok(n)
     }
 

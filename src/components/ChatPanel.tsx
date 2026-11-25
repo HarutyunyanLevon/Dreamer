@@ -90,6 +90,17 @@ export function ChatPanel({ ws, panels }: { ws: Workspace; panels: Pick<ReturnTy
       );
     },
   });
+  // STATUS.md changed in the repo: a line in the project thread, whatever thread is open.
+  const addBuildNote = chat.addBuildNote;
+  useEffect(() => {
+    let un: (() => void) | undefined;
+    let gone = false;
+    api.onBuildUpdate((u) => (u.built.length + u.partial.length + u.in_progress.length + u.new.length + u.blocked.length > 0 || u.warnings.length > 0) && addBuildNote(u)).then((f) => (gone ? f() : (un = f)), () => {});
+    return () => {
+      gone = true;
+      un?.();
+    };
+  }, [addBuildNote]);
   const [text, setText] = useState("");
   const [confirmReset, setConfirmReset] = useState(false);
   const [showModels, setShowModels] = useState(false);
@@ -716,6 +727,23 @@ function ChatBubble({
       </span>
     </div>
   );
+  if (message.kind === "build" && message.build) {
+    const u = message.build;
+    const jumps = [...u.built, ...u.partial, ...u.in_progress, ...u.new, ...u.blocked];
+    return (
+      <div className="build-line" role="status">
+        <b>{message.text}</b>
+        {jumps.length > 0 && (
+          <div className="jumps">
+            {jumps.map((j) => (
+              <button key={j.id} type="button" className="jump" title="Open this card" onClick={() => onOpenCard(j.id, u.slug)}>{j.title || "Untitled"}</button>
+            ))}
+          </div>
+        )}
+        {u.warnings.map((w, i) => <span key={i} className="warn">{w}</span>)}
+      </div>
+    );
+  }
   if (message.kind === "compacted") {
     return (
       <button type="button" className="chat-compacted" title={message.summary || "Summary unavailable"} onClick={() => setShowSummary((v) => !v)}>

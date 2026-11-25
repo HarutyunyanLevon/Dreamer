@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type CSSProperties } from "react";
-import { themeVars } from "../theme/applyTheme";
+import { stageColor, themeVars } from "../theme/applyTheme";
 import { checkTheme } from "../theme/contrast";
 import { useTheme } from "../theme/ThemeContext";
 import { STAGES, STAGE_LABEL, type StageId, type Theme } from "../theme/types";
@@ -96,7 +96,7 @@ export function ThemeEditor({ initial, isNew, onClose }: { initial: Theme; isNew
           <div className="swatch-row">
             {STAGES.map((s) => (
               <label key={s} className="color-field">
-                <input type="color" value={draft.stages[s]} onChange={(e) => setStage(s, e.target.value)} aria-label={STAGE_LABEL[s]} />
+                <input type="color" value={stageColor(draft, s)} onChange={(e) => setStage(s, e.target.value)} aria-label={STAGE_LABEL[s]} />
                 <span>{STAGE_LABEL[s]}</span>
               </label>
             ))}

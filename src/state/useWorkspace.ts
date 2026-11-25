@@ -144,7 +144,7 @@ function freeSpot(c: Canvas): { x: number; y: number } {
 }
 
 const stampNow = () => new Date().toISOString().replace(/\.\d+Z$/, "Z");
-const STAGE_ORDER = ["mist", "reverie", "lucid", "dream"];
+const STAGE_ORDER = ["mist", "reverie", "lucid", "dream", "built"];
 
 /** Target positions for an arrange op: groups side by side, each a grid (or one column). */
 function layoutCards(list: string[], c: Canvas, byId: Map<string, Card>, layout: OrganizeLayout): Record<string, { x: number; y: number }> {
@@ -1355,6 +1355,28 @@ export function useWorkspace() {
     [run, pushUndo],
   );
 
+  /** "Mark as built now" / "Clear needs rebuild": one undo step puts the build block, snapshot and stage back. */
+  const markBuiltNow = useCallback(
+    async (id: string) => {
+      const slug = activeRef.current!;
+      const before = dataRef.current?.cards.find((c) => c.id === id);
+      if (!before) return;
+      const prevBuild = before.build ?? null;
+      const prevStage = before.stage;
+      const prevSnapshot = (await api.buildTexts(slug, id).catch(() => null))?.snapshot ?? null;
+      const updated = await run(() => api.markBuiltNow(slug, id));
+      if (updated) {
+        pushUndo({
+          label: "mark as built",
+          undo: async () => void (await api.restoreBuild(slug, id, prevBuild, prevSnapshot, prevStage)),
+          redo: async () => void (await api.markBuiltNow(slug, id)),
+        });
+      }
+      return updated;
+    },
+    [run, pushUndo],
+  );
+
   const updateCard = useCallback(
     async (id: string, patch: CardPatch) => {
       const slug = activeRef.current!;
@@ -1855,6 +1877,7 @@ export function useWorkspace() {
     setProjectTheme: (themeId: string | null) => run(() => api.updateProject(activeRef.current!, { theme: themeId ?? "" })),
     createCard,
     updateCard,
+    markBuiltNow,
     deleteCard,
     deleteCards,
     loseCard,

@@ -14,24 +14,28 @@ const INSTRUCTION: Record<Intent, Record<StageId, string>> = {
     reverie: "Develop this idea further: sharpen the core loop, fill the obvious gaps and name what is still vague.",
     lucid: "This idea is well formed. Deepen it: concrete mechanics, systems that interact, and content examples.",
     dream: "This idea is mature. Refine it: tighten scope, remove what doesn't serve the core, and polish the pitch.",
+    built: "This is already built. Review how it plays now and suggest what to improve or extend next, keeping what works.",
   },
   "Grill me": {
     mist: "Ask me hard, open questions, one at a time, to find out what this spark is really about.",
     reverie: "Interview me, one question at a time, to stress-test the core loop, audience and hook.",
     lucid: "Grill me, one question at a time, on the weakest assumptions, risks and contradictions in this design.",
     dream: "Play a skeptical publisher: grill me, one question at a time, on scope, market fit and feasibility.",
+    built: "This is already built. Grill me, one question at a time, on what playtests would show: where it falls short of the design.",
   },
   "Find twists": {
     mist: "Suggest 5 surprising twists that would make this spark distinctive. Keep each to one or two sentences.",
     reverie: "Propose 5 twists on the premise, mechanics or setting that would make this stand out from similar games.",
     lucid: "Find 5 twists that subvert player expectations without breaking the core loop, with the trade-off of each.",
     dream: "Suggest a few bold but low-cost twists that would sharpen the hook without growing the scope.",
+    built: "This already exists. Suggest a few low-cost twists to what is built that would sharpen it, without a rewrite.",
   },
   "Plan build": {
     mist: "Outline the smallest prototype that would show whether this spark is fun, in a few concrete steps.",
     reverie: "Plan a first playable: the minimum features, a step-by-step build order, and what to test first.",
     lucid: "Write a build plan: milestones from prototype to vertical slice, key technical risks and how to retire them.",
     dream: "Write a production plan: milestones, task breakdown, risks, and a realistic scope for a first release.",
+    built: "This is already built. List the change tasks needed to polish or extend it, and what to verify first.",
   },
 };
 

@@ -199,9 +199,9 @@ export function createMockApi(): Api {
   // `npm run dev` + `?stress=1`: a 500-card project to eyeball pan/zoom/drag performance without Tauri.
   if (typeof window !== "undefined" && new URLSearchParams(window.location.search).has("stress")) {
     const stress = seedProject("stress-test", "Stress test (500 cards)");
-    const stages = ["mist", "reverie", "lucid", "dream"] as const;
+    const stages = ["mist", "reverie", "lucid", "dream", "built"] as const;
     for (let i = 0; i < 500; i++) {
-      add(stress, { title: `Idea ${i}`, body: "Lorem ipsum dolor sit amet, consectetur adipiscing elit.", stage: stages[i % 4], tags: i % 3 === 0 ? ["tag"] : [] }, (i % 25) * 264, Math.floor(i / 25) * 196);
+      add(stress, { title: `Idea ${i}`, body: "Lorem ipsum dolor sit amet, consectetur adipiscing elit.", stage: stages[i % 5], tags: i % 3 === 0 ? ["tag"] : [] }, (i % 25) * 264, Math.floor(i / 25) * 196);
     }
     projects.set(stress.slug, stress);
   }
@@ -693,6 +693,36 @@ export function createMockApi(): Api {
     hotkeyStatus: async () => [null, null],
     splitText: noDesktop,
     onTrayNotice: async () => () => {},
+    onBuildUpdate: async () => () => {},
+    linkRepo: async (slug, path) => {
+      const p = need(slug);
+      p.handoffTarget = path;
+      p.handoffConfirmed = path;
+      return summary(p);
+    },
+    markBuiltNow: async (slug, id) => {
+      const c = need(slug).cards.get(id)!;
+      c.stage = "built";
+      c.build = { ...c.build, status: "built", dirty: false, built_at: new Date().toISOString() };
+      return structuredClone(c);
+    },
+    restoreBuild: async (slug, id, build, _snapshot, stage) => {
+      const c = need(slug).cards.get(id)!;
+      c.stage = stage;
+      if (build) c.build = build;
+      else delete c.build;
+      return structuredClone(c);
+    },
+    buildTexts: async (slug, id) => {
+      const c = need(slug).cards.get(id)!;
+      return { snapshot: null, current: `---
+title: ${c.title}
+---
+
+${c.body}
+` };
+    },
+    openRepoFile: async () => {},
     onChange: async (cb) => {
       listeners.add(cb);
       return () => listeners.delete(cb);

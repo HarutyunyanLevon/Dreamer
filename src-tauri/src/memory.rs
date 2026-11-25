@@ -715,7 +715,7 @@ pub fn seed(app: &AppHandle, state: &AppState, slug: &str) -> Result<()> {
         }
         out.push_str("\n[Dream and Lucid cards] (title, then the first 400 characters)\n");
         let mut n = 0;
-        for c in kept.iter().filter(|c| c.meta.role.is_none() && matches!(c.meta.stage, crate::model::Stage::Dream | crate::model::Stage::Lucid)) {
+        for c in kept.iter().filter(|c| c.meta.role.is_none() && matches!(c.meta.stage, crate::model::Stage::Dream | crate::model::Stage::Lucid | crate::model::Stage::Built)) {
             out.push_str(&format!("- \"{}\" ({:?}): {}\n", c.meta.title, c.meta.stage, clip(&c.body, 400).replace('\n', " ")));
             n += 1;
         }

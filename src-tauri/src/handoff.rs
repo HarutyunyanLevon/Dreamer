@@ -12,6 +12,7 @@
 
 use crate::error::{AppError, Result};
 use crate::model::{Attachment, Card, CardKind, ProjectData, Stage, ROLES};
+use crate::storage::build;
 use crate::state::AppState;
 use crate::storage::{atomic_write, now, write_json};
 use serde::{Deserialize, Serialize};
@@ -565,6 +566,10 @@ pub fn apply_to_repo(repo: &Path, version_dir: &Path, docs: &BTreeMap<String, St
     if questions_created {
         files.push("docs/design/QUESTIONS.md".into());
     }
+    // Claude Code writes the build status here; Dreamer only ever creates it empty.
+    if create_if_missing(&dd.join("STATUS.md"), build::STATUS_TEMPLATE)? {
+        files.push("docs/design/STATUS.md".into());
+    }
     if let Some(block) = docs.get("CLAUDE.md") {
         let path = repo.join("CLAUDE.md");
         let existing = match fs::read_to_string(&path) {
@@ -748,6 +753,7 @@ pub fn run_tool(app: &AppHandle, state: &AppState, tool: &str, input: Value) -> 
                         "id": c.meta.id, "kind": c.meta.kind, "title": c.meta.title, "stage": c.meta.stage, "role": c.meta.role,
                         "unconfirmed": c.meta.kind == CardKind::Card && c.meta.stage == Stage::Mist,
                         "tags": c.meta.tags, "frame": frames.get(&c.meta.id),
+                        "build_status": build::build_status(c), "needs_rebuild": build::is_dirty(c),
                         "images": c.meta.attachments.iter().filter(|a| matches!(a, Attachment::Image { .. })).count(),
                         "clips": c.meta.attachments.iter().filter(|a| matches!(a, Attachment::Clip { .. })).count(),
                     })
@@ -791,6 +797,7 @@ pub fn run_tool(app: &AppHandle, state: &AppState, tool: &str, input: Value) -> 
                 "id": card.meta.id, "title": card.meta.title, "kind": card.meta.kind, "role": card.meta.role, "stage": card.meta.stage,
                 "unconfirmed": card.meta.kind == CardKind::Card && card.meta.stage == Stage::Mist,
                 "tags": card.meta.tags, "fields": card.meta.fields, "frame": frames.get(id), "body": card.body,
+                "build": card.meta.extra.get("build").map(|b| json!({ "status": b.get("status"), "files": b.get("files"), "commits": b.get("commits"), "notes": b.get("notes"), "needs_rebuild": build::is_dirty(&card) })),
                 "items": card.meta.items, "links": links, "linked_from": linked_from, "attachments": atts,
                 "updated": card.meta.updated,
             }))
@@ -981,6 +988,11 @@ fn finalize(state: &AppState, job: &Job) -> Result<Value> {
         Ok(r) => json!(r),
         Err(e) => json!({ "path": t, "error": e.to_string() }),
     });
+    if repo.is_some() {
+        if let Ok(ws) = state.ws.lock() {
+            let _ = ws.write_link(&job.slug);
+        }
+    }
     Ok(json!({ "version": version, "label": rev_label(&job.ver_title, version), "design_dir": job.dir, "dir": version_path.display().to_string(), "warnings": warnings, "repo": repo }))
 }
 
@@ -997,6 +1009,9 @@ fn card_lines(data: &ProjectData, cards: &[String], frames: &HashMap<String, Str
             }
             if let Some(r) = &c.meta.role {
                 bits.push(format!("role {r}"));
+            }
+            if c.meta.stage == Stage::Built {
+                bits.push(if build::is_dirty(c) { "needs rebuild".into() } else if build::build_status(c) == Some("partial") { "partly built".into() } else { "built".into() });
             }
             if let Some(f) = frames.get(&c.meta.id) {
                 bits.push(format!("frame \"{f}\""));
@@ -1113,7 +1128,7 @@ mod tests {
     use tempfile::TempDir;
 
     fn spec(scope: Scope) -> ScopeSpec {
-        ScopeSpec { scope, stages: vec![Stage::Mist, Stage::Reverie, Stage::Lucid, Stage::Dream], include_stickies: false, version: None }
+        ScopeSpec { scope, stages: vec![Stage::Mist, Stage::Reverie, Stage::Lucid, Stage::Dream, Stage::Built], include_stickies: false, version: None }
     }
 
     fn pack(version: u32) -> Pack {

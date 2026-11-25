@@ -30,7 +30,7 @@ export function pickBundle(at?: [number, number]) {
   input.click();
 }
 
-const STAGE_WORD: Record<string, string> = { mist: "Mist", reverie: "Reverie", lucid: "Lucid", dream: "Dream" };
+const STAGE_WORD: Record<string, string> = { mist: "Mist", reverie: "Reverie", lucid: "Lucid", dream: "Dream", built: "Built" };
 const BADGE: Record<string, string> = { new: "New", update: "Update", replace: "Replace ghost" };
 
 interface Open {

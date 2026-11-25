@@ -41,7 +41,7 @@ A `---` line inside the body is fine.
 | Unknown header or card key | ignored, warning |
 | Unknown `source` | `other`, warning |
 | Unknown `stage` | `mist`, warning |
-| `stage: built` | stored as `dream` plus a `build` block (`status: built`), until Dreamer has a built stage |
+| `stage: built` | stage Built plus a `build` block (`status: built` unless given) |
 | Duplicate `ref` | renamed `ref-2`, warning |
 | Missing `ref` | made up, warning |
 | Link to an unknown ref | dropped, warning |

@@ -70,11 +70,79 @@ pub fn create_project(state: State<AppState>, name: String) -> Result<ProjectSum
 #[tauri::command(async)]
 pub fn update_project(app: AppHandle, state: State<AppState>, slug: String, patch: ProjectPatch) -> Result<ProjectSummary> {
     let retarget = patch.handoff_target.is_some();
+    let relink = patch.last_version.is_some();
     let out = with_ws(&state, |ws| ws.update_project(&slug, patch))?;
     if retarget {
         state.refresh_questions(&app, true);
     }
+    if relink {
+        AppState::write_link_now(&app, &slug);
+    }
     Ok(out)
+}
+
+/// "Link repo…" confirmed: sets and confirms the folder, creates the empty STATUS.md, optionally
+/// adds `.dreamer/` to the repo's .gitignore, writes the link file.
+#[tauri::command(async)]
+pub fn link_repo(app: AppHandle, state: State<AppState>, slug: String, path: String, gitignore: bool) -> Result<ProjectSummary> {
+    let out = with_ws(&state, |ws| ws.link_repo(&slug, &path, gitignore))?;
+    state.refresh_questions(&app, true);
+    Ok(out)
+}
+
+/// "Mark as built now" / "Clear needs rebuild".
+#[tauri::command(async)]
+pub fn mark_built_now(state: State<AppState>, slug: String, id: String) -> Result<Card> {
+    with_ws(&state, |ws| ws.mark_built_now(&slug, &id))
+}
+
+/// Undo of the above: the card's build block, snapshot and stage as they were.
+#[tauri::command(async)]
+pub fn restore_build(state: State<AppState>, slug: String, id: String, build: Option<Value>, snapshot: Option<String>, stage: Stage) -> Result<Card> {
+    with_ws(&state, |ws| ws.restore_build(&slug, &id, build, snapshot, stage))
+}
+
+/// The card's content at build time and now, for "Diff since built".
+#[tauri::command(async)]
+pub fn build_texts(state: State<AppState>, slug: String, id: String) -> Result<Value> {
+    let (snapshot, current) = with_ws(&state, |ws| ws.built_texts(&slug, &id))?;
+    Ok(serde_json::json!({ "snapshot": snapshot, "current": current }))
+}
+
+/// Opens a file of the project's repo: in VS Code when `code` is on PATH, else shown in the file
+/// manager (always the latter with `reveal`). `rel` is repo-relative and stays inside the repo.
+#[tauri::command(async)]
+pub fn open_repo_file(state: State<AppState>, slug: String, rel: String, reveal: bool) -> Result<()> {
+    let rel = rel.replace(std::path::MAIN_SEPARATOR, "/");
+    if rel.is_empty() || rel.starts_with('/') || rel.contains(':') || rel.split('/').any(|s| s.is_empty() || s == "..") {
+        return Err(AppError::Invalid(format!("not a repo-relative path: {rel:?}")));
+    }
+    let repo = with_ws(&state, |ws| ws.project_meta(&slug).map(|m| m.handoff_target))?.ok_or_else(|| AppError::NotFound("the project's repo".into()))?;
+    let path = std::path::Path::new(&repo).join(&rel);
+    if !path.exists() {
+        return Err(AppError::NotFound(path.display().to_string()));
+    }
+    let shown = path.display().to_string();
+    // `code` is a .cmd shim on Windows, so it goes through cmd: refuse characters cmd would act on.
+    let safe = !shown.contains(['&', '|', '<', '>', '^', '%', '"']);
+    if !reveal && safe {
+        #[cfg(windows)]
+        let code = {
+            use std::os::windows::process::CommandExt;
+            std::process::Command::new("cmd").args(["/C", "code", "--reuse-window", &shown]).creation_flags(0x0800_0000).status()
+        };
+        #[cfg(not(windows))]
+        let code = std::process::Command::new("code").args(["--reuse-window", &shown]).status();
+        if code.is_ok_and(|s| s.success()) {
+            return Ok(());
+        }
+    }
+    #[cfg(windows)]
+    return std::process::Command::new("explorer").arg(format!("/select,{shown}")).spawn().map(|_| ()).map_err(|e| AppError::io("show the file", e));
+    #[cfg(target_os = "macos")]
+    return std::process::Command::new("open").arg("-R").arg(&shown).spawn().map(|_| ()).map_err(|e| AppError::io("show the file", e));
+    #[cfg(all(unix, not(target_os = "macos")))]
+    return std::process::Command::new("xdg-open").arg(path.parent().unwrap_or(&path)).spawn().map(|_| ()).map_err(|e| AppError::io("show the file", e));
 }
 
 #[tauri::command(async)]

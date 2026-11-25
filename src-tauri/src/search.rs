@@ -302,7 +302,7 @@ pub fn project_digest(name: &str, cards: &[OverviewCard]) -> String {
     let count = |s: Stage| kept.iter().filter(|c| c.stage == s).count();
     let ghosts = cards.len() - kept.len();
     format!(
-        "[Project] \"{}\": {} card{} (mist {}, reverie {}, lucid {}, dream {}){}. Related cards for each message are attached below; use read_card for the rest.",
+        "[Project] \"{}\": {} card{} (mist {}, reverie {}, lucid {}, dream {}, built {}){}. Related cards for each message are attached below; use read_card for the rest.",
         clip(name, CONTEXT_MAX_TITLE),
         kept.len(),
         if kept.len() == 1 { "" } else { "s" },
@@ -310,6 +310,7 @@ pub fn project_digest(name: &str, cards: &[OverviewCard]) -> String {
         count(Stage::Reverie),
         count(Stage::Lucid),
         count(Stage::Dream),
+        count(Stage::Built),
         if ghosts > 0 { format!(", {ghosts} unkept suggestion{}", if ghosts == 1 { "" } else { "s" }) } else { String::new() }
     )
 }
@@ -889,7 +890,7 @@ mod tests {
     fn digest_and_retrieval_are_small() {
         let oc = |stage: Stage, ghost: bool| OverviewCard { id: String::new(), kind: CardKind::Card, frame: None, attachments: 0, title: "t".into(), tags: vec![], stage, ghost, updated: String::new() };
         let d = project_digest("Fish-punk", &[oc(Stage::Mist, false), oc(Stage::Mist, false), oc(Stage::Dream, false), oc(Stage::Lucid, true)]);
-        assert!(d.starts_with("[Project] \"Fish-punk\": 3 cards (mist 2, reverie 0, lucid 0, dream 1), 1 unkept suggestion."), "{d}");
+        assert!(d.starts_with("[Project] \"Fish-punk\": 3 cards (mist 2, reverie 0, lucid 0, dream 1, built 0), 1 unkept suggestion."), "{d}");
         assert!(d.len() < 300);
 
         let (_t, ws, mut idx) = setup();

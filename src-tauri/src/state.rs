@@ -104,15 +104,28 @@ impl AppState {
         let handle = app.clone();
         let search = self.search.clone();
         let targets = self.question_targets();
+        let linked: std::collections::HashSet<String> = targets.iter().map(|t| t.0.clone()).collect();
         match watcher::start(root, targets, move |events| {
             let mut out = Vec::new();
             for e in events {
+                let slug = e.project.clone().unwrap_or_default();
                 if e.scope == "questions" {
                     // Claude Code edited QUESTIONS.md: import new questions (our own answer writes are skipped).
-                    let slug = e.project.clone().unwrap_or_default();
                     Self::import_questions(&handle, &slug, true);
                     out.push(ChangeEvent { scope: "project".into(), project: Some(slug) });
+                } else if e.scope == "status" {
+                    // Claude Code edited STATUS.md (Dreamer only ever creates it empty): apply what changed.
+                    Self::import_status(&handle, &slug);
+                    out.push(ChangeEvent { scope: "project".into(), project: Some(slug) });
                 } else {
+                    if e.scope == "project" && !slug.is_empty() {
+                        // An external edit may have changed a built card's content ("Needs rebuild"),
+                        // and the repo's link file follows the cards (debounced).
+                        Self::refresh_drift(&handle, &slug);
+                        if linked.contains(&slug) {
+                            Self::schedule_link(&handle, &slug);
+                        }
+                    }
                     out.push(e);
                 }
             }
@@ -158,6 +171,53 @@ impl AppState {
         }
     }
 
+    /// Applies STATUS.md changes of one project and tells the UI ("build-update") what happened.
+    fn import_status(app: &AppHandle, slug: &str) {
+        let Some(state) = app.try_state::<AppState>() else { return };
+        let Ok(ws) = state.ws.lock() else { return };
+        match ws.sync_status(slug) {
+            Ok(r) if r.changed() || !r.warnings.is_empty() => {
+                let _ = app.emit("build-update", &r);
+            }
+            Ok(_) => {}
+            Err(e) => eprintln!("[dreamer] could not read the build status for {slug}: {e}"),
+        }
+    }
+
+    /// Recomputes "Needs rebuild" for the project's built cards (a no-op unless one changed on disk).
+    fn refresh_drift(app: &AppHandle, slug: &str) {
+        let Some(state) = app.try_state::<AppState>() else { return };
+        let Ok(ws) = state.ws.lock() else { return };
+        if let Err(e) = ws.refresh_dirty_all(slug) {
+            eprintln!("[dreamer] could not check built cards of {slug}: {e}");
+        }
+    }
+
+    /// Writes `<repo>/.dreamer/link.json` about 5 seconds after the last request for this project.
+    pub fn schedule_link(app: &AppHandle, slug: &str) {
+        static PENDING: Mutex<Option<std::collections::HashSet<String>>> = Mutex::new(None);
+        if !PENDING.lock().map(|mut p| p.get_or_insert_with(Default::default).insert(slug.to_string())).unwrap_or(false) {
+            return;
+        }
+        let (app, slug) = (app.clone(), slug.to_string());
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(5));
+            if let Ok(mut p) = PENDING.lock() {
+                p.get_or_insert_with(Default::default).remove(&slug);
+            }
+            Self::write_link_now(&app, &slug);
+        });
+    }
+
+    /// Writes the repo link file right away (version switch, export).
+    pub fn write_link_now(app: &AppHandle, slug: &str) {
+        let Some(state) = app.try_state::<AppState>() else { return };
+        let Ok(ws) = state.ws.lock() else { return };
+        if let Err(e) = ws.write_link(slug) {
+            eprintln!("[dreamer] could not write the repo link file for {slug}: {e}");
+        }
+    }
+
     /// Re-targets the watcher after a handoff folder changed, and imports what is already there.
     pub fn refresh_questions(&self, app: &AppHandle, rewatch: bool) {
         if rewatch {
@@ -171,6 +231,8 @@ impl AppState {
             let mut events = Vec::new();
             for s in slugs {
                 Self::import_questions(&app, &s, false);
+                Self::import_status(&app, &s);
+                Self::write_link_now(&app, &s);
                 events.push(ChangeEvent { scope: "project".into(), project: Some(s) });
             }
             if !events.is_empty() {

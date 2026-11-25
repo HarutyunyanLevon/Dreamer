@@ -247,7 +247,7 @@ function chatTools(s) {
       title: z.string().describe("Short card title"),
       body: z.string().optional().describe("Markdown notes for the card body"),
       tags: z.array(z.string()).optional(),
-      stage: z.enum(["mist", "reverie", "lucid", "dream"]).optional(),
+      stage: z.enum(["mist", "reverie", "lucid", "dream", "built"]).optional(),
       links: z.array(z.object({ to: z.string(), label: z.string().optional() })).optional(),
       linked_from: z
         .object({ id: z.string(), label: z.string().max(40).optional() })
@@ -444,7 +444,7 @@ function chatTools(s) {
       title: z.string().optional(),
       body: z.string().optional().describe("The complete new markdown body"),
       tags: z.array(z.string().max(40)).optional().describe("The complete new tag list"),
-      stage: z.enum(["mist", "reverie", "lucid", "dream"]).optional(),
+      stage: z.enum(["mist", "reverie", "lucid", "dream", "built"]).optional(),
       captions: z.record(z.string(), z.string().max(200)).optional().describe("New captions keyed by attachment id"),
       reason: z.string().describe("One sentence on why, shown to the user"),
       version: VERSION_ARG,
@@ -2127,7 +2127,7 @@ const HANDOFF_BASE = [
   "Tools: list_cards lists the cards in scope (id, kind, title, stage, role, frame, unconfirmed, image and clip " +
     "counts); read_card returns one card in full (body, fields, checklist items, links, attachments with their " +
     "asset file names); view_attachment shows an image or returns a web clip's saved text. Only cards in scope can " +
-    "be read. Stage order: Mist (raw, unconfirmed) < Reverie < Lucid < Dream (settled). The card with role 'tech' " +
+    "be read. Stage order: Mist (raw, unconfirmed) < Reverie < Lucid < Dream (settled) < Built (already built in the repo; list_cards says whether it is built, partly built or needs a rebuild because its design changed since). The card with role 'tech' " +
     "is the Tech & constraints card; role 'decisions' is the Project decisions card (answers the user gave to " +
     "close gaps; treat them as settled). When the task message includes the project memory (memory.md), it is a " +
     "primary source: its Decisions and Rejected lines are the user's own confirmed choices and are authoritative over " +
@@ -2161,7 +2161,8 @@ const GEN_SYSTEM = [
     "different, a short table of contents of the other docs. 01-gdd.md: the game design document. Use the frame " +
     "names as grouping hints for its sections, but reorganize when a clearer structure exists (core loop, " +
     "mechanics, progression, setting & tone, art direction, audio direction, UI, content). Cite card titles in " +
-    "parentheses where a section rests on a card.",
+    "parentheses where a section rests on a card. A Built card is an existing feature: describe it as such and " +
+    "mark it 'Built' (or 'Built, needs rebuild' / 'Partly built' as list_cards says).",
   "Images: every image in scope must appear in the most relevant doc, embedded exactly as " +
     "![caption](assets/<file>) using the asset file name read_card gave, followed by 1-2 sentences on what it " +
     "shows and why it matters for the design (based on what you saw, not only the caption). Web clips: in " +
@@ -2174,12 +2175,21 @@ const GEN_SYSTEM = [
   "03-roadmap.md: milestone M1 = a playable prototype of the core loop; then vertical-slice milestones (M2, M3, " +
     "...). Each milestone is a list of tasks. Each task: '- [ ] M1-T3: <goal>', then indented lines: 'Acceptance:' " +
     "(checkable criteria), 'Relies on:' (doc#section references, e.g. 01-gdd.md#core-loop), 'Size: one Claude Code " +
-    "session'. Tasks are small enough for one session each and ordered so each builds on the previous ones.",
+    "session'. Tasks are small enough for one session each and ordered so each builds on the previous ones. " +
+    "Cards that are already Built are existing features: do not plan tasks for them. Exception: a card marked " +
+    "'needs rebuild' (its design changed after it was built) or 'partly built' becomes a change task that says what " +
+    "differs, with its card id in the task text.",
   "CLAUDE.md: under 60 lines. What the project is (2 lines). Where the docs are: docs/design/ (list the files). " +
     "Build order: follow docs/design/03-roadmap.md task by task, starting at the first unchecked task, and check it " +
     "off when done. Rules: do not invent design; when a design question blocks you, append it to " +
     "docs/design/QUESTIONS.md as '- [ ] Q (task id): question — context', pick the most conservative option and " +
-    "continue; commit once per task with the task id in the message.",
+    "continue; commit once per task with the task id in the message. Build status: after finishing work for a card, " +
+    "update docs/design/STATUS.md (keep its first two lines; one '## <card id> · <title>' section per card with " +
+    "'status: in-progress|built|partial|blocked', and where they apply 'task:', 'commits:', 'files:' (repo-relative), " +
+    "'evidence:' and a one-line 'notes:'; take card ids from the task file or .dreamer/link.json). A feature you build " +
+    "that has no card goes in as '## new · <title>' with status, files and a note on what it is and why it was added. " +
+    "Put screenshots and GIFs you produce in docs/design/evidence/. When a commit belongs to exactly one card, start " +
+    "its message with [dreamer:<card id>].",
   "CHANGELOG.md: follow the task message (first version: a '## v1' section saying 'Initial version').",
   "Write complete documents in clean Markdown (headings, lists, tables where useful). When every file is written, " +
     "end your turn with one short sentence.",

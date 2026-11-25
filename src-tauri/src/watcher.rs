@@ -52,15 +52,18 @@ pub fn classify(root: &Path, path: &Path) -> Option<ChangeEvent> {
     }
 }
 
-/// `QUESTIONS.md` of a project's handoff repo, if `path` is it.
+/// `QUESTIONS.md` (scope "questions") or `STATUS.md` (scope "status") of a project's handoff repo,
+/// if `path` is one of them.
 fn question_event(targets: &[(String, PathBuf)], path: &Path) -> Option<ChangeEvent> {
-    if path.file_name().is_none_or(|n| n != "QUESTIONS.md") {
-        return None;
-    }
+    let scope = match path.file_name()?.to_str()? {
+        "QUESTIONS.md" => "questions",
+        "STATUS.md" => "status",
+        _ => return None,
+    };
     targets
         .iter()
-        .find(|(_, file)| path == file.as_path())
-        .map(|(slug, _)| ChangeEvent { scope: "questions".into(), project: Some(slug.clone()) })
+        .find(|(_, file)| path.parent() == file.parent())
+        .map(|(slug, _)| ChangeEvent { scope: scope.into(), project: Some(slug.clone()) })
 }
 
 /// Start watching `root`, plus the `QUESTIONS.md` files in `questions` (project slug, file path;
@@ -116,6 +119,16 @@ mod tests {
         assert!(ev("/w/projects/chats/cards/01A.md").is_some());
         // Deleting a whole project folder still reports that project.
         assert_eq!(ev("/w/projects/fish"), Some(ChangeEvent { scope: "project".into(), project: Some("fish".into()) }));
+    }
+
+    #[test]
+    fn repo_files_map_to_their_project_by_folder() {
+        let t = vec![("fish".to_string(), PathBuf::from("/r/docs/design/QUESTIONS.md"))];
+        let ev = |p: &str| question_event(&t, Path::new(p)).map(|e| (e.scope, e.project));
+        assert_eq!(ev("/r/docs/design/STATUS.md"), Some(("status".into(), Some("fish".into()))));
+        assert_eq!(ev("/r/docs/design/QUESTIONS.md"), Some(("questions".into(), Some("fish".into()))));
+        assert_eq!(ev("/r/docs/design/OTHER.md"), None);
+        assert_eq!(ev("/elsewhere/STATUS.md"), None);
     }
 
     #[test]

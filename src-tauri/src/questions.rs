@@ -99,6 +99,13 @@ pub fn import(ws: &Workspace, slug: &str) -> Result<bool> {
     if fresh.is_empty() {
         return Ok(false);
     }
+    push_items(ws, slug, &data, fresh)?;
+    Ok(true)
+}
+
+/// Adds `fresh` to the "From Claude Code" card, creating the card when missing.
+fn push_items(ws: &Workspace, slug: &str, data: &crate::model::ProjectData, fresh: Vec<ChecklistItem>) -> Result<()> {
+    let card = data.cards.iter().find(|c| c.meta.role.as_deref() == Some(ROLE_CC_QUESTIONS));
     match card {
         Some(c) => {
             let mut items = c.meta.items.clone();
@@ -122,7 +129,18 @@ pub fn import(ws: &Workspace, slug: &str) -> Result<bool> {
             )?;
         }
     }
-    Ok(true)
+    Ok(())
+}
+
+/// A question that did not come from QUESTIONS.md (a blocked build): same card, no source line,
+/// so nothing is written back to the repo. Skipped when the card already has that text.
+pub fn add_question(ws: &Workspace, slug: &str, text: &str) -> Result<()> {
+    let data = ws.load_project(slug)?;
+    let dup = data.cards.iter().any(|c| c.meta.role.as_deref() == Some(ROLE_CC_QUESTIONS) && c.meta.items.iter().any(|i| i.text == text));
+    if dup {
+        return Ok(());
+    }
+    push_items(ws, slug, &data, vec![ChecklistItem { text: text.into(), question: true, ..Default::default() }])
 }
 
 /// Writes answers of `items` back to QUESTIONS.md (checked line + `- A:` line). Called after the

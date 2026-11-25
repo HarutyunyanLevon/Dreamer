@@ -353,6 +353,13 @@ impl Workspace {
                 let path = Self::card_path(&dir, new)?;
                 written.push(path.clone());
                 Self::write_card_file(&path, &c)?;
+                // The copy keeps its build snapshot, so "Needs rebuild" carries over.
+                let snap = dir.join("cards").join(format!("{old}.built.md"));
+                if snap.is_file() {
+                    let to = dir.join("cards").join(format!("{new}.built.md"));
+                    written.push(to.clone());
+                    fs::copy(&snap, &to).map_err(|e| AppError::io("copy the build snapshot", e))?;
+                }
                 let variants = dir.join("cards").join(format!("{old}.variants"));
                 if variants.is_dir() {
                     let to = dir.join("cards").join(format!("{new}.variants"));

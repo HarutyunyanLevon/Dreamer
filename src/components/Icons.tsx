@@ -27,6 +27,7 @@ export const IconPower = I(<><path d="M12 4v8" /><path d="M7.5 6.8a7 7 0 1 0 9 0
 export const IconFrame = I(<><path d="M4 8V6a2 2 0 0 1 2-2h4" /><rect x="4" y="8" width="16" height="12" rx="2" strokeDasharray="3 2.5" /></>);
 /** Design docs: a page with lines and a folded corner. */
 export const IconDoc = I(<><path d="M7 3h7l5 5v12a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1Z" /><path d="M14 3v5h5M9 13h7M9 17h5" /></>);
+export const IconCheck = I(<path d="m5 12.5 4.5 4.5L19 7.5" />);
 export const IconChecklist = I(<><path d="m4 7 1.5 1.5L8 6M4 13l1.5 1.5L8 12" /><path d="M11 7h9M11 13h9M11 19h9" /><circle cx="6" cy="19" r="1.2" /></>);
 /** Think: a light bulb. */
 export const IconBulb = I(<><path d="M9 18h6M10 21h4" /><path d="M12 3a6 6 0 0 0-3.6 10.8c.8.6 1.1 1.4 1.1 2.2h5c0-.8.3-1.6 1.1-2.2A6 6 0 0 0 12 3Z" /></>);

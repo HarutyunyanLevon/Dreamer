@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { Api, ChangeEvent, HandoffEvent, MemoryEvent } from "./types";
+import type { Api, BuildUpdate, ChangeEvent, HandoffEvent, MemoryEvent } from "./types";
 
 function mimeFor(rel: string): string {
   const ext = rel.split(".").pop()?.toLowerCase();
@@ -112,6 +112,12 @@ export const tauriApi: Api = {
   hotkeyStatus: () => invoke("hotkey_status"),
   splitText: (text) => invoke("split_text", { text }),
   onTrayNotice: (cb) => listen("tray-notice", () => cb()),
+  onBuildUpdate: (cb) => listen<BuildUpdate>("build-update", (e) => cb(e.payload)),
+  linkRepo: (slug, path, gitignore) => invoke("link_repo", { slug, path, gitignore }),
+  markBuiltNow: (slug, id) => invoke("mark_built_now", { slug, id }),
+  restoreBuild: (slug, id, build, snapshot, stage) => invoke("restore_build", { slug, id, build, snapshot, stage }),
+  buildTexts: (slug, id) => invoke("build_texts", { slug, id }),
+  openRepoFile: (slug, rel, reveal) => invoke("open_repo_file", { slug, rel, reveal }),
   onChange: async (cb) => {
     const un = await listen<ChangeEvent[]>("workspace-changed", (e) => cb(e.payload));
     return un;

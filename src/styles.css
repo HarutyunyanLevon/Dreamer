@@ -17,6 +17,9 @@
   --stage-lucid: #f0a0c0;
   --stage-dream: #ffbf80;
   --stage-dream-glow: rgba(255, 191, 128, 0.6);
+  --stage-built: #7fcfae;
+  --stage-built-glow: rgba(127, 207, 174, 0.6);
+  --stage-built-border: #2f7d5f;
 
   --font-ui: "Nunito", system-ui, sans-serif;
   --font-title: "Playfair Display", Georgia, serif;
@@ -226,6 +229,10 @@ button:disabled { cursor: default; }
 .dot-reverie { background: var(--stage-reverie); }
 .dot-lucid { background: var(--stage-lucid); }
 .dot-dream { background: var(--stage-dream); box-shadow: 0 0 8px var(--stage-dream-glow); }
+.dot-built { background: var(--stage-built); box-shadow: 0 0 8px var(--stage-built-glow); }
+/* Partly built: half mint. Needs rebuild: an amber ring (the card keeps its Built stage). */
+.dot-built.partial { background: linear-gradient(90deg, var(--stage-built) 50%, transparent 50%); box-shadow: inset 0 0 0 1.5px var(--stage-built), 0 0 8px var(--stage-built-glow); }
+.dot-built.dirty { outline: 2px solid #f0a24a; outline-offset: 1.5px; }
 
 /* ---------- Cards ---------- */
 .card { position: absolute; width: 236px; padding: 14px 16px 16px; border-radius: 22px; color: var(--ink); display: flex; flex-direction: column; }
@@ -259,6 +266,24 @@ button:disabled { cursor: default; }
 .canvas.no-webgl .card.stage-lucid:not(.ghost), .preview-cards .card.stage-lucid:not(.ghost) {
   border: 1px solid var(--stage-lucid-border); box-shadow: 0 14px 30px var(--ink-shadow), 0 0 10px 1px var(--stage-lucid-glow);
 }
+/* Built: crisp like Dream (plain CSS, no edge shader) with a mint glow. */
+.stage-built {
+  background: rgba(255, 255, 255, 0.96); border: 3px solid var(--stage-built-border); border-radius: 22px;
+  box-shadow: 0 10px 34px var(--stage-built-glow), 0 0 0 1px rgba(127, 207, 174, 0.35);
+}
+.card.selected.stage-built:not(.ghost) { box-shadow: 0 10px 34px var(--stage-built-glow), 0 0 40px 12px var(--stage-built-glow); }
+.built-check { display: inline-flex; color: var(--stage-built-border); }
+.built-check svg { width: 15px; height: 15px; stroke-width: 2.6; }
+.build-note { margin-top: 6px; }
+.rebuild-pill {
+  display: inline-block; font-size: 11px; font-weight: 800; padding: 2px 9px; border-radius: 999px;
+  background: #fdebd2; color: #7a4204; border: 1px solid #f0a24a;
+}
+/* Queued / in progress: a small lilac bar at the card's bottom; in progress shimmers. */
+.build-bar { position: absolute; left: 18px; right: 18px; bottom: 7px; height: 4px; border-radius: 4px; background: rgba(185, 166, 240, 0.45); overflow: hidden; pointer-events: none; }
+.build-bar.run { background: linear-gradient(90deg, rgba(185, 166, 240, 0.35) 0%, #b9a6f0 45%, rgba(185, 166, 240, 0.35) 90%); background-size: 200% 100%; animation: build-shimmer 1.6s linear infinite; }
+@keyframes build-shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
+@media (prefers-reduced-motion: reduce) { .build-bar.run { animation: none; } }
 /* Dream: crisp, thicker, solid, even corners, no animation. */
 .stage-dream {
   background: rgba(255, 255, 255, 0.96); border: 3px solid var(--stage-dream-border); border-radius: 22px;
@@ -1534,3 +1559,28 @@ input.frame-tab { cursor: text; min-width: 180px; outline: 2px solid var(--accen
 .modal-foot { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
 .split-chip { margin: 8px 0 0; }
 .split-menu { display: flex; gap: 6px; margin-top: 6px; }
+
+/* ---------- Build tab (card editor) and the chat's build line ---------- */
+.editor-tabs { display: flex; gap: 6px; }
+.build-tab { display: flex; flex-direction: column; gap: 14px; }
+.build-status-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.status-pill { font-size: 12px; font-weight: 800; padding: 3px 11px; border-radius: 999px; background: rgba(127, 207, 174, 0.3); color: #1d5a43; }
+.status-pill.in-progress, .status-pill.queued { background: #e4d9fb; color: #4b3290; }
+.status-pill.blocked { background: #fbe0dc; color: #8a2a1f; }
+.status-pill.partial { background: #e2f3ec; color: #1d5a43; }
+.build-history { margin: 0; padding: 0; list-style: none; font-size: 13px; color: var(--muted); display: flex; flex-direction: column; gap: 2px; }
+.build-blocked { padding: 8px 12px; border-radius: 12px; background: #fbe9e6; color: #7a2a20; font-size: 14px; }
+.build-list { display: flex; flex-direction: column; gap: 4px; }
+.build-item { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.build-item code { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; color: var(--ink); }
+.evidence-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 8px; }
+.evidence-grid img { width: 100%; aspect-ratio: 4 / 3; object-fit: cover; border-radius: 10px; background: rgba(255, 255, 255, 0.6); cursor: zoom-in; }
+.build-diff { font-family: ui-monospace, Consolas, monospace; font-size: 12.5px; max-height: 240px; overflow: auto; border-radius: 10px; background: rgba(255, 255, 255, 0.55); padding: 6px 8px; }
+.build-diff div { white-space: pre-wrap; word-break: break-word; padding: 0 4px; }
+.build-diff .add { background: color-mix(in srgb, #4caf6a 22%, transparent); }
+.build-diff .del { background: color-mix(in srgb, #e05a5a 18%, transparent); }
+.build-line { display: flex; flex-direction: column; gap: 4px; padding: 8px 12px; margin: 4px 0; border-radius: 14px; background: rgba(127, 207, 174, 0.22); font-size: 13.5px; color: var(--ink); }
+.build-line b { font-weight: 800; }
+.build-line .jumps { display: flex; flex-wrap: wrap; gap: 4px; }
+.build-line .jump { border: 0; background: rgba(255, 255, 255, 0.7); border-radius: 999px; padding: 2px 10px; font-size: 12.5px; font-weight: 700; color: var(--accent); cursor: pointer; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.build-line .warn { color: var(--muted); font-size: 12.5px; }

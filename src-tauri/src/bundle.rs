@@ -185,10 +185,9 @@ pub fn parse(text: &str) -> Result<Bundle, String> {
                         "reverie" => Stage::Reverie,
                         "lucid" => Stage::Lucid,
                         "dream" => Stage::Dream,
-                        // Dreamer has no built stage yet: it is a dream that carries a build block.
                         "built" => {
                             c.build.get_or_insert_with(|| serde_json::json!({ "status": "built" }));
-                            Stage::Dream
+                            Stage::Built
                         }
                         other => {
                             warnings.push(format!("{at}: unknown stage \"{other}\", using mist."));
@@ -281,7 +280,7 @@ mod tests {
         assert_eq!(b.cards[0].tags, ["x", "y"]);
         assert_eq!(b.cards[0].links[0].label.as_deref(), Some("needs"));
         assert_eq!(b.cards[0].body, "Body one\n\n---\nmore");
-        assert_eq!(b.cards[1].stage, Stage::Dream);
+        assert_eq!(b.cards[1].stage, Stage::Built);
         assert!(b.cards[1].build.is_some());
         assert!(b.warnings.is_empty(), "{:?}", b.warnings);
     }

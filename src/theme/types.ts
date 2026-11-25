@@ -3,15 +3,18 @@ export const SCROLL_THUMB_ALPHA = 0.58;
 export const SCROLL_THUMB_HOVER_ALPHA = 0.75;
 export const SCROLL_TRACK_ALPHA = 0.07;
 
-export type StageId = "mist" | "reverie" | "lucid" | "dream";
+export type StageId = "mist" | "reverie" | "lucid" | "dream" | "built";
+/** Themes saved before the Built stage have no colour for it. */
+export const BUILT_COLOR = "#7fcfae";
 /** White alpha of each stage's card background (mirrors .stage-* in styles.css). Fuzzy to crisp. */
-export const STAGE_CARD_ALPHA: Record<StageId, number> = { mist: 0.3, reverie: 0.9, lucid: 0.84, dream: 0.96 };
-export const STAGES: StageId[] = ["mist", "reverie", "lucid", "dream"];
+export const STAGE_CARD_ALPHA: Record<StageId, number> = { mist: 0.3, reverie: 0.9, lucid: 0.84, dream: 0.96, built: 0.96 };
+export const STAGES: StageId[] = ["mist", "reverie", "lucid", "dream", "built"];
 export const STAGE_LABEL: Record<StageId, string> = {
   mist: "Mist",
   reverie: "Reverie",
   lucid: "Lucid",
   dream: "Dream",
+  built: "Built",
 };
 
 export interface ShaderParams {
@@ -48,5 +51,5 @@ export interface Theme {
   builtin?: boolean;
   shader: ShaderParams;
   ui: UiTokens;
-  stages: Record<StageId, string>;
+  stages: Partial<Record<StageId, string>> & Record<Exclude<StageId, "built">, string>;
 }

@@ -6,6 +6,7 @@ import { useTheme } from "../theme/ThemeContext";
 import { IconDoc, IconFolder, IconInbox, IconPlus, IconPower, IconTrash } from "./Icons";
 import { ThemeEditor } from "./ThemeEditor";
 import { openHotkeys, pickBundle } from "./Import";
+import { LinkRepoDialog } from "./LinkRepo";
 import { ScrollArea } from "../ui/Scroll";
 
 interface Props {
@@ -31,6 +32,7 @@ export function Sidebar({ projects, active, onSelect, onCreate, onDelete, design
   const tree = useFolderTree(ws);
   const [deleting, setDeleting] = useState<ProjectSummary | null>(null);
   const { themes, theme, setThemeId } = useTheme();
+  const [linking, setLinking] = useState<string | null>(null);
   const [naming, setNaming] = useState(false);
   const [name, setName] = useState("");
   const [createError, setCreateError] = useState<string | null>(null);
@@ -175,6 +177,17 @@ export function Sidebar({ projects, active, onSelect, onCreate, onDelete, design
                 <span>Import bundle…</span>
               </button>
             )}
+            {p.slug === active && !p.is_inbox && (
+              <button
+                type="button"
+                className="side-row side-sub"
+                title={ws.data?.meta.handoff_target ? `Repo: ${ws.data.meta.handoff_target}. Pick another folder to change it.` : "Link a code repo: build status comes back from it, and Claude Code gets a list of your cards"}
+                onClick={() => void api.pickFolder("Repo folder").then((path) => path && setLinking(path), (e) => ws.setError(String(e)))}
+              >
+                <IconFolder />
+                <span>{ws.data?.meta.handoff_target ? "Repo…" : "Link repo…"}</span>
+              </button>
+            )}
           </div>
         ))}
       </ScrollArea>
@@ -207,6 +220,7 @@ export function Sidebar({ projects, active, onSelect, onCreate, onDelete, design
         </div>
       </div>
 
+      {linking && active && <LinkRepoDialog ws={ws} slug={active} path={linking} onClose={() => setLinking(null)} />}
       {deleting && (
         <DeleteProjectDialog
           project={deleting}

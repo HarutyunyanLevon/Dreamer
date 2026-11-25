@@ -10,6 +10,8 @@ pub enum Stage {
     Reverie,
     Lucid,
     Dream,
+    /// Built in the repo (a `build` block in the frontmatter tracks what and whether it drifted).
+    Built,
 }
 
 /// Lenient: case-insensitive, and unknown values fall back to Mist (files may be hand-edited).
@@ -20,6 +22,7 @@ impl<'de> Deserialize<'de> for Stage {
             "reverie" => Stage::Reverie,
             "lucid" => Stage::Lucid,
             "dream" => Stage::Dream,
+            "built" => Stage::Built,
             _ => Stage::Mist,
         })
     }

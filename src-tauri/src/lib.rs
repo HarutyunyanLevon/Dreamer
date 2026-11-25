@@ -23,6 +23,7 @@ mod search;
 mod sidecar;
 mod sidecar_log;
 mod state;
+mod status;
 mod storage;
 mod watcher;
 
@@ -244,6 +245,11 @@ pub fn run() {
             commands::list_projects,
             commands::create_project,
             commands::update_project,
+            commands::link_repo,
+            commands::mark_built_now,
+            commands::restore_build,
+            commands::build_texts,
+            commands::open_repo_file,
             commands::load_project,
             commands::save_canvas,
             commands::migrate_versions,

@@ -16,7 +16,7 @@ import { CardEditor } from "./CardEditor";
 import { MistLayer } from "./MistLayer";
 import { DEFAULT_FRAME_TITLE, FRAME_PAD, FrameView, centerInside, type FrameControls } from "./Frames";
 import { ChecklistBody, ClipBody, DECISIONS_TITLE, ImageBody, KIND_LABEL, TECH_TEMPLATE, TECH_TITLE, hasStage, labelSize, openQuestions, swatchOf } from "./kinds";
-import { IconCard, IconChecklist, IconClip, IconFit, IconFolder, IconFrame, IconImage, IconLink, IconMerge, IconMinus, IconPin, IconPlus, IconRedo, IconSparkle, IconTrash as IconTrashCan, IconUndo } from "./Icons";
+import { IconCard, IconCheck, IconChecklist, IconClip, IconFit, IconFolder, IconFrame, IconImage, IconLink, IconMerge, IconMinus, IconPin, IconPlus, IconRedo, IconSparkle, IconTrash as IconTrashCan, IconUndo } from "./Icons";
 import { PromptModal, buildPrompt } from "./PromptModal";
 import { ContextMenu, type MenuSection } from "./ContextMenu";
 import { menuFor, type MenuEnv, type MenuTarget } from "./canvasMenus";
@@ -28,6 +28,7 @@ import { VersionMenu, openVersion } from "./Versions";
 import { ProposalView } from "./ProposalView";
 import { DuskStrip, useDuskGlass } from "./DuskGlass";
 import { OrganizePreviewLayer, TidyNudge } from "./OrganizePlan";
+import { buildQueued, isPartial, needsRebuild } from "../util/build";
 import { NewArtifactDialog } from "./artifacts/NewArtifact";
 import { ArtifactFullView } from "./artifacts/ArtifactView";
 import { ArtifactCardBody, ArtifactHead } from "./artifacts/ArtifactCard";
@@ -1934,8 +1935,9 @@ const CardView = memo(function CardView({
     <ArtifactHead card={card} menu={menuBtn} />
   ) : staged ? (
     <div className="card-head">
-      <span className={`dot dot-${card.stage}`} aria-hidden="true" />
+      <span className={`dot dot-${card.stage}` + (needsRebuild(card) ? " dirty" : "") + (isPartial(card) ? " partial" : "")} aria-hidden="true" />
       <span className="stage-name">{STAGE_LABEL[card.stage]}</span>
+      {card.stage === "built" && <span className="built-check" aria-hidden="true"><IconCheck /></span>}
       {card.role === "tech" && <span className="tech-chip">{TECH_TITLE}</span>}
       {card.role === "decisions" && <span className="tech-chip">{DECISIONS_TITLE}</span>}
       {branchGroup(card) && <span className="fork-badge" title="Part of a fork — open the card to compare">⑂</span>}
@@ -2024,8 +2026,10 @@ const CardView = memo(function CardView({
       {!ghost ? (
         <>
           {head}
+          {needsRebuild(card) && <div className="build-note"><span className="rebuild-pill" title="Edited since it was built. Open the card's Build tab to see what changed.">Needs rebuild</span></div>}
           {media ?? content}
           {tagRow}
+          {buildQueued(card) && <div className={"build-bar" + (card.build?.status === "in-progress" ? " run" : "")} title={card.build?.status === "in-progress" ? "Claude Code is building this" : "Queued for Claude Code"} />}
         </>
       ) : kind === "label" ? (
         <>

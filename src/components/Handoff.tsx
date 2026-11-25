@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, type Card, type Gap, type HandoffEvent, type HandoffRepoResult, type HandoffScope, type HandoffSpec, type ProjectData } from "../api";
 import { cardVersions, folderChain, folderName, versionOf, versionsOf, type Workspace } from "../state/useWorkspace";
 import { STAGES, STAGE_LABEL, type StageId } from "../theme/types";
+import { LinkRepoWrites } from "./LinkRepo";
 import { Modal } from "../ui/Modal";
 import { CARD_H, CARD_W } from "./cardGeometry";
 import { DesignView } from "./DesignView";
@@ -195,6 +196,7 @@ function HandoffDialog({
   const [model, setModel] = useState<string | null>(null);
   const [gap, setGap] = useState<GapState>({ status: "idle" });
   const [confirming, setConfirming] = useState<null | (() => void)>(null);
+  const [ignoreDreamer, setIgnoreDreamer] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
   const gapJob = useRef<string | null>(null);
@@ -279,7 +281,7 @@ function HandoffDialog({
       setConfirming(() => async () => {
         setConfirming(null);
         try {
-          await api.updateProject(slug, { handoff_target_confirmed: target });
+          await api.linkRepo(slug, target, ignoreDreamer);
           await ws.refresh();
           await go();
         } catch (e) {
@@ -456,6 +458,8 @@ function HandoffDialog({
             <li><code>docs/design/QUESTIONS.md</code>: created if missing, never overwritten.</li>
             <li><code>CLAUDE.md</code>: only the part between the Dreamer markers is replaced (the file is created, or the block appended, if needed).</li>
           </ul>
+          <LinkRepoWrites />
+          <label className="check-row"><input type="checkbox" checked={ignoreDreamer} onChange={(e) => setIgnoreDreamer(e.target.checked)} /> Add <code>.dreamer/</code> to the repo's .gitignore</label>
           <div className="editor-actions">
             <div className="side-spacer" />
             <button type="button" className="btn" onClick={() => setConfirming(null)}>Cancel</button>

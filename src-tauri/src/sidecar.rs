@@ -955,6 +955,7 @@ fn run_tool(state: &AppState, tool: &str, input: Value) -> Result<Value> {
                     Stage::Reverie => 1,
                     Stage::Lucid => 2,
                     Stage::Dream => 3,
+                    Stage::Built => 4,
                 };
                 let mut stage = Stage::Mist;
                 let mut links: Vec<Link> = Vec::new();
@@ -1139,7 +1140,7 @@ fn run_tool(state: &AppState, tool: &str, input: Value) -> Result<Value> {
                 p.insert("tags".into(), json!(tags));
             }
             if let Some(st) = input.get("stage").filter(|v| !v.is_null()) {
-                let stage: crate::model::Stage = serde_json::from_value(st.clone()).map_err(|_| AppError::Invalid("stage must be mist, reverie, lucid or dream".into()))?;
+                let stage: crate::model::Stage = serde_json::from_value(st.clone()).map_err(|_| AppError::Invalid("stage must be mist, reverie, lucid, dream or built".into()))?;
                 p.insert("stage".into(), json!(stage));
             }
             if let Some(caps) = input.get("captions").and_then(Value::as_object).filter(|m| !m.is_empty()) {

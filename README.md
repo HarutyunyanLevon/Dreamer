@@ -1,6 +1,6 @@
 # Dreamer
 
-A desktop app for collecting, linking and deepening game ideas. Each project is an infinite canvas of idea cards (Mist, Reverie, Lucid, Dream), with a Claude chat panel that can add ghost cards, grill you about a card and compile a design brief.
+A desktop app for collecting, linking and deepening game ideas. Each project is an infinite canvas of idea cards (Mist, Reverie, Lucid, Dream, Built), with a Claude chat panel that can add ghost cards, grill you about a card and compile a design brief.
 
 First use case: a chaotic-but-chill "fish-punk" fishing game.
 

@@ -140,6 +140,33 @@ export interface MediaUpload {
   bytes: Uint8Array;
 }
 
+/** A card's `build` block: what Claude Code built for it (see docs/status-format.md). */
+export type BuildStatus = "queued" | "in-progress" | "built" | "partial" | "blocked";
+export interface BuildBlock {
+  status?: BuildStatus;
+  task?: string;
+  commits?: string[];
+  files?: string[];
+  /** Repo images copied into media/ (`path`), or plain repo paths from a bundle. */
+  evidence?: (string | { path: string; repo?: string })[];
+  notes?: string;
+  built_at?: string;
+  /** Hash of the saved content at build time; the card "needs a rebuild" while `dirty`. */
+  snapshot_hash?: string;
+  dirty?: boolean;
+  history?: { at: string; status: string; source: string }[];
+}
+/** What one STATUS.md change did (event "build-update"). */
+export interface BuildUpdate {
+  slug: string;
+  built: { id: string; title: string }[];
+  partial: { id: string; title: string }[];
+  in_progress: { id: string; title: string }[];
+  new: { id: string; title: string }[];
+  blocked: { id: string; title: string }[];
+  warnings: string[];
+}
+
 export interface Card {
   id: string;
   title: string;
@@ -165,6 +192,7 @@ export interface Card {
   origin?: Origin;
   /** The .dreamer.md bundle and ref this card was imported from. */
   import?: { bundle_id: string; ref: string; source: string };
+  build?: BuildBlock;
   body: string;
   /** Any other frontmatter keys found in the file are passed through untouched. */
   [extra: string]: unknown;
@@ -690,6 +718,18 @@ export interface Api {
   readMedia(slug: string, rel: string): Promise<string>;
   /** Files changed on disk (by this app, Claude Code, git...). Returns an unsubscribe function. */
   onChange(cb: (events: ChangeEvent[]) => void): Promise<() => void>;
+  /** STATUS.md in the project's repo changed and was applied. */
+  onBuildUpdate(cb: (u: BuildUpdate) => void): Promise<() => void>;
+  /** "Link repo…" confirmed: sets and confirms the folder, creates STATUS.md, optionally git-ignores `.dreamer/`, writes link.json. */
+  linkRepo(slug: string, path: string, gitignore: boolean): Promise<ProjectSummary>;
+  /** "Mark as built now" / "Clear needs rebuild": the saved content becomes the snapshot. */
+  markBuiltNow(slug: string, id: string): Promise<Card>;
+  /** Undo of the above. */
+  restoreBuild(slug: string, id: string, build: BuildBlock | null, snapshot: string | null, stage: StageId): Promise<Card>;
+  /** The card's content at build time (null: no snapshot) and now, for "Diff since built". */
+  buildTexts(slug: string, id: string): Promise<{ snapshot: string | null; current: string }>;
+  /** Opens a repo-relative file in VS Code (`code` on PATH) or shows it in the file manager. */
+  openRepoFile(slug: string, rel: string, reveal: boolean): Promise<void>;
   /** Quit for real: stops the Claude sidecar (and everything it started), then exits. */
   quitApp(): Promise<void>;
   /** Real state of the Windows Run entry. */

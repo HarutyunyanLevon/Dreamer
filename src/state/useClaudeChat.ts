@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, type OrganizePlanData } from "../api";
+import { api, type BuildUpdate, type OrganizePlanData } from "../api";
 import { claudeApi, type ClaudeEvent, type ClaudeStatus, type SearchResultRef } from "../api/claudeIndex";
 import type { ActivityStep, Backend, LocalFallback, ModelTier, RouteReason, TokenUsage } from "../api/claude";
 import { artifactRuns } from "./artifactRuns";
@@ -48,6 +48,14 @@ function closeSteps(steps: ActivityStep[] | undefined, status: "done" | "error")
 /** What a finished turn's steps keep in the thread file. */
 const trimThinking = (steps: ActivityStep[] | undefined) => steps?.map((s) => (s.text && s.text.length > THINKING_KEEP ? { ...s, text: `${s.text.slice(0, THINKING_KEEP)}…` } : s));
 
+/** "Build update: 3 built, 1 new, 1 blocked" (only what happened). */
+export function buildLine(u: BuildUpdate): string {
+  const parts = [
+    [u.built.length, "built"], [u.partial.length, "partly built"], [u.in_progress.length, "in progress"], [u.new.length, "new"], [u.blocked.length, "blocked"],
+  ].filter(([n]) => n).map(([n, w]) => `${n} ${w}`);
+  return `Build update: ${parts.join(", ") || "nothing new"}`;
+}
+
 /** The thread's context size after its last turn (header meter). */
 export interface ThreadContext {
   tokens: number;
@@ -73,7 +81,9 @@ export interface ChatMessage {
   /** Pages Claude fetched with WebFetch this turn ("Save as clip"). */
   fetched?: { url: string; saved?: boolean }[];
   /** "compacted": a faint divider where the thread was summarized into a fresh session (text is empty). */
-  kind?: "compacted";
+  kind?: "compacted" | "build";
+  /** kind "build": what a STATUS.md change did, with jump links. */
+  build?: BuildUpdate;
   at?: string;
   summary?: string;
   /** A /grill-me turn: show only a typing indicator while streaming, never the streamed text. */
@@ -524,6 +534,22 @@ export function useClaudeChat(opts: { slug: string | null; thread: string; onLin
     [update, sendText],
   );
 
+  /** A STATUS.md change as a line in the project thread (also when that thread is not the open one). */
+  const addBuildNote = useCallback(
+    (u: BuildUpdate) => {
+      const msg: ChatMessage = { id: `build-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, role: "claude", kind: "build", text: buildLine(u), at: new Date().toISOString(), build: u };
+      const key = keyOf(u.slug, "project");
+      if (threads.current.has(key)) update(key, (ms) => [...ms, msg], true);
+      else {
+        api
+          .loadChat(u.slug, "project")
+          .then((file) => api.saveChat(u.slug, "project", { ...file, messages: [...(Array.isArray(file.messages) ? file.messages : []), msg] }))
+          .catch(() => {});
+      }
+    },
+    [update],
+  );
+
   const answerQuestion = useCallback(
     (questionId: string, choice: string) => {
       update(currentKey.current ?? undefined, (ms) => ms.map((m) => (m.id === questionId && m.question ? { ...m, question: { ...m.question, answered: choice } } : m)), true);
@@ -634,7 +660,7 @@ export function useClaudeChat(opts: { slug: string | null; thread: string; onLin
     }
   }, []);
 
-  return { status, refreshStatus, messages, busy, context, sendText, retry, retryWithClaude, retryStalled, answerQuestion, answerCredit, markFetchSaved, setOrganize, undoMemory, interrupt, reset };
+  return { status, refreshStatus, messages, busy, context, addBuildNote, sendText, retry, retryWithClaude, retryStalled, answerQuestion, answerCredit, markFetchSaved, setOrganize, undoMemory, interrupt, reset };
 }
 
 export type ClaudeChat = ReturnType<typeof useClaudeChat>;

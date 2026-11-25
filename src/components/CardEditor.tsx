@@ -11,6 +11,8 @@ import { ScrollArea } from "../ui/Scroll";
 import { asUrl } from "../util/media";
 import { AttachmentsEditor, imageFiles } from "./Attachments";
 import { hasStage } from "./kinds";
+import { BuildTab } from "./BuildTab";
+import { needsRebuild } from "../util/build";
 
 /** Keys the app manages itself (legacy media keys, a label's size): hidden here, kept on save. */
 const RESERVED_FIELDS = new Set(["image", "url", "clip_title", "size", "split_offer"]);
@@ -93,6 +95,7 @@ export function CardEditor({
     writeDraft(card.id, null);
     onClose();
   };
+  const [tab, setTab] = useState<"card" | "build">("card");
   const [preview, setPreview] = useState(false);
   const [comparing, setComparing] = useState(false);
   const hasExtras = fields.length > 0;
@@ -161,6 +164,17 @@ export function CardEditor({
           </div>
         )}
 
+        {card.build && (
+          <div className="editor-tabs" role="tablist" aria-label="Card sections">
+            <button type="button" role="tab" aria-selected={tab === "card"} className={"filter" + (tab === "card" ? " on" : "")} onClick={() => setTab("card")}>Card</button>
+            <button type="button" role="tab" aria-selected={tab === "build"} className={"filter" + (tab === "build" ? " on" : "")} onClick={() => setTab("build")}>
+              Build{needsRebuild(card) && <span className="rebuild-pill" style={{ marginLeft: 6 }}>Needs rebuild</span>}
+            </button>
+          </div>
+        )}
+
+        {tab === "build" && card.build ? <BuildTab card={card} ws={ws} /> : (
+        <>
         {(staged || group || originVersion) && (
         <div className="editor-row">
           <div className="stage-filter" role="group" aria-label="Stage">
@@ -264,6 +278,9 @@ export function CardEditor({
               <LinkRow key={l.to} link={l} title={byId.get(l.to)?.title ?? l.to} onRemove={() => ws.removeLink(card.id, l.to)} onLabel={(label) => ws.setLinkLabel(card.id, l.to, label)} />
             ))}
           </div>
+        )}
+
+        </>
         )}
 
         <div className="editor-actions">
