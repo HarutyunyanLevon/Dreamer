@@ -692,6 +692,9 @@ pub struct Settings {
     /// Claude model for the handoff pack sessions (gap check and generation).
     #[serde(default = "default_model_export")]
     pub model_export: String,
+    /// Claude model for build runs (never the local model).
+    #[serde(default = "default_model_build")]
+    pub build_model: String,
     /// Claude model for one-shot thread summaries (auto-compact).
     #[serde(default = "default_model_memory")]
     pub model_memory: String,
@@ -735,6 +738,8 @@ fn default_chat_w() -> u32 {
 }
 pub const DEFAULT_MODEL_CHAT: &str = "sonnet";
 pub const DEFAULT_MODEL_EXPORT: &str = "opus";
+/// Build runs: Claude Code working in the repo. Claude only.
+pub const DEFAULT_MODEL_BUILD: &str = "sonnet";
 pub const DEFAULT_MODEL_FAST: &str = "haiku";
 pub const DEFAULT_MODEL_DEEP: &str = "opus";
 fn default_model_fast() -> String {
@@ -773,6 +778,9 @@ fn default_model_chat() -> String {
 fn default_model_export() -> String {
     DEFAULT_MODEL_EXPORT.into()
 }
+fn default_model_build() -> String {
+    DEFAULT_MODEL_BUILD.into()
+}
 fn default_clip_hotkey() -> String {
     "Ctrl+Alt+Shift+V".into()
 }
@@ -796,6 +804,7 @@ impl Default for Settings {
             model_fast: default_model_fast(),
             model_deep: default_model_deep(),
             model_export: default_model_export(),
+            build_model: default_model_build(),
             model_memory: default_model_memory(),
             compact_tokens: default_compact_tokens(),
             memory_cap: default_memory_cap(),
@@ -833,6 +842,8 @@ pub struct SettingsPatch {
     pub model_deep: Option<String>,
     /// Empty string restores the default.
     pub model_export: Option<String>,
+    /// Empty string restores the default; a local (Ollama) model name is refused.
+    pub build_model: Option<String>,
     /// Empty string restores the default.
     pub model_memory: Option<String>,
     /// 0 restores the default.

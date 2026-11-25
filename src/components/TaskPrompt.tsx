@@ -8,6 +8,7 @@ import { renderDoc } from "../util/markdown";
 import { LiveActivity, applyJobEvent, newJobActivity, type JobActivity } from "./Activity";
 import { cardsInScope } from "./Handoff";
 import { LinkRepoDialog } from "./LinkRepo";
+import { buildRuns } from "../state/buildRuns";
 
 /** The cards a scope builds: plain cards only (no stickies, labels, role cards or ghosts). A single card is just itself. */
 export function taskCardIds(data: ProjectData, scope: HandoffScope): string[] {
@@ -255,7 +256,7 @@ function TaskPreview({ ws, made, onClose, onSaved }: { ws: Workspace; made: Made
         <div className="editor-actions design-actions">
           <button type="button" className="btn" onClick={() => void copy()} title={saved ? taskReference(saved) : "The whole task"}>{saved ? "Copy reference" : "Copy"}</button>
           <button type="button" className="btn" disabled={busy || !!saved} onClick={() => void save()}>{saved ? "Saved" : "Save task"}</button>
-          <button type="button" className="btn" disabled title="Runs arrive with the Build runs feature">Run in Dreamer</button>
+          <button type="button" className="btn" disabled={busy} title="Save, then let Claude Code build it here on a new branch" onClick={() => void save().then((f) => { if (f) { buildRuns.requestStart(made.slug, [f]); onClose(); } })}>Run in Dreamer</button>
           <button type="button" className="btn" disabled={busy} onClick={() => void terminal()}>Open terminal</button>
           <div className="side-spacer" />
           <button type="button" className="btn primary" onClick={onClose}>Close</button>
@@ -309,7 +310,7 @@ export function TasksPanel({ ws }: { ws: Workspace }) {
               <div className="task-flag-actions">
                 <button type="button" className="chip" onClick={() => open(t.file)}>Open</button>
                 <button type="button" className="chip" onClick={() => void copy(t.file)}>Copy</button>
-                <button type="button" className="chip" disabled title="Runs arrive with the Build runs feature">Run</button>
+                <button type="button" className="chip" title="Claude Code builds it here on a new branch" onClick={() => buildRuns.requestStart(slug, [t.file])}>Run</button>
                 <button type="button" className="chip" disabled={!!t.done} onClick={() => done(t.file)}>Mark done</button>
               </div>
             </li>

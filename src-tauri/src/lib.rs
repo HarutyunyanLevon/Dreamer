@@ -1,4 +1,5 @@
 mod artifacts;
+mod build_run;
 mod bundle;
 mod claude_setup;
 mod clipboard;
@@ -250,6 +251,15 @@ pub fn run() {
             commands::mark_built_now,
             commands::restore_build,
             commands::build_texts,
+            commands::build_preflight,
+            commands::build_start,
+            commands::build_interrupt,
+            commands::build_answer,
+            commands::build_runs,
+            commands::build_events,
+            commands::build_file_diff,
+            commands::build_act,
+            commands::build_open_terminal,
             commands::open_repo_file,
             commands::load_project,
             commands::save_canvas,

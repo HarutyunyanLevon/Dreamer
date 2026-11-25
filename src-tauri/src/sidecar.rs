@@ -54,6 +54,8 @@ pub struct ClaudeState {
     completions: Mutex<std::collections::HashMap<String, std::sync::mpsc::Sender<Value>>>,
     /// Organize pipelines running in Rust, by turn id (Stop cancels them).
     pipelines: Mutex<std::collections::HashMap<String, Arc<AtomicBool>>>,
+    /// Build runs in progress, by run id. See build_run.rs.
+    pub build: Mutex<std::collections::HashMap<String, crate::build_run::Run>>,
 }
 
 /// One sidecar turn the app's watchdog keeps an eye on.
@@ -116,6 +118,7 @@ impl Default for ClaudeState {
             ping: Mutex::new(None),
             completions: Default::default(),
             pipelines: Default::default(),
+            build: Default::default(),
         }
     }
 }
@@ -426,6 +429,7 @@ fn fail_in_flight(app: &AppHandle, generation: u64, code: Option<i32>, tail: &[S
         if let Some(job) = handoff.filter(|j| Some(j) != keep.as_ref()) {
             crate::handoff::finish(&app, &state, &json!({ "type": "oneshot_done", "job": job, "ok": false, "error": what }));
         }
+        crate::build_run::on_sidecar_gone(&app, &what);
         for job in crate::memory::running_jobs(&state) {
             if Some(&job) != keep.as_ref() {
                 crate::memory::on_done(&app, &job, false);
@@ -470,6 +474,16 @@ fn handle_sidecar_message(app: &AppHandle, msg: Value) {
             }
             return;
         }
+        // A build run's activity and end (the end runs git: off this thread).
+        Some("build_done") => {
+            let app = app.clone();
+            std::thread::spawn(move || crate::build_run::on_message(&app, msg));
+            return;
+        }
+        Some("build_step" | "build_text" | "build_usage") => {
+            crate::build_run::on_message(app, msg);
+            return;
+        }
         // Live activity of a one-shot job (handoff session or memory pass): routed to its own view.
         Some("step" | "usage" | "thinking_delta") if msg.get("job").is_some() => {
             route_job_activity(app, msg);
@@ -506,7 +520,9 @@ fn handle_sidecar_message(app: &AppHandle, msg: Value) {
         std::thread::spawn(move || {
             let state = app.state::<AppState>();
             crate::harness::fault_tool_delay(&tool);
-            let result = if tool.starts_with("handoff_") {
+            let result = if tool == "build_permission" {
+                crate::build_run::permission(&app, &state, &input)
+            } else if tool.starts_with("handoff_") {
                 crate::handoff::run_tool(&app, &state, &tool, input)
             } else if matches!(tool.as_str(), "remember" | "forget") {
                 crate::memory::run_tool(&app, &state, &tool, input)

@@ -301,7 +301,7 @@ pub struct TaskInfo {
     pub done: Option<String>,
 }
 
-fn confirmed_repo(ws: &Workspace, slug: &str) -> Result<PathBuf> {
+pub(crate) fn confirmed_repo(ws: &Workspace, slug: &str) -> Result<PathBuf> {
     let m = ws.project_meta(slug)?;
     m.handoff_target.clone().filter(|t| m.handoff_target_confirmed.as_deref() == Some(t.as_str())).map(PathBuf::from).ok_or_else(|| AppError::Invalid("No repo is linked for this project. Use Link repo… first.".into()))
 }
@@ -314,7 +314,7 @@ fn split_front(text: &str) -> Option<(&str, &str)> {
     Some((&t[..end], after.strip_prefix("\r\n").or_else(|| after.strip_prefix('\n')).unwrap_or(after)))
 }
 
-fn file_name_ok(rel: &str) -> Result<String> {
+pub(crate) fn file_name_ok(rel: &str) -> Result<String> {
     let name = rel.strip_prefix(&format!("{}/", build::TASKS_REL)).unwrap_or_default();
     if name.is_empty() || name.contains(['/', '\\', ':']) || name.starts_with('.') || !name.ends_with(".md") {
         return Err(AppError::Invalid(format!("not a task file: {rel:?}")));
@@ -425,14 +425,34 @@ pub fn open_terminal(state: &AppState, slug: &str, rel: &str) -> Result<()> {
     if !which.output().map(|o| o.status.success() && !o.stdout.is_empty()).unwrap_or(false) {
         return Err(AppError::Invalid("`claude` isn't on your PATH. Install Claude Code, or save the task and run it yourself.".into()));
     }
-    let text = reference(rel);
+    terminal_at(&repo, Some(&reference(rel)))
+}
+
+/// Opens a terminal in `dir` (Windows Terminal, else a plain cmd window), running `claude "<text>"` when given.
+pub(crate) fn terminal_at(dir: &Path, claude: Option<&str>) -> Result<()> {
+    if !cfg!(windows) {
+        return Err(AppError::Invalid("Opening a terminal is only supported on Windows.".into()));
+    }
     // `;` separates Windows Terminal commands: such a path goes through cmd instead.
-    let wt = if repo.to_string_lossy().contains(';') { Err(std::io::Error::other("path has a semicolon")) } else { std::process::Command::new("wt.exe").arg("-d").arg(&repo).arg("claude").arg(&text).spawn() };
+    let wt = if dir.to_string_lossy().contains(';') {
+        Err(std::io::Error::other("path has a semicolon"))
+    } else {
+        let mut c = std::process::Command::new("wt.exe");
+        c.arg("-d").arg(dir);
+        if let Some(t) = claude {
+            c.arg("claude").arg(t);
+        }
+        c.spawn()
+    };
     if wt.is_ok() {
         return Ok(());
     }
     let mut cmd = std::process::Command::new("cmd");
-    cmd.args(["/c", "start", "", "/d"]).arg(&repo).args(["cmd", "/k", "claude"]).arg(&text);
+    cmd.args(["/c", "start", "", "/d"]).arg(dir);
+    match claude {
+        Some(t) => cmd.args(["cmd", "/k", "claude"]).arg(t),
+        None => cmd.arg("cmd"),
+    };
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;

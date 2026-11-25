@@ -64,8 +64,11 @@ export function CardEditor({
   switchTo,
   onSwitch,
   onStay,
+  initialTab = "card",
 }: {
   card: Card;
+  /** The Build board opens cards on their Build tab. */
+  initialTab?: "card" | "build";
   ws: Workspace;
   onClose: () => void;
   /** Kept current with "has unsaved edits", for the host's chat-driven card switching. */
@@ -95,7 +98,7 @@ export function CardEditor({
     writeDraft(card.id, null);
     onClose();
   };
-  const [tab, setTab] = useState<"card" | "build">("card");
+  const [tab, setTab] = useState<"card" | "build">(initialTab);
   const [preview, setPreview] = useState(false);
   const [comparing, setComparing] = useState(false);
   const hasExtras = fields.length > 0;

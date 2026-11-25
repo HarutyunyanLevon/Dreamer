@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { proposalPatch } from "../components/ProposalView";
-import { api, type Attachment, type Canvas, type Card, type CardKind, type CardPatch, type EditProposal, type Folder, type Frame, type HandoffScope, type Link, type NewCard, type OrganizeLayout, type OrganizePlanData, type Pos, type ProjectData, type ProjectSummary } from "../api";
+import { api, type Attachment, type BuildBlock, type Canvas, type Card, type CardKind, type CardPatch, type EditProposal, type Folder, type Frame, type HandoffScope, type Link, type NewCard, type OrganizeLayout, type OrganizePlanData, type Pos, type ProjectData, type ProjectSummary } from "../api";
 import { CARD_H, CARD_W, FOLDER_H, FOLDER_W } from "../components/cardGeometry";
 import type { NewArtifact } from "../api";
 import { ARTIFACT_LABEL, artifactType, createPrompt } from "../components/artifacts/prompts";
@@ -1384,6 +1384,27 @@ export function useWorkspace() {
     [run, pushUndo],
   );
 
+  /** Build board moves: the card's build block becomes `next` (snapshot and stage kept); one undo step. */
+  const setBuildBlock = useCallback(
+    async (id: string, next: BuildBlock | null, label: string) => {
+      const slug = activeRef.current!;
+      const before = dataRef.current?.cards.find((c) => c.id === id);
+      if (!before) return;
+      const prev = before.build ?? null;
+      const snapshot = (await api.buildTexts(slug, id).catch(() => null))?.snapshot ?? null;
+      const updated = await run(() => api.restoreBuild(slug, id, next, snapshot, before.stage));
+      if (updated) {
+        pushUndo({
+          label,
+          undo: async () => void (await api.restoreBuild(slug, id, prev, snapshot, before.stage)),
+          redo: async () => void (await api.restoreBuild(slug, id, next, snapshot, before.stage)),
+        });
+      }
+      return updated;
+    },
+    [run, pushUndo],
+  );
+
   const updateCard = useCallback(
     async (id: string, patch: CardPatch) => {
       const slug = activeRef.current!;
@@ -1888,6 +1909,7 @@ export function useWorkspace() {
     createCard,
     updateCard,
     markBuiltNow,
+    setBuildBlock,
     deleteCard,
     deleteCards,
     loseCard,

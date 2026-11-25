@@ -13,6 +13,7 @@ import { ScrollArea, wheelBelongsToContent } from "../ui/Scroll";
 import { dialogOpen } from "../util/useEscClose";
 import { branchGroup } from "./BranchCompare";
 import { CardEditor } from "./CardEditor";
+import { BuildBoard } from "./BuildBoard";
 import { MistLayer } from "./MistLayer";
 import { DEFAULT_FRAME_TITLE, FRAME_PAD, FrameView, centerInside, type FrameControls } from "./Frames";
 import { ChecklistBody, ClipBody, DECISIONS_TITLE, ImageBody, KIND_LABEL, TECH_TEMPLATE, TECH_TITLE, hasStage, labelSize, openQuestions, swatchOf } from "./kinds";
@@ -54,6 +55,8 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
   const { data } = ws;
   const [filter, setFilter] = useState<Set<StageId>>(new Set(STAGES));
   const [editing, setEditing] = useState<string | null>(null);
+  const [editTab, setEditTab] = useState<"card" | "build">("card");
+  const [view, setView] = useState<"canvas" | "board">("canvas");
   /** A chat link asked for another card while the editor has unsaved edits (inline confirm). */
   const [switchAsk, setSwitchAsk] = useState<string | null>(null);
   const editorDirty = useRef(false);
@@ -1366,6 +1369,15 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
             </span>
           ))}
         </nav>
+        {data && !data.is_inbox && (
+          <>
+            <span className="pill-sep" />
+            <div className="seg view-toggle" role="group" aria-label="View">
+              <button type="button" className={"filter" + (view === "canvas" ? " on" : "")} aria-pressed={view === "canvas"} onClick={() => setView("canvas")}>Canvas</button>
+              <button type="button" className={"filter" + (view === "board" ? " on" : "")} aria-pressed={view === "board"} onClick={() => setView("board")}>Board</button>
+            </div>
+          </>
+        )}
         <span className="pill-sep" />
         <div className="stage-filter" role="group" aria-label="Stage filter">
           {STAGES.map((s) => (
@@ -1432,6 +1444,15 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
       </div>
 
       {data && data.warnings.length > 0 && <Warnings data={data} />}
+      {data && !data.is_inbox && view === "board" && (
+        <BuildBoard
+          ws={ws}
+          onOpen={(id) => {
+            setEditTab(data.cards.find((c) => c.id === id)?.build ? "build" : "card");
+            setEditing(id);
+          }}
+        />
+      )}
 
       {/* Bottom bar: zoom pill and Add toolbar in one grid spanning the free canvas area, so they can
           never overlap. Below ~680px of bar width the tool labels collapse to icons (container
@@ -1588,8 +1609,9 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
           key={editingCard.id}
           card={editingCard}
           ws={ws}
-          onClose={() => { setEditing(null); setSwitchAsk(null); }}
+          onClose={() => { setEditing(null); setSwitchAsk(null); setEditTab("card"); }}
           dirtyRef={editorDirty}
+          initialTab={editTab}
           switchTo={switchAsk && switchAsk !== editingCard.id ? { id: switchAsk, title: data?.cards.find((c) => c.id === switchAsk)?.title ?? "" } : null}
           onSwitch={(id) => { setSwitchAsk(null); setEditing(id); }}
           onStay={() => setSwitchAsk(null)}

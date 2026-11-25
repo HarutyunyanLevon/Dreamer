@@ -3,6 +3,8 @@ import { CaptureWindow } from "./components/CaptureWindow";
 import { ChatPanel } from "./components/ChatPanel";
 import { HandoffHost } from "./components/Handoff";
 import { TaskHost } from "./components/TaskPrompt";
+import { BuildStartHost } from "./components/BuildPanel";
+import { useBuildRuns } from "./state/buildRuns";
 import { MemoryHost } from "./components/Memory";
 import { PanelTabs } from "./components/PanelTabs";
 import { TrayNotice } from "./components/TrayNotice";
@@ -50,6 +52,11 @@ function MainApp() {
   useEffect(() => {
     if (ws.chatRequest) showRight();
   }, [ws.chatRequest, showRight]);
+  // So does asking for the Build tab ("Run in Dreamer").
+  const { tabReq } = useBuildRuns();
+  useEffect(() => {
+    if (tabReq) showRight();
+  }, [tabReq, showRight]);
 
   // Ctrl+K (Cmd+K) opens card search from anywhere, even while typing in a field.
   useEffect(() => {
@@ -86,6 +93,7 @@ function MainApp() {
       <ChatPanel ws={ws} panels={panels} />
       <HandoffHost ws={ws} />
       <TaskHost ws={ws} />
+      <BuildStartHost ws={ws} />
       <MemoryHost ws={ws} />
       <VersionsHost ws={ws} />
       <ImportHost ws={ws} />

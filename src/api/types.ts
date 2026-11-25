@@ -154,8 +154,86 @@ export interface BuildBlock {
   /** Hash of the saved content at build time; the card "needs a rebuild" while `dirty`. */
   snapshot_hash?: string;
   dirty?: boolean;
+  /** Dragged to "Needs rebuild" on the Build board: dirty until built again or dragged back. */
+  dirty_manual?: boolean;
   history?: { at: string; status: string; source: string }[];
 }
+
+/** A tool call or thinking block of a build run (the sidecar's step). */
+export interface BuildStep {
+  sid: string;
+  kind: "tool" | "thinking";
+  tool?: string;
+  label: string;
+  status: "running" | "done" | "error";
+  detail?: string;
+}
+/** A permission request of a build run, waiting for Allow once / Allow prefix / Deny. */
+export interface BuildAsk {
+  req: string;
+  tool: string;
+  why: string;
+  detail: string;
+  /** "Allow this command prefix" (Bash only), null when the command is not a plain one. */
+  prefix: string | null;
+  description?: string | null;
+}
+/** A finished run (`<project>/builds/<id>.json`). */
+export interface BuildSummary {
+  id: string;
+  slug: string;
+  result: "done" | "failed" | "interrupted";
+  error: string | null;
+  branch: string;
+  base: string;
+  base_sha: string;
+  tasks: string[];
+  titles: string[];
+  cards: string[];
+  started_at: string;
+  ended_at: string;
+  duration_ms: number;
+  stashed: boolean;
+  model: string;
+  commits: { hash: string; subject: string }[];
+  files: string[];
+  status: { id: string; title: string; status: string | null; notes: string | null }[];
+  /** Cards of the run that STATUS.md says nothing about. */
+  missing: { id: string; title: string }[];
+  /** What the user did with the branch: "merged (fast-forward)", "deleted", "kept". */
+  outcome: string | null;
+  live?: false;
+}
+/** A run in progress. */
+export interface BuildLive {
+  id: string;
+  slug: string;
+  branch: string;
+  base: string;
+  tasks: string[];
+  titles: string[];
+  cards: string[];
+  current: number;
+  started_at: string;
+  stashed: boolean;
+  model: string;
+  asks: BuildAsk[];
+  live: true;
+}
+export type BuildRunInfo = BuildSummary | BuildLive;
+export type BuildEvent = { run: string } & (
+  | { type: "started"; info: BuildLive }
+  | { type: "step"; step: BuildStep }
+  | { type: "text"; text: string }
+  | { type: "usage"; input: number; cacheRead: number; cacheCreate: number; output: number }
+  | { type: "ask"; ask: BuildAsk }
+  | { type: "ask_done"; req: string; decision: string }
+  | { type: "denied"; tool: string; reason: string }
+  | { type: "task"; index: number }
+  | { type: "done"; summary: BuildSummary }
+);
+/** One logged event of a run (builds/<id>.jsonl). */
+export type BuildLogEvent = { at: string; type: string } & Record<string, unknown>;
 /** What one STATUS.md change did (event "build-update"). */
 export interface BuildUpdate {
   slug: string;
@@ -445,6 +523,8 @@ export interface Settings {
   model_deep: string;
   /** Claude model for the handoff pack sessions (gap check and generation). */
   model_export: string;
+  /** Claude model for build runs (Claude Code in the repo); never a local model. */
+  build_model: string;
   /** Claude model for thread summaries (auto-compact). */
   model_memory: string;
   /** Summarize a thread into a fresh session once a turn read more input tokens than this. */
@@ -489,6 +569,7 @@ export interface SettingsPatch {
   model_fast?: string;
   model_deep?: string;
   model_export?: string;
+  build_model?: string;
   model_memory?: string;
   /** 0 restores the default. */
   compact_tokens?: number;
@@ -792,6 +873,20 @@ export interface Api {
   /** `claude "<reference>"` in a terminal in the repo; rejects when `claude` is not on PATH. */
   openTerminal(slug: string, file: string): Promise<void>;
   onHandoffEvent(cb: (e: HandoffEvent) => void): Promise<() => void>;
+  /** Before a run: the repo's branch and whether it has uncommitted changes (rejects when it is not a git repo). */
+  buildPreflight(slug: string): Promise<{ repo: string; branch: string; dirty: boolean; busy: boolean }>;
+  /** Runs saved tasks one after another on one new branch. `dirty`: "stash" | "continue" for a dirty tree. */
+  buildStart(slug: string, tasks: string[], dirty: "stash" | "continue" | "clean"): Promise<BuildLive>;
+  buildInterrupt(run: string): Promise<void>;
+  buildAnswer(run: string, req: string, decision: "once" | "prefix" | "deny", reason?: string): Promise<void>;
+  /** Live runs first, then past runs, newest first. */
+  buildRuns(slug: string): Promise<BuildRunInfo[]>;
+  buildEvents(slug: string, run: string): Promise<BuildLogEvent[]>;
+  buildFileDiff(slug: string, run: string, file: string): Promise<string>;
+  /** Merge (into the base, never pushed), delete or keep the run's branch; returns the updated summary. */
+  buildAct(slug: string, run: string, action: "merge" | "delete" | "keep"): Promise<BuildSummary>;
+  buildOpenTerminal(slug: string): Promise<void>;
+  onBuildEvent(cb: (e: BuildEvent) => void): Promise<() => void>;
   listDesignVersions(slug: string): Promise<DesignVersion[]>;
   /** `dir`: the version's folder under design/ ("" / absent = the flat layout). */
   readDesignDoc(slug: string, version: number, name: string, dir?: string): Promise<string>;

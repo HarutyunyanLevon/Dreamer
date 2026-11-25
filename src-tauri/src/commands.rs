@@ -929,3 +929,53 @@ pub fn hotkey_status() -> [Option<String>; 2] {
 pub fn split_text(state: State<AppState>, text: String) -> Result<crate::clipboard::SplitResult> {
     crate::clipboard::split_local(&state, &text)
 }
+
+// ---------- build runs (build_run.rs) ----------
+
+#[tauri::command(async)]
+pub fn build_preflight(state: State<AppState>, slug: String) -> Result<Value> {
+    crate::build_run::preflight(&state, &slug)
+}
+
+/// `dirty`: what to do with uncommitted changes ("stash" | "continue").
+#[tauri::command(async)]
+pub fn build_start(app: AppHandle, state: State<AppState>, slug: String, tasks: Vec<String>, dirty: String) -> Result<Value> {
+    crate::build_run::start(&app, &state, &slug, tasks, &dirty)
+}
+
+#[tauri::command(async)]
+pub fn build_interrupt(state: State<AppState>, run: String) -> Result<()> {
+    crate::build_run::interrupt(&state, &run)
+}
+
+/// `decision`: "once" | "prefix" | "deny" (with an optional reason for Claude).
+#[tauri::command(async)]
+pub fn build_answer(state: State<AppState>, run: String, req: String, decision: String, reason: Option<String>) -> Result<()> {
+    crate::build_run::answer(&state, &run, &req, &decision, reason)
+}
+
+#[tauri::command(async)]
+pub fn build_runs(state: State<AppState>, slug: String) -> Result<Vec<Value>> {
+    crate::build_run::list(&state, &slug)
+}
+
+#[tauri::command(async)]
+pub fn build_events(state: State<AppState>, slug: String, run: String) -> Result<Vec<Value>> {
+    crate::build_run::events(&state, &slug, &run)
+}
+
+#[tauri::command(async)]
+pub fn build_file_diff(state: State<AppState>, slug: String, run: String, file: String) -> Result<String> {
+    crate::build_run::file_diff(&state, &slug, &run, &file)
+}
+
+/// "merge" | "delete" | "keep" the run's branch.
+#[tauri::command(async)]
+pub fn build_act(state: State<AppState>, slug: String, run: String, action: String) -> Result<Value> {
+    crate::build_run::act(&state, &slug, &run, &action)
+}
+
+#[tauri::command(async)]
+pub fn build_open_terminal(state: State<AppState>, slug: String) -> Result<()> {
+    crate::build_run::open_terminal(&state, &slug)
+}

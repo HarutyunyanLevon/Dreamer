@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { Api, BuildUpdate, ChangeEvent, HandoffEvent, MemoryEvent } from "./types";
+import type { Api, BuildEvent, BuildUpdate, ChangeEvent, HandoffEvent, MemoryEvent } from "./types";
 
 function mimeFor(rel: string): string {
   const ext = rel.split(".").pop()?.toLowerCase();
@@ -70,6 +70,16 @@ export const tauriApi: Api = {
   markTaskDone: (slug, file) => invoke("mark_task_done", { slug, file }),
   openTerminal: (slug, file) => invoke("open_terminal", { slug, file }),
   onHandoffEvent: (cb) => listen<HandoffEvent>("handoff-event", (e) => cb(e.payload)),
+  buildPreflight: (slug) => invoke("build_preflight", { slug }),
+  buildStart: (slug, tasks, dirty) => invoke("build_start", { slug, tasks, dirty }),
+  buildInterrupt: (run) => invoke("build_interrupt", { run }),
+  buildAnswer: (run, req, decision, reason) => invoke("build_answer", { run, req, decision, reason: reason ?? null }),
+  buildRuns: (slug) => invoke("build_runs", { slug }),
+  buildEvents: (slug, run) => invoke("build_events", { slug, run }),
+  buildFileDiff: (slug, run, file) => invoke("build_file_diff", { slug, run, file }),
+  buildAct: (slug, run, action) => invoke("build_act", { slug, run, action }),
+  buildOpenTerminal: (slug) => invoke("build_open_terminal", { slug }),
+  onBuildEvent: (cb) => listen<BuildEvent>("build-event", (e) => cb(e.payload)),
   listDesignVersions: (slug) => invoke("list_design_versions", { slug }),
   readDesignDoc: (slug, version, name, dir) => invoke("read_design_doc", { slug, version, name, dir: dir || null }),
   openDesignFolder: (slug, version, dir) => invoke("open_design_folder", { slug, version, dir: dir || null }),

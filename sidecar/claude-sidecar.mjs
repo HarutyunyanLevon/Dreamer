@@ -26,6 +26,10 @@
 //                                    -- a handoff pack session: its own one-turn query, not a chat
 //                                       thread; tools are handoff_* requests carrying the job id
 //        {type:"oneshot_cancel", job}                      -- interrupt it; Rust drops its output
+//        {type:"build_start", run, cwd, prompt, model}  -- a build run's task: Claude Code itself in the repo
+//                                       (its CLAUDE.md and .claude settings), every tool call gated by Rust
+//                                       (tool_request build_permission). One session per task.
+//        {type:"build_cancel", run}                        -- Interrupt: stop it, kill its process
 //        {type:"memory_start", job, kind:"update"|"seed", prompt, model}
 //                                    -- a memory pass: one query, no history, no built-in tools; its one
 //                                       tool call (memory_update | memory_seed) comes back as memory_result
@@ -56,6 +60,8 @@
 //        {type:"oneshot_done", job, ok, error?, cancelled?}  -- a handoff session ended
 //        {type:"memory_result", job, result}             -- the memory pass's tool input (first call only)
 //        {type:"memory_done", job, ok}                   -- the memory pass ended
+//        {type:"build_step"|"build_text"|"build_usage", run, ...}  -- a build run's activity
+//        {type:"build_done", run, ok, error?, cancelled?, stalled?} -- its task ended
 //        (remember / forget are chat tools: tool_request with the running turn id attached)
 import { createInterface } from "node:readline";
 import { spawn as spawnChild } from "node:child_process";
@@ -819,6 +825,21 @@ function toolLabelBase(name, input, r) {
       return a.query ? `Searched the web "${clip(a.query)}"` : "Searching the web";
     case "WebFetch":
       return a.url ? `Opened ${domainOf(a.url)}` : "Opening a page";
+    // Claude Code's own tools (build runs).
+    case "Bash":
+      return a.command ? `$ ${clip(a.command, 80)}` : "Running a command";
+    case "Read":
+      return a.file_path ? `Read ${clip(a.file_path, 70)}` : "Reading a file";
+    case "Edit":
+    case "MultiEdit":
+    case "Write":
+    case "NotebookEdit":
+      return a.file_path || a.notebook_path ? `${shortTool(name) === "Write" ? "Wrote" : "Edited"} ${clip(a.file_path || a.notebook_path, 70)}` : "Editing a file";
+    case "Glob":
+    case "Grep":
+      return a.pattern ? `Searched ${clip(a.pattern, 60)}` : "Searching files";
+    case "TodoWrite":
+      return "Updated the plan";
     default:
       return shortTool(name) || "Tool";
   }
@@ -2365,6 +2386,152 @@ function cancelOneshot(job) {
   }
 }
 
+// ---- Build runs: Claude Code works on a saved task inside the repo ----
+//
+// Its own query() per task: cwd = the repo, the claude_code system prompt and the repo's project
+// settings (CLAUDE.md, .claude/), the build model. Every tool call is gated by Rust: a PreToolUse
+// hook applies the always-deny rules before any settings rule can allow a call; canUseTool asks
+// Rust for the rest (auto-allow, or the user's answer in the Build panel). Own watchdog.
+
+const BUILD_LIMITS = {
+  first: Number(process.env.DREAMER_BUILD_FIRST_MS) || 120000,
+  idle: Number(process.env.DREAMER_BUILD_IDLE_MS) || 90000,
+  tool: Number(process.env.DREAMER_BUILD_TOOL_MS) || 600000,
+};
+/** A permission ask waits for the user as long as it takes (the watchdog pauses meanwhile). */
+const ASK_WAIT_MS = 7 * 24 * 3600 * 1000;
+const builds = new Map();
+
+function buildGate(run, entry, phase) {
+  return async (toolName, input) => {
+    entry.asking++;
+    try {
+      return await requestTool("build_permission", { run, tool: toolName, input, phase }, phase === "hook" ? 15000 : ASK_WAIT_MS);
+    } catch (e) {
+      return { behavior: "deny", message: `Dreamer could not check this tool call (${e?.message ?? e}).` };
+    } finally {
+      entry.asking--;
+      entry.lastAt = Date.now();
+    }
+  };
+}
+
+function startBuild(msg) {
+  const { run, cwd, prompt } = msg;
+  const model = typeof msg.model === "string" && msg.model ? msg.model : "sonnet";
+  const turns = makeTurnQueue();
+  const entry = { q: null, turns, child: null, sid: `b${run}`, startedAt: Date.now(), lastAt: Date.now(), first: false, asking: 0, ended: false, cancelled: false };
+  builds.set(run, entry);
+  const out = (o) => {
+    if (entry.ended) return;
+    entry.lastAt = Date.now();
+    const { type, ...rest } = o;
+    if (type === "step") send({ type: "build_step", run, step: rest.step });
+    else if (type === "usage") send({ type: "build_usage", run, ...rest });
+  };
+  const tracker = makeTracker(out, `build=${run}`);
+  const ask = buildGate(run, entry, "ask");
+  const hook = buildGate(run, entry, "hook");
+  const end = (r) => {
+    if (entry.ended) return;
+    entry.ended = true;
+    clearInterval(entry.timer);
+    builds.delete(run);
+    dlog(`build_end run=${run} ok=${!!r.ok} dur_ms=${Date.now() - entry.startedAt} tools=[${tracker.toolLog().map((x) => `${x.tool}:${x.ms}ms:${x.status}`).join(",")}]`);
+    send({ type: "build_done", run, ...r });
+  };
+  try {
+    entry.q = query({
+      prompt: turns,
+      options: {
+        cwd,
+        model,
+        systemPrompt: { type: "preset", preset: "claude_code" },
+        // The repo's own settings and CLAUDE.md; not the user's global ones.
+        settingSources: ["project", "local"],
+        permissionMode: "default",
+        canUseTool: async (toolName, input) => {
+          const r = await ask(toolName, input);
+          return r?.behavior === "allow" ? { behavior: "allow", updatedInput: input } : { behavior: "deny", message: r?.message || "Denied." };
+        },
+        hooks: {
+          PreToolUse: [
+            {
+              onFailure: "block",
+              hooks: [
+                async (h) => {
+                  const r = await hook(h.tool_name, h.tool_input);
+                  return r?.behavior === "deny" ? { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: r.message } } : {};
+                },
+              ],
+            },
+          ],
+        },
+        includePartialMessages: true,
+        env: { ...claudeEnv(), CLAUDE_CODE_MAX_RETRIES: "2", ENABLE_CLAUDEAI_MCP_SERVERS: "false" },
+        spawnClaudeCodeProcess: (opts) => spawner(entry)(opts),
+      },
+    });
+  } catch (e) {
+    end({ ok: false, error: `Claude Code could not start: ${e?.message ?? e}` });
+    return;
+  }
+  turns.push({ type: "user", message: { role: "user", content: [{ type: "text", text: prompt }] }, parent_tool_use_id: null });
+  // Watchdog: first event, then between events; a running tool keeps its own limit; an ask pauses it.
+  entry.timer = setInterval(() => {
+    if (entry.ended || entry.asking > 0) return;
+    const running = tracker.running();
+    const limit = running.length ? BUILD_LIMITS.tool : entry.first ? BUILD_LIMITS.idle : BUILD_LIMITS.first;
+    const since = running.length ? Math.max(entry.lastAt, ...running.map((x) => x.startedAt)) : entry.lastAt;
+    if (Date.now() - since > limit) {
+      const why = running.length ? `a tool ran for over ${limit / 60000} min` : entry.first ? `no activity for ${limit / 1000}s` : `no reply within ${limit / 1000}s`;
+      stopBuild(run, "stalled");
+      end({ ok: false, stalled: true, error: `Claude stopped responding (${why}).` });
+    }
+  }, 1000);
+  entry.timer.unref?.();
+  (async () => {
+    let done = null;
+    try {
+      for await (const m of entry.q) {
+        if (entry.ended) break;
+        entry.lastAt = Date.now();
+        if (m.type === "stream_event" || m.type === "assistant") entry.first = true;
+        tracker.on(m);
+        if (m.type === "assistant" && !m.parent_tool_use_id) {
+          const t = (m.message?.content ?? []).filter((b) => b?.type === "text").map((b) => b.text).join("").trim();
+          if (t) send({ type: "build_text", run, text: t });
+        }
+        if (m.type === "result") {
+          tracker.finish(m.is_error);
+          done = m.subtype === "success" && !m.is_error ? { ok: true } : { ok: false, error: `Claude Code could not finish (${m.subtype}${m.is_error && m.result ? `: ${m.result}` : ""}).` };
+          turns.end();
+        }
+      }
+    } catch (e) {
+      if (!done) done = { ok: false, error: e?.message ?? String(e) };
+    }
+    if (entry.cancelled) done = { ok: false, cancelled: true, error: "Interrupted." };
+    end(done ?? { ok: false, error: "Claude Code stopped without a result." });
+  })();
+}
+
+/** Stops a build session for sure: interrupt, close, kill its Claude Code process tree. */
+function stopBuild(run, why) {
+  const entry = builds.get(run);
+  if (!entry) return;
+  if (why === "cancel") entry.cancelled = true;
+  entry.q?.interrupt?.().catch(() => {});
+  entry.turns.end();
+  try {
+    entry.q?.close?.();
+  } catch {
+    /* already gone */
+  }
+  dlog(`build_stop run=${run} why=${why}`);
+  killChild(entry);
+}
+
 // ---- Memory passes: one query per chat turn (update) or per new project (seed) ----
 
 const MEMORY_SECTIONS = ["Pitch", "Pillars", "Decisions", "Rejected", "Glossary", "How to work with me"];
@@ -2735,6 +2902,10 @@ rl.on("line", (line) => {
     startOneshot(msg);
   } else if (msg.type === "memory_start") {
     startMemory(msg);
+  } else if (msg.type === "build_start") {
+    startBuild(msg);
+  } else if (msg.type === "build_cancel") {
+    stopBuild(msg.run, "cancel");
   } else if (msg.type === "complete_start") {
     startCompletion(msg);
   } else if (msg.type === "complete_cancel") {
@@ -2798,6 +2969,7 @@ rl.on("close", () => {
   for (const s of [...sessions.values()]) closeSession(s);
   for (const job of [...oneshots.keys()]) cancelOneshot(job);
   for (const c of [...completions.values()]) c.cancel();
+  for (const run of [...builds.keys()]) stopBuild(run, "cancel");
   setTimeout(() => process.exit(0), 200);
 });
 

@@ -72,6 +72,7 @@ pub fn mark_built(dir: &Path, card: &mut Card, status: &str, source: &str) -> Re
     b.insert("built_at".into(), json!(now()));
     b.insert("snapshot_hash".into(), json!(hash));
     b.insert("dirty".into(), json!(false));
+    b.remove("dirty_manual");
     push_history(b, status, source);
     Ok(())
 }
@@ -85,7 +86,9 @@ pub fn refresh_dirty(card: &mut Card) -> bool {
     let hash = content_hash(card);
     let Some(b) = card.meta.extra.get_mut("build").and_then(Value::as_object_mut) else { return false };
     let Some(snap) = b.get("snapshot_hash").and_then(Value::as_str) else { return false };
-    let dirty = b.get("status").and_then(Value::as_str) != Some("partial") && snap != hash;
+    // `dirty_manual`: dragged to "Needs rebuild" on the Build board; stays until built again or dragged back.
+    let manual = b.get("dirty_manual").and_then(Value::as_bool).unwrap_or(false);
+    let dirty = manual || (b.get("status").and_then(Value::as_str) != Some("partial") && snap != hash);
     if b.get("dirty").and_then(Value::as_bool).unwrap_or(false) == dirty {
         return false;
     }
@@ -185,14 +188,25 @@ impl Workspace {
 
     /// A saved build task queues its cards: status `queued`, `task` = the repo-relative task file.
     pub fn queue_cards(&self, slug: &str, ids: &[String], task: &str) -> Result<()> {
+        self.set_cards_status(slug, ids, "queued", "dreamer", Some(task))
+    }
+
+    /// A build run started on these cards: `in-progress` until STATUS.md says otherwise.
+    pub fn set_build_status(&self, slug: &str, ids: &[String], status: &str, source: &str) -> Result<()> {
+        self.set_cards_status(slug, ids, status, source, None)
+    }
+
+    fn set_cards_status(&self, slug: &str, ids: &[String], status: &str, source: &str, task: Option<&str>) -> Result<()> {
         let dir = self.existing_project_dir(slug)?;
         for id in ids {
             let path = Self::card_path(&dir, id)?;
             let mut card = Self::read_card_file(&path, id)?;
             let b = block_mut(&mut card);
-            b.insert("status".into(), json!("queued"));
-            b.insert("task".into(), json!(task));
-            push_history(b, "queued", "dreamer");
+            b.insert("status".into(), json!(status));
+            if let Some(t) = task {
+                b.insert("task".into(), json!(t));
+            }
+            push_history(b, status, source);
             card.meta.updated = now();
             Self::write_card_file(&path, &card)?;
         }
@@ -600,6 +614,25 @@ mod tests {
         assert!(snap.unwrap().contains("a rod\n") && now_text.contains("a rod, v2"));
         let c = ws.mark_built_now(&slug, &c.meta.id).unwrap();
         assert!(!is_dirty(&c) && ws.built_texts(&slug, &c.meta.id).unwrap().0.unwrap().contains("a rod, v2"));
+    }
+
+    #[test]
+    fn a_manual_needs_rebuild_survives_refresh_until_built_again() {
+        let (_d, ws, slug, _) = setup();
+        let c = built(&ws, &slug, &card(&ws, &slug, "Lure", "a lure").meta.id);
+        let mut b = c.meta.extra["build"].clone();
+        b["dirty"] = json!(true);
+        b["dirty_manual"] = json!(true);
+        let snap = ws.built_texts(&slug, &c.meta.id).unwrap().0;
+        let c = ws.restore_build(&slug, &c.meta.id, Some(b), snap, Stage::Built).unwrap();
+        assert!(is_dirty(&c));
+        ws.refresh_dirty_all(&slug).unwrap();
+        let c = ws.update_card(&slug, &c.meta.id, CardPatch { tags: Some(vec![]), ..Default::default() }).unwrap();
+        assert!(is_dirty(&c), "unchanged content does not clear a manual mark");
+        let c = ws.mark_built_now(&slug, &c.meta.id).unwrap();
+        assert!(!is_dirty(&c) && c.meta.extra["build"].get("dirty_manual").is_none());
+        ws.set_build_status(&slug, std::slice::from_ref(&c.meta.id), "in-progress", "run").unwrap();
+        assert_eq!(build_status(&ws.load_project(&slug).unwrap().cards.into_iter().find(|x| x.meta.id == c.meta.id).unwrap()), Some("in-progress"));
     }
 
     #[test]

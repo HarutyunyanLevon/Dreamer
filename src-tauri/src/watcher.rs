@@ -32,7 +32,7 @@ pub fn classify(root: &Path, path: &Path) -> Option<ChangeEvent> {
     let chats_at = if first == "inbox" { 1 } else { 2 };
     // design/ (handoff pack versions) is written only by Dreamer itself, which tells the UI when a
     // version is done; a canvas reload per copied asset would be churn too.
-    if parts.get(chats_at).is_some_and(|p| p == "chats" || p == "design") && parts.len() > chats_at + 1 {
+    if parts.get(chats_at).is_some_and(|p| p == "chats" || p == "design" || p == "builds") && parts.len() > chats_at + 1 {
         return None;
     }
     // artifacts/<id>/...: the artifact views reload that artifact; the canvas doesn't need to.

@@ -32,3 +32,11 @@ export function diffLines(base: string, other: string): DiffLine[] {
   while (j < m) out.push({ kind: "add", text: b[j++] });
   return out;
 }
+
+/** `git diff` output as the same lines (the file headers and hunk markers are dropped). */
+export function parseUnified(text: string): DiffLine[] {
+  return text
+    .split("\n")
+    .filter((l) => !/^(diff --git|index |--- |\+\+\+ |new file mode|deleted file mode|similarity index|rename (from|to) |old mode|new mode)/.test(l))
+    .map((l): DiffLine => (l.startsWith("@@") ? { kind: "same", text: "…" } : l.startsWith("+") ? { kind: "add", text: l.slice(1) } : l.startsWith("-") ? { kind: "del", text: l.slice(1) } : { kind: "same", text: l.slice(1) }));
+}

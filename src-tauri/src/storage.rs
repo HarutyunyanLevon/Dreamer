@@ -333,6 +333,13 @@ impl Workspace {
         if let Some(m) = patch.model_export {
             s.model_export = model(m, crate::model::DEFAULT_MODEL_EXPORT)?;
         }
+        if let Some(m) = patch.build_model {
+            let m = model(m, crate::model::DEFAULT_MODEL_BUILD)?;
+            if m.contains(':') || m == s.local_model {
+                return Err(AppError::Invalid(format!("{m:?} looks like a local model: build runs use Claude only.")));
+            }
+            s.build_model = m;
+        }
         if let Some(m) = patch.model_memory {
             s.model_memory = model(m, crate::model::DEFAULT_MODEL_MEMORY)?;
         }

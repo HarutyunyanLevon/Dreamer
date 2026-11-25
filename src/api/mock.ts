@@ -141,7 +141,7 @@ function mockParse(text: string): [string, string[]][] {
 const mockRender = (s: [string, string[]][]) => s.map(([n, items]) => `## ${n}\n${items.map((i) => `- ${i}\n`).join("")}`).join("\n");
 
 export function createMockApi(): Api {
-  const settings: Settings = { version: 1, theme: "pearl-glow", hotkey: "Ctrl+Shift+Space", clipboard_hotkey: "Ctrl+Alt+Shift+V", last_project: null, show_projects: true, show_chat: true, tray_notice_shown: false, start_with_windows: true, start_hidden: true, model_chat: "sonnet", model_router: true, model_fast: "haiku", model_deep: "opus", model_export: "opus", model_memory: "haiku", compact_tokens: 50000, memory_cap: 600, local_chat: true, local_model: "qwen3.5:35b-a3b", spritecook_url: "https://api.spritecook.ai/mcp/", credit_cap: 4 };
+  const settings: Settings = { version: 1, theme: "pearl-glow", hotkey: "Ctrl+Shift+Space", clipboard_hotkey: "Ctrl+Alt+Shift+V", last_project: null, show_projects: true, show_chat: true, tray_notice_shown: false, start_with_windows: true, start_hidden: true, model_chat: "sonnet", model_router: true, model_fast: "haiku", model_deep: "opus", model_export: "opus", build_model: "sonnet", model_memory: "haiku", compact_tokens: 50000, memory_cap: 600, local_chat: true, local_model: "qwen3.5:35b-a3b", spritecook_url: "https://api.spritecook.ai/mcp/", credit_cap: 4 };
   let mockKey = "";
   /** Artifacts by "<slug>/<id>" (browser dev only: no versions are ever generated here). */
   const artifacts = new Map<string, ArtifactView>();
@@ -248,6 +248,7 @@ export function createMockApi(): Api {
       if (patch.model_fast !== undefined) settings.model_fast = patch.model_fast.trim() || "haiku";
       if (patch.model_deep !== undefined) settings.model_deep = patch.model_deep.trim() || "opus";
       if (patch.model_export !== undefined) settings.model_export = patch.model_export.trim() || "opus";
+      if (patch.build_model !== undefined) settings.build_model = patch.build_model.trim() || "sonnet";
       if (patch.model_memory !== undefined) settings.model_memory = patch.model_memory.trim() || "haiku";
       if (patch.compact_tokens !== undefined) settings.compact_tokens = patch.compact_tokens || 50000;
       if (patch.memory_cap !== undefined) settings.memory_cap = patch.memory_cap || 600;
@@ -592,6 +593,25 @@ export function createMockApi(): Api {
       handoffListeners.add(cb);
       return () => handoffListeners.delete(cb);
     },
+    // shortcut: build runs need git and Claude Code; the browser mock only lists none.
+    buildPreflight: async () => {
+      throw new Error("Build runs need the desktop app.");
+    },
+    buildStart: async () => {
+      throw new Error("Build runs need the desktop app.");
+    },
+    buildInterrupt: async () => {},
+    buildAnswer: async () => {},
+    buildRuns: async () => [],
+    buildEvents: async () => [],
+    buildFileDiff: async () => "",
+    buildAct: async () => {
+      throw new Error("Build runs need the desktop app.");
+    },
+    buildOpenTerminal: async () => {
+      throw new Error("Opening a terminal needs the desktop app.");
+    },
+    onBuildEvent: async () => () => {},
     listDesignVersions: async (slug) => need(slug).design.map((d) => structuredClone(d.entry)),
     readDesignDoc: async (slug, version, name) => {
       const d = need(slug).design.find((x) => x.entry.version === version);

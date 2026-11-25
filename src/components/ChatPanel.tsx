@@ -22,6 +22,8 @@ import { OrganizePlanCard, reviseText } from "./OrganizePlan";
 import type { OrganizeReq } from "../state/useClaudeChat";
 import { folderName } from "../state/useWorkspace";
 import { refreshBalance, useBalance } from "../state/artifactRuns";
+import { buildRuns, liveRunOf, useBuildRuns } from "../state/buildRuns";
+import { BuildPanel } from "./BuildPanel";
 
 /** "/organize [project] [instruction]" -> the request (scope: the open folder unless "project"). */
 function parseOrganize(text: string): OrganizeReq | null {
@@ -74,6 +76,8 @@ export function ChatPanel({ ws, panels }: { ws: Workspace; panels: Pick<ReturnTy
   // put while other cards are selected or opened.
   const pinned = ws.active ? panels.pins[ws.active] ?? null : null;
   const thread = pinned ?? ws.contextCardId ?? "project";
+  const builds = useBuildRuns();
+  const building = liveRunOf(builds, ws.active);
   const chat = useClaudeChat({
     slug: ws.active,
     thread,
@@ -378,10 +382,28 @@ export function ChatPanel({ ws, panels }: { ws: Workspace; panels: Pick<ReturnTy
       ? "Auto: a small model for simple actions, the chat model otherwise."
       : "Auto (router off): the chat model.";
 
+  const tabs = (
+    <div className="seg panel-view-tabs" role="tablist" aria-label="Right panel">
+      <button type="button" role="tab" aria-selected={builds.tab === "chat"} className={"chip" + (builds.tab === "chat" ? " on" : "")} onClick={() => buildRuns.showTab("chat")}>Chat</button>
+      <button type="button" role="tab" aria-selected={builds.tab === "build"} className={"chip" + (builds.tab === "build" ? " on" : "")} onClick={() => buildRuns.showTab("build")}>
+        Build{building && <span className={"build-tab-dot" + (building.info.asks.length ? " ask" : "")} aria-label={building.info.asks.length ? "waiting for you" : "running"} />}
+      </button>
+    </div>
+  );
+  if (builds.tab === "build") {
+    return (
+      <aside id="chat-panel" className="glass chat" aria-label="Build" data-wheel-boundary="" ref={panelRef}>
+        <div className="panel-resize" role="separator" aria-orientation="vertical" aria-label="Resize chat panel" title="Drag to resize, double-click to reset" {...panels.resize.right} />
+        <header className="chat-head">{tabs}</header>
+        <BuildPanel ws={ws} />
+      </aside>
+    );
+  }
   return (
     <aside id="chat-panel" className="glass chat" aria-label="Claude chat" data-wheel-boundary="" ref={panelRef}>
       <div className="panel-resize" role="separator" aria-orientation="vertical" aria-label="Resize chat panel" title="Drag to resize, double-click to reset" {...panels.resize.right} />
       <header className="chat-head">
+        {tabs}
         <div className="orb small" aria-hidden="true" />
         <span className="chat-title">Claude</span>
         <ThreadMenu
@@ -1024,6 +1046,7 @@ const MODEL_SUGGESTIONS = ["sonnet", "opus", "haiku", "fable"];
 function ModelSettings({ onClose, onError }: { onClose: () => void; onError: (e: string) => void }) {
   const [chatModel, setChatModel] = useState<string | null>(null);
   const [exportModel, setExportModel] = useState("");
+  const [buildModel, setBuildModel] = useState("");
   const [router, setRouter] = useState(true);
   const [fastModel, setFastModel] = useState("");
   const [deepModel, setDeepModel] = useState("");
@@ -1047,6 +1070,7 @@ function ModelSettings({ onClose, onError }: { onClose: () => void; onError: (e:
         setStartHidden(s.start_hidden);
         setChatModel(s.model_chat);
         setExportModel(s.model_export);
+        setBuildModel(s.build_model);
         setRouter(s.model_router);
         setFastModel(s.model_fast);
         setDeepModel(s.model_deep);
@@ -1062,7 +1086,7 @@ function ModelSettings({ onClose, onError }: { onClose: () => void; onError: (e:
   }, [onError]);
   const save = async () => {
     try {
-      await api.updateSettings({ model_chat: chatModel ?? "", model_router: router, model_fast: fastModel, model_deep: deepModel, model_export: exportModel, model_memory: memoryModel, compact_tokens: Math.max(0, Math.floor(Number(compactTokens)) || 0), memory_cap: Math.max(0, Math.floor(Number(memoryCap)) || 0), local_chat: localChat, local_model: localModel, spritecook_url: scUrl, credit_cap: Math.max(0, Math.floor(Number(creditCap)) || 0) });
+      await api.updateSettings({ model_chat: chatModel ?? "", model_router: router, model_fast: fastModel, model_deep: deepModel, model_export: exportModel, build_model: buildModel, model_memory: memoryModel, compact_tokens: Math.max(0, Math.floor(Number(compactTokens)) || 0), memory_cap: Math.max(0, Math.floor(Number(memoryCap)) || 0), local_chat: localChat, local_model: localModel, spritecook_url: scUrl, credit_cap: Math.max(0, Math.floor(Number(creditCap)) || 0) });
       if (newKey.trim()) await api.spritecookSetKey(newKey.trim());
       onClose();
     } catch (e) {
@@ -1106,6 +1130,10 @@ function ModelSettings({ onClose, onError }: { onClose: () => void; onError: (e:
         <label>
           Handoff pack
           <input className="name-input" list="claude-models" value={exportModel} disabled={chatModel === null} placeholder="opus" onChange={(e) => setExportModel(e.target.value)} />
+        </label>
+        <label>
+          Build runs (Claude Code in the repo; Claude only)
+          <input className="name-input" list="claude-models" value={buildModel} disabled={chatModel === null} placeholder="sonnet" onChange={(e) => setBuildModel(e.target.value)} />
         </label>
         <label>
           Thread summaries
