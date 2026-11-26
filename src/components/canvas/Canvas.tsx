@@ -1,3 +1,4 @@
+// ponytail: one 1200-line component; its parts share refs/closure, so splitting needs a context object, not a move. Split when a part gains a second user.
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
 import { api, type Card, type CardKind, type ClipAttachment, type Frame } from "../../api";
 import { CARD_H, CARD_W, cardRect, displayStack, type Rect } from "../cardGeometry";

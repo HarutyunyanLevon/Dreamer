@@ -1,3 +1,4 @@
+// ponytail: one 1200-line hook (undo, canvas, cards, trash share dataRef/undoStack); split into hooks with an explicit context when one part needs its own tests.
 import { useCallback, useEffect, useRef, useState } from "react";
 import { proposalPatch } from "../../components/ProposalView";
 import { api, type Attachment, type Canvas, type Card, type CardKind, type CardPatch, type EditProposal, type Frame, type HandoffScope, type Link, type NewCard, type OrganizePlanData, type Pos, type ProjectData, type ProjectSummary } from "../../api";
