@@ -46,7 +46,7 @@ Manual (not re-driven through the GUI this session, since there is no visual too
 ## Step 5 checks (Windows, real Claude Code install, this session)
 Automated/direct: `cd src-tauri && cargo test` (18 tests, unchanged), `cargo check`, `npm run build` — all clean with the sidecar wiring in place.
 
-Verified against the real sidecar process (not mocked), run standalone with `node sidecar/claude-sidecar.mjs` piped from a small Node test harness, against the actual installed, already-logged-in Claude Code (no API key, no stub):
+Verified against the real sidecar process (not mocked), run standalone with `node sidecar/main.mjs` piped from a small Node test harness, against the actual installed, already-logged-in Claude Code (no API key, no stub):
 1. A plain chat turn: sent `{"type":"user_message", ...}`, received streamed `delta` events followed by `message_done` with a real session id.
 2. The `create_card` tool: asked Claude to call it; got a `tool_request` line, replied with a fake `tool_response` (standing in for Rust), and Claude's final message correctly referenced the card as created and pending Keep/Dismiss.
 3. The `ask_question` tool (`/grill-me`'s building block): asked Claude to create a card and then ask one multiple-choice question about it; got both the `create_card` round trip and a well-formed `question` event with 2 real, on-topic choices, in the same conversation.
@@ -88,7 +88,7 @@ Not verified live: Esc closing each modal, Esc canceling Link-mode, the "no card
 
 ## Step 9 checks (Windows, real shell this session) - final build verification
 1. `cargo tauri build`: produced both `src-tauri/target/release/bundle/nsis/Dreamer_0.1.0_x64-setup.exe` (~2.0 MiB) and `.../msi/Dreamer_0.1.0_x64_en-US.msi` (~2.8 MiB). Clean release build, no warnings.
-2. Installed the NSIS build silently into a throwaway directory (`Dreamer_0.1.0_x64-setup.exe /S /D=C:\DreamerInstallTest`): produced `dreamer.exe`, `uninstall.exe`, and the bundled `sidecar/claude-sidecar.mjs` resource.
+2. Installed the NSIS build silently into a throwaway directory (`Dreamer_0.1.0_x64-setup.exe /S /D=C:\DreamerInstallTest`): produced `dreamer.exe`, `uninstall.exe`, and the bundled `sidecar/main.mjs` resource.
 3. Launched the installed `dreamer.exe` directly (pointed at a throwaway `DREAMER_WORKSPACE` via env var) - it created `workspace.json`, `inbox/`, `themes/`, `projects/` on first run, identical to every dev-mode run this session.
 4. Wrote a card file from PowerShell into the installed app's running workspace - the live watcher picked it up and reconciled it into `canvas.json` with a position, same as the dev-mode watcher test in step 4. The app stayed up throughout (checked `Get-Process` before and after).
 5. Closed the app and ran `uninstall.exe /S` - the install directory was removed cleanly.

@@ -3,7 +3,7 @@
 // Optional deps are omitted: they are the SDK's per-platform bundled claude.exe (~350 MB); the
 // app uses the user's installed Claude Code instead (DREAMER_CLAUDE_EXE, see sidecar.rs).
 import { execSync, spawn } from "node:child_process";
-import { copyFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -20,7 +20,7 @@ const dependencies = Object.fromEntries(
 
 rmSync(out, { recursive: true, force: true });
 mkdirSync(out, { recursive: true });
-copyFileSync(join(root, "sidecar", "claude-sidecar.mjs"), join(out, "claude-sidecar.mjs"));
+cpSync(join(root, "sidecar"), out, { recursive: true, filter: (p) => !/package.json$|node_modules/.test(p) });
 writeFileSync(
   join(out, "package.json"),
   JSON.stringify({ name: "dreamer-sidecar", private: true, type: "module", version: rootPkg.version, dependencies }, null, 2) + "\n",
@@ -40,7 +40,7 @@ console.log(`sidecar built: ${out} (${Object.entries(dependencies).map(([k, v]) 
  */
 function checkStarts(dir) {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, ["claude-sidecar.mjs"], { cwd: dir, env, stdio: ["pipe", "pipe", "pipe"] });
+    const child = spawn(process.execPath, ["main.mjs"], { cwd: dir, env, stdio: ["pipe", "pipe", "pipe"] });
     let out = "";
     let err = "";
     let ready = false;

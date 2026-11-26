@@ -1,4 +1,4 @@
-//! Bridges the chat panel to `sidecar/claude-sidecar.mjs`, a Node process that talks to the
+//! Bridges the chat panel to `sidecar/main.mjs`, a Node process that talks to the
 //! Claude Agent SDK (and so to the user's locally installed, already-logged-in Claude Code).
 //! Communication is newline-delimited JSON over the child's stdio. The sidecar's `create_card`
 //! tool does not touch files itself: it asks us to, over this same channel, so every card still

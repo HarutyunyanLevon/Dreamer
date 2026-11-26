@@ -19,7 +19,7 @@ function simplified(p) {
 }
 async function smokeTestSidecar() {
   const dir = join(root, "src-tauri", "target", "release", "sidecar");
-  const script = join(dir, "claude-sidecar.mjs");
+  const script = join(dir, "main.mjs");
   if (!existsSync(script)) throw new Error(`packaged sidecar not found at ${script}`);
   const verbatim = process.platform === "win32" ? "\\\\?\\" + resolve(script) : resolve(script);
   const child = spawn(process.execPath, [simplified(verbatim)], { cwd: simplified(resolve(dir)), stdio: ["pipe", "pipe", "pipe"] });

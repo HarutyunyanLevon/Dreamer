@@ -9,7 +9,7 @@ pub(super) fn sidecar_script_path(app: &AppHandle) -> Result<PathBuf> {
         if let Some(p) = std::env::var_os("DREAMER_SIDECAR_SCRIPT").map(PathBuf::from).filter(|p| p.is_file()) {
             return Ok(p);
         }
-        let dev =PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("sidecar").join("claude-sidecar.mjs");
+        let dev =PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("sidecar").join("main.mjs");
         if dev.is_file() {
             return Ok(dev);
         }
@@ -17,7 +17,7 @@ pub(super) fn sidecar_script_path(app: &AppHandle) -> Result<PathBuf> {
     // Release: `src-tauri/sidecar-dist` (script + its own node_modules, built by
     // scripts/build-sidecar.mjs) shipped as the `sidecar` resource.
     if let Ok(dir) = app.path().resource_dir() {
-        let res = dir.join("sidecar").join("claude-sidecar.mjs");
+        let res = dir.join("sidecar").join("main.mjs");
         if res.is_file() {
             return Ok(res);
         }
