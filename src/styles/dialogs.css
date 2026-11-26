@@ -1,0 +1,75 @@
+/* Popup layer (src/ui/Layer.tsx): portal into <body>, a scrim that swallows input outside the popup,
+   then the popup itself. Every dialog, menu and popover sits in one of these. */
+.layer { position: fixed; inset: 0; z-index: 40; }
+/* The scrim is invisible (no dimming): it only catches presses outside the popup. */
+.layer-scrim { position: absolute; inset: 0; background: transparent; }
+/* Canvas scope: the layer itself is click-through; the scrim covers the canvas + sidebar only. */
+.layer.scope-canvas { pointer-events: none; }
+.layer.scope-canvas > .layer-scrim { right: var(--inset-r); pointer-events: auto; transition: right var(--panel-ease); }
+/* With nothing dimmed, a popup stands off the canvas by its own soft shadow. */
+.layer .glass { box-shadow: 0 18px 48px color-mix(in srgb, var(--ink) 22%, transparent), 0 2px 8px color-mix(in srgb, var(--ink) 10%, transparent); }
+.modal-stage {
+  position: absolute; inset: 0; padding: 24px; pointer-events: none;
+  display: flex; align-items: center; justify-content: center;
+}
+
+/* Card editor / compare: centred in the free area between the sidebars, never wider or taller than
+   it (contents scroll inside), following panel toggles and window resizes live. */
+.modal-stage.place-canvas {
+  left: var(--inset-l); right: var(--inset-r); padding: var(--gap) 0;
+  transition: left var(--panel-ease), right var(--panel-ease);
+}
+.place-canvas > .modal { max-width: 100%; max-height: 100%; }
+.place-canvas > .modal-lg { width: min(960px, 100%); height: min(900px, 100%); max-width: 100%; }
+.modal-stage > * { pointer-events: auto; }
+.drag-scrolling, .drag-scrolling * { user-select: none !important; cursor: grabbing; }
+.modal { max-height: 86vh; padding: 22px 24px; display: flex; flex-direction: column; gap: 14px; user-select: text; }
+.clip-prompt { gap: 12px; }
+.clip-prompt form { display: flex; flex-direction: column; gap: 12px; }
+.clip-prompt h3 { font-family: var(--font-title); font-size: 20px; color: var(--ink); margin: 0; }
+.prompt-modal { gap: 12px; }
+.prompt-modal h3 { font-family: var(--font-title); font-size: 20px; color: var(--ink); margin: 0; overflow-wrap: anywhere; }
+.prompt-intents { display: flex; flex-wrap: wrap; gap: 6px; }
+.prompt-text {
+  width: 100%; min-height: 220px; resize: vertical; box-sizing: border-box; padding: 10px 12px;
+  border: 1px solid var(--line, rgba(0, 0, 0, 0.12)); border-radius: 12px; background: rgba(255, 255, 255, 0.6);
+  color: var(--ink); font: 13px/1.5 ui-monospace, Consolas, monospace; user-select: text;
+}
+.modal-head { display: flex; align-items: center; gap: 10px; }
+/* Window-centred dialogs (placement="window"): one sizing rule for all of them. Each size names a
+   preferred width; the dialog is never narrower than ~420px (unless the window is) and never wider
+   than 90% of the window. */
+.modal-sm { --modal-w: 460px; }
+.modal-md { --modal-w: 560px; }
+.modal-lg { --modal-w: 960px; }
+.place-window > .modal { width: min(90vw, var(--modal-w)); min-width: min(420px, 90vw); max-width: 90vw; }
+.place-window > .modal-lg { height: min(86vh, 900px); }
+.editor-title {
+  flex: 1; font-family: var(--font-title); font-size: 22px; font-weight: 600; color: var(--ink);
+  border: 0; background: transparent; padding: 6px 4px; user-select: text;
+}
+.editor-row { display: flex; flex-direction: column; gap: 8px; }
+.editor-row-head { display: flex; align-items: center; justify-content: space-between; }
+.editor-body {
+  width: 100%; min-height: 140px; resize: vertical; border-radius: 16px; border: 1.5px solid rgba(255, 255, 255, 0.9);
+  background: rgba(255, 255, 255, 0.55); color: var(--ink); font: inherit; padding: 12px 14px; user-select: text;
+}
+.md-preview { padding: 10px 4px; color: var(--body); }
+.md-preview h3, .md-preview h4, .md-preview h5 { color: var(--ink); margin: 8px 0 4px; }
+.md-preview p { margin: 4px 0; }
+.md-preview ul { margin: 4px 0; padding-left: 20px; }
+.tags.editable { align-items: center; }
+.tag.removable { display: inline-flex; align-items: center; gap: 4px; }
+.tag.removable button { display: grid; place-items: center; width: 16px; height: 16px; background: transparent; border: 0; color: var(--ink); opacity: 0.6; }
+.tag.removable button:hover { opacity: 1; }
+.tag.removable svg { width: 12px; height: 12px; }
+.tag-input { border: 0; background: transparent; font: inherit; color: var(--ink); min-width: 90px; min-height: 28px; }
+.field-row { display: flex; align-items: center; gap: 6px; }
+.field-row input { flex: 1; min-height: 40px; padding: 0 12px; border-radius: 12px; border: 1px solid rgba(255, 255, 255, 0.9); background: rgba(255, 255, 255, 0.55); color: var(--ink); font: inherit; user-select: text; }
+.link-target { flex: 1; font-weight: 600; color: var(--ink); font-size: 14px; }
+.editor-actions { display: flex; align-items: center; gap: 8px; }
+
+/* ---------- Quick capture popup window ---------- */
+
+.capture-error { margin: 0; font-size: 13px; font-weight: 600; color: #a3283b; overflow-wrap: anywhere; user-select: text; }
+.btn.primary:disabled { opacity: 0.55; cursor: default; }

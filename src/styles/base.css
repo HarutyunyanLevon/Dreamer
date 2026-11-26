@@ -1,0 +1,98 @@
+/* ---------- Tokens (set per theme at runtime by applyTheme) ---------- */
+:root {
+  --ink: #472a4b;
+  --body: #5a3d5e;
+  --muted: #6a4a6d;
+  --link: #c4699a;
+  --accent: #a8447c;
+  --ghost: #7b63c9;
+  --ghost-text: #43308a;
+  --fallback-bg: #fbe3ea;
+  --glass: rgba(255, 255, 255, 0.48);
+  --ink-shadow: rgba(71, 42, 75, 0.16);
+  --accent-soft: rgba(168, 68, 124, 0.12);
+  --ghost-glow: rgba(123, 99, 201, 0.38);
+  --stage-mist: #c9d3f5;
+  --stage-reverie: #8fa8f2;
+  --stage-lucid: #f0a0c0;
+  --stage-dream: #ffbf80;
+  --stage-dream-glow: rgba(255, 191, 128, 0.6);
+  --stage-built: #7fcfae;
+  --stage-built-glow: rgba(127, 207, 174, 0.6);
+  --stage-built-border: #2f7d5f;
+
+  --font-ui: "Nunito", system-ui, sans-serif;
+  --font-title: "Playfair Display", Georgia, serif;
+  --side-w: 224px; /* defaults; usePanels overrides both inline on <html> (resizable) */
+  --chat-w: 340px;
+  --gap: 16px;
+  --radius: 26px;
+  --scrollbar-w: 10px;
+  --scroll-thumb: rgba(71, 42, 75, 0.58);
+  --scroll-thumb-hover: rgba(71, 42, 75, 0.75);
+  --scroll-track: rgba(71, 42, 75, 0.07);
+  /* Space the floating panels take from each window edge (panel + its margins). The free canvas
+     area between them hosts the pills and canvas-placed popups. Item 3 shrinks these when a panel
+     is hidden. */
+  --inset-l: calc(var(--gap) * 2 + var(--side-w));
+  --inset-r: calc(var(--gap) * 2 + var(--chat-w));
+  --panel-ease: 0.32s cubic-bezier(0.2, 0.7, 0.2, 1);
+
+}
+
+* { box-sizing: border-box; }
+html, body, #root { height: 100%; margin: 0; }
+body {
+  background: var(--fallback-bg); /* also the WebGL-failure fallback */
+  color: var(--body);
+  font-family: var(--font-ui);
+  font-size: 15px;
+  line-height: 1.45;
+  overflow: hidden;
+  transition: background-color 0.6s ease;
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+}
+button { font: inherit; color: inherit; cursor: pointer; }
+button:disabled { cursor: default; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* Smooth theme cross-fade for colors. */
+.glass, .card, .pill, .badge, .btn, .chip, .swatch, .filter, .tool, .icon-btn, .side-row, .new-project,
+.wordmark, h3, p, .stage-name { transition: background-color 0.5s ease, color 0.5s ease, border-color 0.5s ease, box-shadow 0.5s ease; }
+
+/* ---------- Scrolling (one system: src/ui/Scroll.tsx) ----------
+   Every scrollable region uses .scroll: the same slim themed bar everywhere, gutter reserved so
+   nothing shifts when the thumb appears, never an auto-hiding overlay. Classic ::-webkit-scrollbar
+   styling (WebView2 is Chromium); scrollbar-width/-color are deliberately NOT set because they
+   would switch Chromium back to native bars. */
+.scroll { scrollbar-gutter: stable; overscroll-behavior: auto; }
+.scroll-y { overflow-y: auto; overflow-x: hidden; }
+.scroll-x { overflow-x: auto; overflow-y: hidden; }
+.scroll-boundary { overscroll-behavior: contain; }
+.scroll::-webkit-scrollbar { width: var(--scrollbar-w); height: var(--scrollbar-w); }
+.scroll::-webkit-scrollbar-track { background: var(--scroll-track); border-radius: 99px; }
+.scroll::-webkit-scrollbar-thumb {
+  background-color: var(--scroll-thumb); border-radius: 99px; min-height: 36px; min-width: 36px;
+  border: 2px solid transparent; background-clip: padding-box;
+}
+.scroll::-webkit-scrollbar-thumb:hover { background-color: var(--scroll-thumb-hover); }
+.scroll::-webkit-scrollbar-button { display: none; width: 0; height: 0; }
+.scroll::-webkit-scrollbar-corner { background: transparent; }
+
+/* ---------- Background ---------- */
+.bg-canvas {
+  position: fixed; inset: 0; width: 100%; height: 100%;
+  z-index: 0;
+  image-rendering: auto; /* browser upscales the small render: soft look */
+}
+
+/* ---------- Frosted glass ---------- */
+.glass {
+  background: var(--glass);
+  border: 1px solid rgba(255, 255, 255, 0.95);
+  border-radius: var(--radius);
+  backdrop-filter: blur(18px) saturate(1.1);
+ 
+  box-shadow: 0 10px 40px var(--ink-shadow);
+}

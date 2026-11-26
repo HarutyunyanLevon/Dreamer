@@ -1,0 +1,139 @@
+/* ---------- Stage dots ---------- */
+.dot { width: 11px; height: 11px; border-radius: 50%; display: inline-block; flex: none; }
+.dot-mist { border: 1.5px dashed var(--stage-mist); background: transparent; filter: saturate(1.6) brightness(0.88); }
+.dot-reverie { background: var(--stage-reverie); }
+.dot-lucid { background: var(--stage-lucid); }
+.dot-dream { background: var(--stage-dream); box-shadow: 0 0 8px var(--stage-dream-glow); }
+.dot-built { background: var(--stage-built); box-shadow: 0 0 8px var(--stage-built-glow); }
+
+/* ---------- Cards ---------- */
+.card { position: absolute; width: 236px; padding: 14px 16px 16px; border-radius: 22px; color: var(--ink); display: flex; flex-direction: column; }
+.card > * { flex: none; }
+.card h3 { font-family: var(--font-title); font-weight: 600; font-size: 19px; line-height: 1.2; margin: 6px 0 4px; color: var(--ink); }
+.card p { margin: 0; color: var(--body); font-size: 14px; }
+.card-head { display: flex; align-items: center; gap: 7px; }
+.stage-name { font-size: 11px; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); }
+
+/* Stage borders, fuzzy to crisp, always in the stage's border colour (--stage-*-border: the stage
+   colour deepened to 3:1 against that stage's card, checked by check:themes). Background alphas are
+   mirrored in STAGE_CARD_ALPHA (src/theme/types.ts). */
+/* Mist: translucent fill; the cloudy edge is drawn by the shared WebGL <MistLayer>. */
+.stage-mist {
+  background: rgba(255, 255, 255, 0.3); border: 0;
+  backdrop-filter: blur(8px);
+}
+.mist-layer { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+/* No WebGL (and the theme preview): a plain soft border instead. */
+.canvas.no-webgl .card.stage-mist:not(.ghost) {
+  border: 1.5px solid var(--stage-mist-border); box-shadow: 0 0 18px 4px rgba(255, 255, 255, 0.55);
+}
+.canvas.no-webgl .card.stage-mist.selected:not(.ghost) { box-shadow: 0 0 24px 7px rgba(255, 255, 255, 0.8); }
+/* Reverie and Lucid: fills only; their edges are drawn by <MistLayer> too. */
+/* Reverie: no surface at all; the shader's continuous wash is the card. */
+.stage-reverie { background: transparent; border: 0; outline: 0; box-shadow: none; backdrop-filter: none; border-radius: 22px; }
+.stage-lucid { background: rgba(255, 255, 255, 0.84); border: 0; border-radius: 22px; box-shadow: 0 14px 30px var(--ink-shadow); }
+.canvas.no-webgl .card.stage-reverie:not(.ghost) {
+  background: rgba(255, 255, 255, 0.62); border: 1.5px solid var(--stage-reverie-border); box-shadow: 0 0 16px 3px var(--stage-reverie-glow);
+}
+.canvas.no-webgl .card.stage-lucid:not(.ghost) {
+  border: 1px solid var(--stage-lucid-border); box-shadow: 0 14px 30px var(--ink-shadow), 0 0 10px 1px var(--stage-lucid-glow);
+}
+/* Built: crisp like Dream (plain CSS, no edge shader) with a mint glow. */
+.stage-built {
+  background: rgba(255, 255, 255, 0.96); border: 3px solid var(--stage-built-border); border-radius: 22px;
+  box-shadow: 0 10px 34px var(--stage-built-glow), 0 0 0 1px rgba(127, 207, 174, 0.35);
+}
+.card.selected.stage-built:not(.ghost) { box-shadow: 0 10px 34px var(--stage-built-glow), 0 0 40px 12px var(--stage-built-glow); }
+.built-check { display: inline-flex; color: var(--stage-built-border); }
+.built-check svg { width: 15px; height: 15px; stroke-width: 2.6; }
+
+/* Queued / in progress: a small lilac bar at the card's bottom; in progress shimmers. */
+
+@keyframes build-shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
+
+/* Dream: crisp, thicker, solid, even corners, no animation. */
+.stage-dream {
+  background: rgba(255, 255, 255, 0.96); border: 3px solid var(--stage-dream-border); border-radius: 22px;
+  box-shadow: 0 10px 34px var(--stage-dream-glow);
+}
+.btn {
+  min-height: 44px; padding: 0 18px; border-radius: 22px; border: 1px solid #fff;
+  background: rgba(255, 255, 255, 0.8); color: var(--ink); font-weight: 700;
+}
+.btn.primary { background: var(--accent); color: #fff; border-color: transparent; }
+
+/* ---------- Motion ---------- */
+@media (prefers-reduced-motion: reduce) {
+  .orb, .setup-spinner { animation: none; }
+  * { transition-duration: 0.01ms !important; }
+}
+
+/* ---------- Step 3 additions ---------- */
+.name-input {
+  min-height: 48px; padding: 0 16px; border-radius: 18px; font: inherit; color: var(--ink); user-select: text;
+  border: 1.5px solid var(--accent); background: rgba(255, 255, 255, 0.85);
+}
+.name-input::placeholder { color: var(--muted); }
+/* Card body: markdown, the main content. Auto-height cards grow with it up to ~18 lines, then it
+   scrolls inside the card; a manually sized card gives the body all remaining space. */
+.card-body { font-size: 15px; line-height: 1.5; color: var(--body); margin: 4px -8px 0 0; padding-right: 2px; max-height: calc(1.5em * 18); overflow-wrap: anywhere; }
+.card.fixed-size .card-body { flex: 1 1 auto; min-height: 0; max-height: none; }
+.card-body p, .md-preview p { margin: 0 0 2px; }
+.card-body br { display: block; content: ""; margin-top: 6px; }
+.card-body h3, .card-body h4, .card-body h5 { font-size: 15px; margin: 6px 0 2px; color: var(--ink); }
+.card-body ul { margin: 2px 0; padding-left: 18px; }
+.card-body a { color: var(--accent); }
+.cards-layer { position: absolute; left: 0; top: 0; isolation: isolate; z-index: 1; }
+.card-menu-btn {
+  position: absolute; top: 2px; right: 2px; width: 44px; height: 44px; border: 0; border-radius: 50%;
+  background: transparent; color: var(--muted); font-size: 20px; line-height: 1; opacity: 0.75;
+}
+.card-menu-btn:hover, .card-menu-btn:focus-visible { background: rgba(255, 255, 255, 0.75); color: var(--ink); opacity: 1; }
+.card-prompt-btn { right: 40px; display: grid; place-items: center; }
+.card-prompt-btn svg { width: 17px; height: 17px; }
+.card h3 { padding-right: 30px; }
+/* Resize handles: corners are 44px touch targets centred on the corner; edges are 14px strips
+   between them. Shown on hover, or on the selected card. */
+.rh { position: absolute; display: none; z-index: 3; touch-action: none; }
+.card:hover > .rh, .card.selected > .rh { display: block; }
+.rh-n, .rh-s { left: 22px; right: 22px; height: 14px; cursor: ns-resize; }
+.rh-n { top: -7px; } .rh-s { bottom: -7px; }
+.rh-e, .rh-w { top: 22px; bottom: 22px; width: 14px; cursor: ew-resize; }
+.rh-e { right: -7px; } .rh-w { left: -7px; }
+.rh-ne, .rh-nw, .rh-se, .rh-sw { width: 44px; height: 44px; }
+.rh-ne { top: -22px; right: -22px; cursor: nesw-resize; } .rh-sw { bottom: -22px; left: -22px; cursor: nesw-resize; }
+.rh-nw { top: -22px; left: -22px; cursor: nwse-resize; } .rh-se { bottom: -22px; right: -22px; cursor: nwse-resize; }
+.rh-se::after {
+  content: ""; position: absolute; left: 12px; top: 12px; width: 9px; height: 9px;
+  border-right: 2px solid var(--muted); border-bottom: 2px solid var(--muted); border-radius: 0 0 4px 0; opacity: 0.8;
+}
+.card-menu { position: fixed; min-width: 200px; padding: 6px; border-radius: 16px; display: flex; flex-direction: column; gap: 2px; }
+.menu-item { min-height: 44px; padding: 0 14px; border: 0; border-radius: 10px; background: transparent; text-align: left; color: var(--ink); font-weight: 600; }
+.menu-item:hover, .menu-item:focus-visible { background: rgba(255, 255, 255, 0.75); }
+.tags { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 8px; }
+.tag { font-size: 12px; font-weight: 600; padding: 2px 9px; border-radius: 10px; background: var(--accent-soft); color: var(--ink); }
+.empty {
+  position: absolute; left: calc(var(--inset-l) + (100% - var(--inset-l) - var(--inset-r)) / 2);
+  top: 42%; transform: translate(-50%, -50%); text-align: center; max-width: 360px; color: var(--body);
+  pointer-events: none; /* the empty-state text is part of the canvas: pressing on it pans */
+}
+.empty-title { font-family: var(--font-title); font-style: italic; font-size: 30px; color: var(--ink); margin-bottom: 6px; }
+.warn-pill { top: calc(var(--gap) + 74px); padding: 8px 16px; font-weight: 600; color: var(--ink); }
+.toast {
+  position: fixed; z-index: 50; left: 50%; bottom: 96px; transform: translateX(-50%);
+  display: flex; align-items: center; gap: 14px; padding: 8px 8px 8px 20px; max-width: 560px;
+  background: rgba(255, 255, 255, 0.92); border: 1px solid var(--accent); border-radius: 28px;
+  color: var(--ink); font-weight: 600; box-shadow: 0 10px 36px var(--ink-shadow); user-select: text;
+}
+.icon-btn:disabled, .tool:disabled { opacity: 0.5; }
+
+/* ---------- Step 4: canvas interactivity ---------- */
+.tool.on { background: var(--accent-soft); color: var(--accent); }
+.link-layer { position: absolute; pointer-events: none; overflow: visible; z-index: 0; }
+.link-line { stroke: var(--link); stroke-width: 2; opacity: 0.7; }
+.link-label {
+  fill: var(--ink); font-size: 12px; font-weight: 700; paint-order: stroke;
+  stroke: rgba(255, 255, 255, 0.9); stroke-width: 4px;
+}
+.card.link-source { outline: 2px solid var(--accent); outline-offset: 3px; }
+.card.linkable { cursor: pointer; }

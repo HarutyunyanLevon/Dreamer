@@ -258,7 +258,7 @@ function observer(): IntersectionObserver {
 /**
  * Makes `ref`'s element a dusk-glass surface (pass `kind: null` to turn it off). The element gets
  * the `dusk-host` class and a `<canvas class="dusk-glass" aria-hidden>` as its first child; give it
- * `position` and `isolation: isolate` (styles.css does for `.dusk-host`).
+ * `position` and `isolation: isolate` (styles/ does for `.dusk-host`).
  */
 export function useDuskGlass(ref: RefObject<HTMLElement | null>, kind: DuskKind | null, seed = "") {
   useEffect(() => {

@@ -1,0 +1,76 @@
+/* ---------- Step 5: Claude chat ---------- */
+.chat-head { position: relative; }
+.msg.user { align-self: flex-end; background: var(--accent-soft); }
+.msg.error { background: color-mix(in srgb, #e05a5a 16%, rgba(255, 255, 255, 0.75)); color: #7a2323; }
+.question-chips { padding: 10px 0 0; margin: 0; align-items: center; }
+.question-form { display: flex; flex-direction: column; gap: 14px; }
+.question-form .question { border: 0; margin: 0; padding: 0; min-width: 0; }
+.question-form legend { padding: 0; font-weight: 600; }
+.question-form .question.skipped legend { opacity: 0.55; }
+.question-context { font-size: 12.5px; color: var(--muted); margin-top: 2px; }
+.rec-tag { margin-left: 6px; font-size: 10.5px; font-weight: 700; opacity: 0.75; text-transform: uppercase; letter-spacing: 0.03em; }
+.question-other { margin-top: 8px; width: 100%; box-sizing: border-box; font: inherit; padding: 6px 10px; border-radius: 10px; border: 1px solid var(--muted); background: rgba(255, 255, 255, 0.8); color: var(--ink); }
+.question-send { align-self: flex-end; }
+.chip.on { background: var(--accent); color: #fff; border-color: transparent; }
+.setup-screen { gap: 10px; padding: 4px 20px 16px; }
+.setup-screen p { margin: 0; }
+.setup-screen code {
+  display: block; background: rgba(255, 255, 255, 0.6); border-radius: 10px; padding: 8px 12px; margin-top: 4px;
+  font-family: ui-monospace, Consolas, monospace; font-size: 13px; color: var(--ink); user-select: text;
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.setup-screen code.setup-path { display: inline; padding: 1px 6px; border-radius: 6px; font-size: 12px; margin: 0; }
+.setup-found { font-size: 13px; color: var(--muted); overflow-wrap: anywhere; }
+.setup-primary {
+  align-self: flex-start; border: none; border-radius: 999px; padding: 10px 20px; cursor: pointer;
+  background: var(--accent); color: #fff; font: inherit; font-weight: 700; font-size: 14px;
+}
+.setup-primary:hover { filter: brightness(1.06); }
+.setup-primary:focus-visible, .link-button:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+.setup-manual summary { cursor: pointer; font-size: 13px; font-weight: 600; color: var(--muted); }
+.setup-manual[open] summary { margin-bottom: 6px; }
+.setup-steps { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 8px; font-size: 13px; }
+.setup-wait { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
+.setup-wait-row { display: flex; align-items: center; gap: 10px; }
+.setup-spinner {
+  width: 16px; height: 16px; border-radius: 50%; border: 2px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  border-top-color: var(--accent); animation: setup-spin 0.9s linear infinite;
+}
+@keyframes setup-spin { to { transform: rotate(360deg); } }
+.setup-error { background: color-mix(in srgb, #e05a5a 16%, rgba(255, 255, 255, 0.75)); color: #7a2323; border-radius: 10px; padding: 8px 12px; font-size: 13px; }
+.setup-log {
+  margin: 0; max-height: 160px; flex: none; background: rgba(0, 0, 0, 0.06); border-radius: 10px; padding: 8px 10px;
+  font-family: ui-monospace, Consolas, monospace; font-size: 11.5px; line-height: 1.45; color: var(--ink);
+  white-space: pre-wrap; overflow-wrap: anywhere; user-select: text;
+}
+.setup-recheck { align-self: flex-start; }
+.link-button { background: none; border: none; padding: 0; font: inherit; color: var(--accent); text-decoration: underline; cursor: pointer; }
+
+/* ---------- Step 6: branch/compare/trash ---------- */
+.fork-badge { font-size: 13px; color: var(--accent); margin-left: auto; }
+.fork-chip { display: inline-flex; align-items: center; gap: 6px; }
+.fork-chip svg { width: 14px; height: 14px; }
+.modal-head h3 { display: flex; align-items: center; gap: 8px; font-family: var(--font-title); font-size: 20px; color: var(--ink); margin: 0; flex: 1; }
+.modal-head h3 svg { width: 18px; height: 18px; }
+.compare-modal { --modal-w: 920px; }
+.compare-columns { display: flex; gap: 14px; padding-bottom: 6px; flex: none; }
+.compare-col { flex: 1; min-width: 220px; background: rgba(255, 255, 255, 0.5); border-radius: 16px; padding: 14px; display: flex; flex-direction: column; gap: 10px; }
+.compare-col h4 { font-family: var(--font-title); font-size: 16px; color: var(--ink); margin: 0; }
+.compare-body { flex: 1; font-size: 13px; color: var(--body); }
+.compare-body p { margin: 2px 0; }
+.diff-add { background: color-mix(in srgb, #4caf6a 22%, transparent); border-radius: 4px; padding: 0 4px; }
+.diff-del { background: color-mix(in srgb, #e05a5a 18%, transparent); text-decoration: line-through; border-radius: 4px; padding: 0 4px; opacity: 0.8; }
+.trash-modal { --modal-w: 480px; }
+.trash-list { display: flex; flex-direction: column; gap: 6px; max-height: 50vh; flex: none; }
+.trash-row { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 14px; background: rgba(255, 255, 255, 0.45); }
+.trash-row-info { flex: 1; min-width: 0; }
+.trash-title { font-weight: 700; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ---------- Step 7: theme editor + project theme override ---------- */
+.theme-picker { position: relative; }
+.theme-picker-pop {
+  position: fixed; min-width: 180px; max-height: 260px;
+  padding: 6px; display: flex; flex-direction: column; gap: 2px;
+}
+.theme-picker-row { min-height: 40px; padding: 0 12px; border-radius: 10px; border: 0; background: transparent; text-align: left; color: var(--ink); font-weight: 600; }
+.theme-picker-row:hover { background: rgba(255, 255, 255, 0.6); }

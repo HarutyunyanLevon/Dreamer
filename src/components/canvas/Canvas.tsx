@@ -1152,7 +1152,7 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
       {data && data.warnings.length > 0 && <Warnings data={data} />}
       {/* Bottom bar: zoom pill and Add toolbar in one grid spanning the free canvas area, so they can
           never overlap. Below ~680px of bar width the tool labels collapse to icons (container
-          query in styles.css); every tool keeps an aria-label and a tooltip either way. */}
+          query in styles/); every tool keeps an aria-label and a tooltip either way. */}
       <div className="bottom-bar">
       <div className="pill zoom-pill" role="group" aria-label="Zoom" data-wheel-boundary="">
         <button type="button" className="icon-btn" aria-label="Zoom out" title="Zoom out" onClick={() => zoomAt(sizeRef.current.w / 2, sizeRef.current.h / 2, vp.zoom / 1.2)}><IconMinus /></button>

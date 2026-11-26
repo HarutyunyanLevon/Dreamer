@@ -1,0 +1,147 @@
+/* ---------- Retrieval: search chips, ghost links, Ctrl+K ---------- */
+.canvas.camera-anim .world { transition: transform 0.45s cubic-bezier(0.2, 0.7, 0.2, 1); }
+/* Selection: no border. Mist is lit by the shader; the others glow softly in their stage colour. */
+.canvas.no-webgl .card.selected.stage-reverie:not(.ghost) { box-shadow: 0 0 30px 6px var(--stage-reverie-glow); }
+.canvas.no-webgl .card.selected.stage-lucid:not(.ghost) { box-shadow: 0 14px 30px var(--ink-shadow), 0 0 32px 8px var(--stage-lucid-glow); }
+.card.selected.stage-dream:not(.ghost) { box-shadow: 0 10px 34px var(--stage-dream-glow), 0 0 40px 12px var(--stage-dream-glow); }
+.link-line.ghost-link { stroke-dasharray: 7 6; opacity: 0.9; stroke: var(--accent); }
+.ghost-link-ctl {
+  position: absolute; transform: translate(-50%, -50%); z-index: 3; display: flex; align-items: center; gap: 6px;
+  padding: 5px 6px 5px 12px; border-radius: 999px; border: 1.5px dashed var(--accent);
+  background: rgba(255, 255, 255, 0.85); backdrop-filter: blur(8px); white-space: nowrap; font-size: 13px; color: var(--ink);
+}
+.ghost-link-ctl .btn { padding: 4px 10px; font-size: 12px; }
+.ghost-link-label { font-weight: 600; max-width: 180px; overflow: hidden; text-overflow: ellipsis; }
+.search-trace { display: flex; flex-direction: column; gap: 6px; font-size: 13px; color: var(--muted); }
+.search-trace strong { color: var(--ink); font-weight: 600; }
+.search-chips { padding: 0; }
+.result-chip { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; }
+.result-chip.ghost { border-style: dashed; }
+.result-proj { font-size: 11px; opacity: 0.75; }
+.palette { --modal-w: 640px; max-height: 70vh; display: flex; flex-direction: column; gap: 10px; }
+.palette-input-row { display: flex; gap: 10px; align-items: center; }
+.palette-input { flex: 1; margin: 0; }
+.palette-results { list-style: none; margin: 0; padding: 0; min-height: 0; display: flex; flex-direction: column; gap: 4px; }
+.palette-hit { padding: 9px 12px; border-radius: 12px; cursor: pointer; }
+.palette-hit.on { background: color-mix(in srgb, var(--accent) 16%, rgba(255, 255, 255, 0.6)); }
+.palette-hit.ghost .palette-hit-title { font-style: italic; }
+.palette-hit-head { display: flex; align-items: center; gap: 8px; }
+.palette-hit-title { font-weight: 700; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.palette-hit-proj { margin-left: auto; font-size: 12px; color: var(--muted); white-space: nowrap; }
+.palette-badge { font-size: 11px; color: var(--accent); border: 1px dashed var(--accent); border-radius: 999px; padding: 0 6px; }
+.palette-snippet { font-size: 13px; color: var(--muted); margin-top: 3px; line-height: 1.4; }
+.palette-tags { font-size: 12px; color: var(--accent); margin-top: 3px; }
+.palette-empty { margin: 4px 2px; color: var(--muted); font-size: 14px; }
+.palette-foot { font-size: 12px; text-align: right; }
+@media (prefers-reduced-motion: reduce) {
+  .canvas.camera-anim .world { transition: none; }
+}
+.modal > * { flex-shrink: 0; }
+
+/* ---------- Fix pass 2: card editor ---------- */
+.card-editor .body-row { flex: 1 0 auto; }
+.card-editor .editor-body { flex: 1; min-height: max(42vh, 260px); font-size: 16px; line-height: 1.55; resize: none; }
+.card-editor .md-preview { min-height: max(42vh, 260px); max-height: 60vh; font-size: 16px; line-height: 1.55; }
+.helper { margin: -4px 8px 2px; font-size: 13px; color: var(--muted); }
+.more-toggle { align-self: flex-start; display: inline-flex; align-items: center; gap: 8px; }
+.more-count { min-width: 22px; height: 22px; padding: 0 6px; border-radius: 11px; background: var(--accent); color: #fff; font-size: 12px; display: inline-grid; place-items: center; }
+.more-section { display: flex; flex-direction: column; gap: 14px; }
+
+/* ---------- Fix pass 3: theme editor (full-size dialog with live preview) ---------- */
+
+/* ---------- Fix pass 3: delete project, chat reset ---------- */
+.side-row-wrap { display: flex; align-items: center; gap: 2px; border-radius: 16px; }
+.side-row-wrap .side-row { flex: 1; min-width: 0; }
+.side-delete { flex: none; color: var(--muted); opacity: 0; }
+.side-row-wrap:hover .side-delete, .side-row-wrap.active .side-delete, .side-delete:focus-visible { opacity: 1; }
+.side-delete:hover { color: #a3283b; }
+.side-delete svg { width: 18px; height: 18px; }
+.dialog-title { font-family: var(--font-title); font-size: 21px; color: var(--ink); margin: 0; }
+.modal p { margin: 0; color: var(--body); }
+.dialog-path { display: block; padding: 8px 12px; border-radius: 10px; background: rgba(255, 255, 255, 0.65); color: var(--ink); font-family: ui-monospace, Consolas, monospace; font-size: 13px; overflow-wrap: anywhere; user-select: text; }
+.btn.danger { background: #a3283b; color: #fff; border-color: transparent; }
+.switch-ask { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 8px 12px; border-radius: 12px; background: rgba(255, 255, 255, 0.55); border: 1px solid var(--accent); font-size: 13px; color: var(--ink); }
+.switch-ask span { flex: 1; min-width: 160px; }
+
+/* ---------- Fix pass #3 (2nd round), item 3: side panel toggles ----------
+   <html data-left/data-right="shown|hidden"> (usePanels) drives everything: the panels slide out,
+   the insets shrink to the bookmark strip, and pills, the empty state and canvas-placed popups move
+   into the freed space. Transitions only after the saved state is restored (data-panels-ready);
+   the global reduced-motion rule turns them into instant switches. */
+:root { --tab-w: 30px; }
+:root[data-left="hidden"] { --inset-l: calc(var(--tab-w) + var(--gap)); }
+:root[data-right="hidden"] { --inset-r: calc(var(--tab-w) + var(--gap)); }
+:root[data-panels-ready] .sidebar,
+:root[data-panels-ready] .chat { transition: transform var(--panel-ease), opacity var(--panel-ease), visibility 0s linear 0s, background-color 0.5s ease, border-color 0.5s ease, box-shadow 0.5s ease; }
+:root[data-left="hidden"] .sidebar { transform: translateX(calc(-100% - var(--gap) - 8px)); opacity: 0; visibility: hidden; }
+:root[data-right="hidden"] .chat { transform: translateX(calc(100% + var(--gap) + 8px)); opacity: 0; visibility: hidden; }
+/* Keep the panel visible while it slides out, then hide it (out of tab order and the a11y tree). */
+:root[data-panels-ready][data-left="hidden"] .sidebar,
+:root[data-panels-ready][data-right="hidden"] .chat { transition: transform var(--panel-ease), opacity var(--panel-ease), visibility 0s linear 0.32s; }
+:root[data-panels-ready] .pill,
+:root[data-panels-ready] .empty { transition: left var(--panel-ease), max-width var(--panel-ease), background-color 0.5s ease, color 0.5s ease, border-color 0.5s ease, box-shadow 0.5s ease; }
+
+/* Bookmark tabs: flush with the window edge, above the panels, never moving. The notch points into
+   the window. White chevron on the accent colour (same pair as primary buttons, checked >= 4.5:1). */
+.panel-tab {
+  position: fixed; z-index: 30; top: 28px; width: var(--tab-w); height: 52px; padding: 0; border: 0;
+  display: grid; align-items: center; background: var(--accent); color: #fff;
+  box-shadow: 0 4px 14px var(--ink-shadow);
+}
+.panel-tab-left { left: 0; clip-path: polygon(0 0, 100% 0, 74% 50%, 100% 100%, 0 100%); justify-items: start; padding-left: 5px; border-radius: 0 4px 4px 0; }
+.panel-tab-right { right: 0; clip-path: polygon(0 0, 100% 0, 100% 100%, 0 100%, 26% 50%); justify-items: end; padding-right: 5px; border-radius: 4px 0 0 4px; }
+.panel-tab:hover { filter: brightness(1.08); }
+.panel-tab:focus-visible { outline: 2px solid var(--ink); outline-offset: -4px; }
+
+/* ---------- Fix pass #3 (2nd round), item 6: bottom bar ----------
+   One grid across the free canvas area: zoom pill in the left column (at least its own width), the
+   Add toolbar centred in the middle one. If the zoom pill needs more room the toolbar shifts right
+   instead of overlapping it. The bar itself ignores the pointer (presses between the pills reach the
+   canvas). */
+.bottom-bar {
+  position: absolute; z-index: 5; left: var(--inset-l); right: var(--inset-r); bottom: var(--gap);
+  display: grid; grid-template-columns: minmax(max-content, 1fr) auto minmax(0, 1fr); align-items: end; column-gap: 12px;
+  container-type: inline-size; container-name: bottom-bar; pointer-events: none;
+}
+:root[data-panels-ready] .bottom-bar { transition: left var(--panel-ease), right var(--panel-ease); }
+.bottom-bar > .pill { position: static; transform: none; max-width: none; pointer-events: auto; }
+.bottom-bar > .zoom-pill { justify-self: start; }
+.bottom-bar > .toolbar { grid-column: 2; }
+/* Compact zoom controls. 32px buttons are a documented exception to the 44px minimum (decisions,
+   item 6): four small, well-separated, non-destructive controls in a fixed corner. */
+.zoom-pill { padding: 3px; gap: 2px; }
+.zoom-pill .icon-btn { width: 32px; height: 32px; }
+.zoom-pill .icon-btn svg { width: 16px; height: 16px; }
+.zoom-val { min-width: 42px; font-size: 13px; font-variant-numeric: tabular-nums; }
+.tool { white-space: nowrap; }
+/* Narrow bar: tools become 44px icon buttons (labels stay as aria-label and tooltip). */
+@container bottom-bar (max-width: 680px) {
+  .tool { width: 44px; padding: 0; justify-content: center; }
+  .tool > span { display: none; }
+}
+
+/* ---------- Fix pass #3 (2nd round), item 8: new-project field error ---------- */
+.name-field { display: flex; flex-direction: column; gap: 6px; }
+.name-field .name-input[aria-invalid="true"] { border-color: #a3283b; }
+.side-error { margin: 0 4px; font-size: 13px; font-weight: 600; color: #a3283b; overflow-wrap: anywhere; user-select: text; }
+/* Long messages (real OS errors with paths) wrap inside the toast; Close stays inside it. */
+.toast { border-radius: 22px; }
+.toast > span { flex: 1; min-width: 0; overflow-wrap: anywhere; max-height: 40vh; overflow-y: auto; }
+.toast > .btn { flex: none; }
+.read-only-banner { top: 16px; bottom: auto; }
+
+/* ---------- Fix pass #3 (2nd round), item 9: quit ---------- */
+
+/* The capture popup window has a fixed size: the card never outgrows it, and a long error (a real
+   OS error with a full path) scrolls inside instead of being cut off. */
+
+.capture-error { flex: 0 1 auto; min-height: 0; overflow-y: auto; }
+
+/* ---------- Fix pass #3 (2nd round), item 10: Undo / Redo ----------
+   Disabled = clearly dimmed, no hover highlight, "not allowed" cursor; still focusable and still
+   shows its tooltip (aria-disabled). */
+.history-btn[aria-disabled="true"] { opacity: 0.32; cursor: not-allowed; }
+.history-btn[aria-disabled="true"]:hover { background: transparent; }
+
+/* Canvas marquee selection (screen space, above the world). */
+.marquee { position: absolute; z-index: 5; pointer-events: none; border: 1px solid var(--accent, #6b8cff); background: color-mix(in srgb, var(--accent, #6b8cff) 14%, transparent); border-radius: 4px; }
