@@ -438,6 +438,7 @@ function multiMenu(cards: Card[], env: MenuEnv): MenuSection[] {
       items: [
         { label: "Merge with Claude", run: () => env.merge(ids) },
         { label: "Summarize selection…", run: () => env.ws.openHandoff({ kind: "selection", ids: cards.map((c) => c.id) }) },
+        { label: "Organize with Claude", run: () => env.ws.requestChat({ text: "/organize selection", send: true }) },
         { label: "Make build prompt", run: () => env.ws.openTask({ kind: "selection", ids: cards.map((c) => c.id) }) },
       ],
     },
@@ -536,6 +537,7 @@ function frameMenu(id: string, env: MenuEnv): MenuSection[] {
       title: "Claude",
       items: [
         { label: "Summarize this frame…", disabled: empty, run: () => env.ws.openHandoff({ kind: "frames", ids: [id] }) },
+        { label: "Organize this frame", disabled: empty, run: () => env.ws.requestChat({ text: `/organize frame ${id}`, send: true }) },
         { label: "Make build prompt", disabled: empty, run: () => env.ws.openTask({ kind: "frames", ids: [id] }) },
       ],
     },

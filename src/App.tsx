@@ -17,6 +17,7 @@ import { ScanHost } from "./components/Scan";
 import { useEffect, useState } from "react";
 import { useWorkspace } from "./state/useWorkspace";
 import { ThemeProvider } from "./theme/ThemeContext";
+import { api } from "./api";
 
 const query = typeof window !== "undefined" ? new URLSearchParams(window.location.search) : new URLSearchParams();
 const isCapture = query.has("capture");
@@ -46,6 +47,9 @@ function MainApp() {
   const ws = useWorkspace();
   const panels = usePanels();
   const [searchOpen, setSearchOpen] = useState(false);
+  /** A failed layout migration: the workspace is read-only until it is fixed. */
+  const [readOnly, setReadOnly] = useState<string | null>(null);
+  useEffect(() => void api.migrationStatus().then(setReadOnly, () => {}), []);
 
   // Anything asking Claude (chips, card menus) brings the chat panel into view.
   const { showRight } = panels;
@@ -107,6 +111,11 @@ function MainApp() {
             <button type="button" className="btn primary" onClick={() => { ws.clearNotice(); void ws.undo(); }}>Undo</button>
           )}
           <button type="button" className="btn" onClick={ws.clearNotice}>Close</button>
+        </div>
+      )}
+      {readOnly && (
+        <div className="toast read-only-banner" role="alert">
+          <span>Read-only. {readOnly}</span>
         </div>
       )}
       {ws.error && (

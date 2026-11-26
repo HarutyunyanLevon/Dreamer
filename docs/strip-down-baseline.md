@@ -7,7 +7,7 @@ Every later step must end no worse.
 | `cargo test` (src-tauri) | 187 passed, 0 failed, 4 ignored |
 | `npx tsc --noEmit` | clean |
 | `npm run test:reliability` | ok |
-| `npm run test:versions` | ok |
+| `npm run test:versions` | removed in step 1 (feature gone) |
 | `npm run test:checklist` | ok |
 | `npm run check:themes` | ok (all themes meet contrast) |
 

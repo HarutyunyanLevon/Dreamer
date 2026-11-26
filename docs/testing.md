@@ -515,3 +515,13 @@ Manual (browser mock: `npm run dev`):
 3. Apply decisions: the flagged card's notes get the `**Q:**/**A:**` pairs (one Ctrl+Z removes them), the prompt text changes (mock: a "Decisions" section), a new task file is saved ("Saved …" toast), and the box reads "2 decided ✓ · 1 open" and stays open. Change an answer: Apply is enabled again.
 4. On question 3 pick `Include "<title>" in this build` and Apply: the prompt is rebuilt with that card in scope (new chips row), a fresh stepper starts with matching answers kept.
 5. Tasks → Review on a saved task: the dialog opens with its answers ("N decided ✓ ▸"). A task saved before this change (flags without choices, or none) still opens; a flag without choices shows its text and the own-decision box only.
+
+## Strip-down step 1: one canvas per project
+Automated: `cd src-tauri && cargo test migrate` (fixture with versions + nested folders + Inbox: one canvas each, frames with the right members, archive present, links intact; second run is a no-op; a re-run after a crash doesn't double frames; overlapping tiles go in a row; on Windows, a locked file makes the backup fail and leaves everything untouched and read-only). `cargo test bundle` covers `version` ignored / `folder` as frame. `npm run build`.
+
+Manual migration check (Windows): copy a real layout-1 workspace somewhere, run with `DREAMER_WORKSPACE` pointing at it.
+1. A `.backup-<date>/` folder appears beside `projects/` with a full copy; `migration-2.log` lists what moved.
+2. Each project opens on one canvas; former folders are frames titled with their path; former extra versions are under `projects/<slug>/archive/versions/`.
+3. The old Inbox is the project "Inbox" (`projects/inbox-ideas`).
+4. Relaunch: no second backup, nothing changes.
+5. Lock a card file (e.g. open it with exclusive access) in a fresh layout-1 copy and launch: the top banner says "Read-only. Migration failed, your data is untouched: …" and edits fail; nothing on disk changed.

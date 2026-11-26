@@ -4,9 +4,6 @@ import type { Pos } from "../api";
 export const CARD_W = 236;
 /** Height estimate before a card has been measured (culling, link endpoints). */
 export const CARD_H = 150;
-/** A folder node's default size (it can be resized like a card). */
-export const FOLDER_W = 220;
-export const FOLDER_H = 156;
 /** Mirrors MIN_CARD_W / MIN_CARD_H in src-tauri/src/model.rs. */
 export const MIN_W = 160;
 export const MIN_H = 90;
@@ -22,10 +19,6 @@ export interface Rect {
 /** A card's box in world units. `measured` is the rendered height of an auto-height card. */
 export function cardRect(p: Pos, measured?: number): Rect {
   return { x: p.x, y: p.y, w: p.w ?? CARD_W, h: p.h ?? measured ?? CARD_H };
-}
-
-export function folderRect(p: Pos): Rect {
-  return { x: p.x, y: p.y, w: p.w ?? FOLDER_W, h: p.h ?? FOLDER_H };
 }
 
 export type HandleDir = "n" | "s" | "e" | "w" | "ne" | "nw" | "se" | "sw";

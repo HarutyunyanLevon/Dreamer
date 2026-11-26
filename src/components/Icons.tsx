@@ -13,7 +13,6 @@ export const IconSend =I(<path d="M5 12 19 5l-4 14-3-6-7-1Z" />);
 export const IconPlus = I(<path d="M12 5v14M5 12h14" />);
 export const IconMinus = I(<path d="M5 12h14" />);
 export const IconFit = I(<path d="M4 9V5h4M20 9V5h-4M4 15v4h4M20 15v4h-4" />);
-export const IconInbox = I(<><path d="M4 13h4l1.5 3h5L16 13h4" /><path d="M5.5 6h13L20 13v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-5Z" /></>);
 export const IconFolder = I(<path d="M4 7a2 2 0 0 1 2-2h3l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2Z" />);
 export const IconClose = I(<path d="M6 6l12 12M18 6 6 18" />);
 export const IconTrash = I(<><path d="M5 7h14M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2m2 0-1 13a1 1 0 0 1-1 1H8a1 1 0 0 1-1-1L6 7" /><path d="M10 11v6M14 11v6" /></>);
