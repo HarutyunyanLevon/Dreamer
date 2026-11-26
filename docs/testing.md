@@ -501,3 +501,10 @@ Manual:
 5. Answer a question: it moves into "1 answered ▸" (closed). Delete it with ×: it appears on Project decisions as **Q:**/**A:** (the card is created when missing); one Undo restores the item and the decisions text.
 6. With two answered questions, "Clear answered" (fold header, then the card menu): both go to Project decisions in one append; one Undo restores both.
 7. Delete an unanswered "From Claude Code" item, then add a line to QUESTIONS.md: the new line is imported, the deleted one is not, and QUESTIONS.md itself is unchanged by the delete.
+
+## Grill-me in batches (branch `reliability`)
+Manual:
+1. /grill-me on an idea card: one form with 3-4 questions, the recommended chip first with a "Recommended" tag, context as a grey line. Send stays disabled until each question is picked, has Other text or is skipped. Send: one user message of Q:/A: lines; every answered pair lands in the card's notes; one Ctrl+Z removes them all.
+2. "Other…" shows a text box (Enter picks it); Skip greys the question and it is sent as `A: (skipped)` and not written to the notes. Ctrl+Enter sends. After Send the form is read-only and shows the choices.
+3. Click "? N" on the From Claude Code card (or "Answer with Claude" in its editor, or the /grill-me chip in its thread): a form with its open questions. Send: the item answers are filled and QUESTIONS.md gets `[x]` + `A:` lines; skipped items stay open. When none are left the reply is exactly "All open questions covered."
+4. An old thread with single questions still renders them (answered ones read-only with the chosen chip).

@@ -38,7 +38,8 @@
 //                                       tool call (memory_update | memory_seed) comes back as memory_result
 //   out: {type:"ready"}
 //        {type:"delta", id, text}                      -- streamed assistant text
-//        {type:"question", id, turnId, question, choices}  -- ask_question fired during turn `turnId`
+//        {type:"questions", id, turnId, questions:[{id, question, choices, recommended?, context?, item?, itemId?}]}
+//                                                       -- ask_questions / ask_question fired during turn `turnId`
 //        {type:"message_done", id, text, sessionId, isError, inputTokens, usage, durationMs, contextTokens,
 //         contextWindow}                                -- contextTokens (= inputTokens) = the last model call's
 //                                                          input (incl. cache reads/creation); usage = the turn's
@@ -306,45 +307,80 @@ function chatTools(s) {
     },
   );
 
+  const HANDOFF_ARG = z
+    .string()
+    .optional()
+    .describe("Only in the handoff gap interview: the exact checklist item this question is about. Omit otherwise.");
+  /** Shows `qs` as one question form; ask_question and ask_questions both end here. */
+  const askQuestions = (qs) => {
+    {
+      const lim = hitLimit("any");
+      if (lim) return lim;
+    }
+    // turnId ties the form to the reply it belongs to, so the UI shows it once, as the question
+    // form, instead of also showing any streamed text for that turn. `item` tells the UI where the
+    // answer goes (handoff gap interview: Tech card or Project decisions card).
+    // Seen live: the local model fills handoff_item in a plain card grill, which sent the answer to
+    // the Project decisions card instead of the card. It counts only inside a gap interview; item_id
+    // likewise only inside a checklist grill.
+    const thread = threadOf(s.key);
+    const gap = gapThreads.has(thread);
+    const checklist = checklistThreads.has(thread);
+    const questions = qs.map((q, i) => ({
+      id: q.id || `q${i + 1}`,
+      question: q.question,
+      choices: q.choices,
+      // A recommended value that is not one of the choices is dropped rather than failing the turn.
+      ...(q.recommended && q.choices.includes(q.recommended) ? { recommended: q.recommended } : {}),
+      ...(q.context ? { context: q.context } : {}),
+      ...(gap && q.handoff_item ? { item: q.handoff_item } : {}),
+      ...(checklist && q.item_id ? { itemId: q.item_id } : {}),
+    }));
+    send({ type: "questions", id: `q${++reqSeq}`, turnId: tid(), questions });
+    // Anything the model writes after asking is noise ("the question is above"): drop it, so the
+    // turn is the question form and nothing else.
+    if (T()) T().questionAsked = true;
+    // Observed live: without a firm stop here the model sometimes kept going and wrote a guessed
+    // "[Answer] ..." itself. The real answer only ever comes as the user's next message.
+    return {
+      content: [
+        {
+          type: "text",
+          text: "The questions are now shown to the user as buttons. END YOUR TURN NOW: write nothing more, do not guess or state an answer. The user's real answers will arrive as their next message.",
+        },
+      ],
+    };
+  };
+  // Kept for older threads and models that still call it: a batch of one.
   const askQuestionTool = tool(
     "ask_question",
-    "Ask the user exactly one multiple-choice question (used for /grill-me). Present 2-5 short, neutral, concrete " +
-      "choices. The question is shown to the user as a card with buttons, so do not also write it as text. Wait for " +
-      "their answer as the next message before asking another question.",
+    "Ask the user exactly one multiple-choice question. Prefer ask_questions. Present 2-5 short, neutral, concrete " +
+      "choices. The question is shown to the user with buttons, so do not also write it as text.",
+    { question: z.string(), choices: z.array(z.string()).min(2).max(5), handoff_item: HANDOFF_ARG },
+    async (args) => askQuestions([args]),
+  );
+  const askQuestionsTool = tool(
+    "ask_questions",
+    "Ask the user 1-4 multiple-choice questions at once (used for /grill-me), shown as one form with buttons, so do " +
+      "not also write them as text. Each has 2-5 short, neutral, concrete choices. Wait for the answers as the next " +
+      "message before asking more.",
     {
-      question: z.string(),
-      choices: z.array(z.string()).min(2).max(5),
-      handoff_item: z
-        .string()
-        .optional()
-        .describe("Only in the handoff gap interview: the exact checklist item this question is about. Omit otherwise."),
+      questions: z
+        .array(
+          z.object({
+            id: z.string().optional(),
+            question: z.string(),
+            choices: z.array(z.string()).min(2).max(5),
+            recommended: z.string().optional().describe("Your recommended choice; must equal one of the choices"),
+            context: z.string().optional().describe("Short background for the question, shown under it"),
+            item_id: z.string().optional().describe("Only in /grill-me checklist: the [item_id] this question answers. Omit otherwise."),
+            handoff_item: HANDOFF_ARG,
+          }),
+        )
+        .min(1)
+        .max(4),
     },
-    async (args) => {
-      {
-        const lim = hitLimit("any");
-        if (lim) return lim;
-      }
-      // turnId ties the question to the reply it belongs to, so the UI shows it once, as the
-      // question card, instead of also showing any streamed text for that turn. `item` tells the UI
-      // where the answer goes (handoff gap interview: Tech card or Project decisions card).
-      // Seen live: the local model fills handoff_item in a plain card grill, which sent the answer to
-      // the Project decisions card instead of the card. It counts only inside a gap interview.
-      const item = gapThreads.has(threadOf(s.key)) ? args.handoff_item || undefined : undefined;
-      send({ type: "question", id: `q${++reqSeq}`, turnId: tid(), question: args.question, choices: args.choices, item });
-      // Anything the model writes after asking is noise ("the question is above"): drop it, so the
-      // turn is the question card and nothing else.
-      if (T()) T().questionAsked = true;
-      // Observed live: without a firm stop here the model sometimes kept going and wrote a guessed
-      // "[Answer] ..." itself. The real answer only ever comes as the user's next message.
-      return {
-        content: [
-          {
-            type: "text",
-            text: "The question is now shown to the user as buttons. END YOUR TURN NOW: write nothing more, do not guess or state an answer. The user's real answer will arrive as their next message.",
-          },
-        ],
-      };
-    },
+    async (args) => askQuestions(args.questions),
   );
 
   const readCardTool = tool(
@@ -641,7 +677,7 @@ function chatTools(s) {
     },
   );
 
-  return [createCardTool, askQuestionTool, readCardTool, proposeLinkTool, mergeCardsTool, viewAttachmentTool, proposeEditTool, rememberTool, forgetTool, listTreeTool, proposeOrganizeTool, escalateArtifactTool, proposeArtifactTool];
+  return [createCardTool, askQuestionTool, askQuestionsTool, readCardTool, proposeLinkTool, mergeCardsTool, viewAttachmentTool, proposeEditTool, rememberTool, forgetTool, listTreeTool, proposeOrganizeTool, escalateArtifactTool, proposeArtifactTool];
 }
 
 // A fresh MCP server instance per session: an SDK server object binds to one transport.
@@ -661,6 +697,11 @@ const GRILL_ITEMS = [
   "what makes it different",
   "biggest risk or open question",
 ];
+
+const BATCH_RULE =
+  "Ask 3-4 questions per turn with ask_questions (fewer only when fewer branches are open); group questions that " +
+  "don't depend on each other; hold dependent ones for the next turn; mark your recommended choice; put any " +
+  "background in context, not in the question.";
 
 const SYSTEM_PROMPT = [
   "You are Claude, embedded in Dreamer, a desktop app for collecting and developing game ideas.",
@@ -689,11 +730,13 @@ const SYSTEM_PROMPT = [
     "say web access is off and that they can turn it on with the globe button; do not retry. Cite the pages you used.",
   "/merge: read each listed card, then call merge_cards exactly once with all their ids and one synthesized " +
     "title and body. Do not call create_card. Then reply with exactly: Proposed a merged card.",
-  "/grill-me: interview the user about the selected card, one multiple-choice question per turn, working through " +
+  "/grill-me: interview the user about the selected card with multiple-choice questions, working through " +
     "these items in order and skipping any the card's notes already answer: " +
     GRILL_ITEMS.map((x, i) => `${i + 1}. ${x}`).join("; ") +
-    ". On each turn, call ask_question exactly once and write NO other text: no preamble, no restating the question, " +
-    "no reaction to the previous answer, no praise or encouragement, no commentary on the option the user chose. " +
+    ". " +
+    BATCH_RULE +
+    " On each turn, call ask_questions exactly once and write NO other text: no preamble, no restating the questions, " +
+    "no reaction to the previous answers, no praise or encouragement, no commentary on the options the user chose. " +
     "Questions and options are neutral and specific (2-5 options). Never ask a question listed in [Answered so far] " +
     "again; move to the next open branch, or say the grill is done. The user's answers are recorded in the card's " +
     "notes automatically. When every item has been covered, do not ask another question and do not write a summary " +
@@ -702,11 +745,18 @@ const SYSTEM_PROMPT = [
     "section per item, built only from the user's answers and the card's notes. Then reply with exactly: " +
     "Proposed a spec card.",
   "/grill-me handoff: the message lists project gap items (from the handoff gap check) with notes. Interview the " +
-    "user about those items only, in the given order, one multiple-choice question per turn, with the same rules " +
-    "as /grill-me (call ask_question once, no other text). On every ask_question set handoff_item to the exact item " +
+    "user about those items only, in the given order, with the same rules as /grill-me (" +
+    BATCH_RULE +
+    " Call ask_questions once, no other text). On every question set handoff_item to the exact item " +
     "name. Ask one or two questions per item, enough to settle it. The app records each answer on the Tech card " +
     "(for 'platform & tech') or on the 'Project decisions' card. Do not propose cards. When every listed item is " +
     "settled, reply with exactly: Gaps covered. Generate the pack again from Summarize.",
+  "/grill-me checklist: the message lists the card's open questions as `[item_id] question — context`. Work through " +
+    "them in the given order, 3-4 per turn, calling ask_questions once per turn with no other text: one entry per " +
+    "listed item with item_id set to its id, question = the item's question (rephrased only if needed to be " +
+    "answerable by a choice), 2-5 concrete choices drawn from the context and the project, recommended set, any " +
+    "background in context. Never ask an item that was answered or skipped earlier in the thread. When all are " +
+    "asked, reply with exactly: All open questions covered. No cards, no spec.",
   "/related: from the [Related cards] block, call propose_link for the 1-5 strongest connections to the selected card, " +
     "each with a short label and reason, and list them briefly.",
   "'Give me 3 takes': propose three distinctly different create_card calls.",
@@ -826,7 +876,8 @@ function toolLabelBase(name, input, r) {
     case "trash":
       return "Moved a card to Trash";
     case "ask_question":
-      return "Asked a question";
+    case "ask_questions":
+      return "Asked questions";
     case "remember":
     case "forget":
     case "memory_update":
@@ -991,9 +1042,10 @@ function makeTracker(out, label = "") {
           dlog(`${label} tool_result ${s.tool} call#${s.call} bytes=${sizeOfContent(b.content)} text=${txt.length}${Array.isArray(b.content) && b.content.some((x) => x?.type === "image") ? " +image" : ""}${b.is_error ? " (error)" : ""}`);
           // Per-call diagnostics: what was asked, what came back, whether a Dreamer guard answered, and where it sits relative to ask_question.
           const guard = GUARD_RE.test(txt);
-          const pos = asked ? "after_ask" : s.tool === "ask_question" && !b.is_error ? "ask" : "before_ask";
+          const ask = s.tool === "ask_question" || s.tool === "ask_questions";
+          const pos = asked ? "after_ask" : ask && !b.is_error ? "ask" : "before_ask";
           dlog(`${label} tool_call #${s.call} name=${s.tool} pos=${pos} guard=${guard ? "yes" : "no"} error=${b.is_error ? "yes" : "no"} args=${JSON.stringify(clip(JSON.stringify(s.input ?? {}), 300))} result=${JSON.stringify(clip(txt, 300))}`);
-          if (s.tool === "ask_question" && !b.is_error && !guard) asked = true;
+          if (ask && !b.is_error && !guard) asked = true;
           if (b.is_error && !guard) realErrors++;
           else if (realErrors > 0 && !guard) repaired = true;
           s.status = b.is_error ? "error" : "done";
@@ -1072,8 +1124,10 @@ const MAX_LIVE = 3;
 const AUTO_COMPACT_TOKENS = Number(process.env.DREAMER_COMPACT_TOKENS) || 60000;
 const sessions = new Map();
 let sessionSeq = 0;
-/** Threads in a handoff gap interview (ask_question's handoff_item counts only there). */
+/** Threads in a handoff gap interview (ask_questions' handoff_item counts only there). */
 const gapThreads = new Set();
+/** Threads in a checklist grill (ask_questions' item_id counts only there). */
+const checklistThreads = new Set();
 const threadOf = (key) => String(key).replace(/#[^#]*$/, "");
 /** Claude Code's built-in tools: a local session never offers them (a 9B model hallucinates Write, Bash, Task…). */
 const BUILTIN_TOOLS = ["Agent", "Task", "Bash", "BashOutput", "KillShell", "Edit", "MultiEdit", "Write", "Read", "Glob", "Grep", "LS", "NotebookEdit", "NotebookRead", "TodoWrite", "WebFetch", "WebSearch", "ExitPlanMode", "SlashCommand", "Skill", "ListMcpResourcesTool", "ReadMcpResourceTool"];
@@ -1085,6 +1139,7 @@ const BASE_OPTIONS = {
   allowedTools: [
     "mcp__dreamer__create_card",
     "mcp__dreamer__ask_question",
+    "mcp__dreamer__ask_questions",
     "mcp__dreamer__read_card",
     "mcp__dreamer__propose_link",
     "mcp__dreamer__merge_cards",
@@ -1816,7 +1871,7 @@ const SUMMARY_MS = { local: 150000, claude: 120000 };
 const RECAP_MS = 60000;
 const HEARTBEAT_MS = 10000;
 /** Tools whose success means the turn did its job even without text (no local retry after them: no duplicates). */
-const ACTION_TOOLS = new Set(["create_card", "ask_question", "propose_link", "merge_cards", "propose_edit", "propose_organize", "remember", "forget", "escalate_artifact", "propose_artifact"]);
+const ACTION_TOOLS = new Set(["create_card", "ask_question", "ask_questions", "propose_link", "merge_cards", "propose_edit", "propose_organize", "remember", "forget", "escalate_artifact", "propose_artifact"]);
 
 function newTurn(msg, { local, artifact, model }) {
   const now = Date.now();
@@ -2961,6 +3016,9 @@ async function handleUserMessage(msg) {
   const thread = msg.thread || "default";
   if (/^\/grill-me handoff/.test(msg.text ?? "")) gapThreads.add(thread);
   else if (/^\//.test(msg.text ?? "")) gapThreads.delete(thread);
+  // Likewise a checklist grill.
+  if (/^\/grill-me checklist/.test(msg.text ?? "")) checklistThreads.add(thread);
+  else if (/^\//.test(msg.text ?? "")) checklistThreads.delete(thread);
   // An escalation always starts fresh (a leftover from an interrupted one is dropped).
   if (escalated && sessions.get(key)) closeSession(sessions.get(key));
   let s = sessions.get(key);

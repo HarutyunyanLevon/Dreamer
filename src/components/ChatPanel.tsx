@@ -1,5 +1,6 @@
 import { Fragment, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { api, TECH_GAP_ITEM, type Card } from "../api";
+import { openQuestions } from "./kinds";
 import { useClaudeChat, type ChatMessage } from "../state/useClaudeChat";
 import type { Workspace } from "../state/useWorkspace";
 import { ClaudeSetup, needsSetup } from "./ClaudeSetup";
@@ -304,14 +305,24 @@ export function ChatPanel({ ws, panels }: { ws: Workspace; panels: Pick<ReturnTy
     ws.appendToRoleCard(item.trim().toLowerCase() === TECH_GAP_ITEM ? "tech" : "decisions", `**${item}:** ${question}
 **A:** ${choice}`, "record answer");
 
-  const answer = (m: ChatMessage, choice: string) => {
-    chat.answerQuestion(m.id, choice);
-    if (m.question?.item) {
-      void recordGapAnswer(m.question.item, m.question.question, choice);
-    } else if (contextCard) {
-      void ws.updateCard(contextCard.id, { body: `${contextCard.body}${contextCard.body ? "\n\n" : ""}**Q:** ${m.question!.question}\n**A:** ${choice}` });
+  /** A sent question form: one reply message, and each answer recorded where its question points. */
+  const answer = (m: ChatMessage, answers: Record<string, string | undefined>) => {
+    const qs = m.questions ?? [];
+    chat.answerQuestions(m.id, answers);
+    const got = qs.flatMap((q) => (answers[q.id] ? [{ q, a: answers[q.id]! }] : []));
+    for (const { q, a } of got) if (q.item && !q.itemId) void recordGapAnswer(q.item, q.question, a);
+    const card = contextCard && ws.data?.cards.find((c) => c.id === contextCard.id);
+    const byItem = new Map(got.flatMap(({ q, a }) => (q.itemId ? [[q.itemId, a] as const] : [])));
+    const plain = got.filter(({ q }) => !q.item && !q.itemId);
+    if (card && byItem.size) {
+      // One updateCard = one undo step (on the cc-questions card it also writes QUESTIONS.md back).
+      void ws.updateCard(card.id, { items: (card.items ?? []).map((i) => (byItem.has(i.id) ? { ...i, answer: byItem.get(i.id) } : i)) });
+    } else if (card && plain.length) {
+      const add = plain.map(({ q, a }) => `**Q:** ${q.question}\n**A:** ${a}`).join("\n\n");
+      void ws.updateCard(card.id, { body: `${card.body}${card.body ? "\n\n" : ""}${add}` });
     }
-    send(choice, { answering: true, question: m.question!.question });
+    const text = qs.map((q) => `Q: ${q.question}\nA: ${answers[q.id] ?? "(skipped)"}`).join("\n");
+    send(text, { answering: true, question: qs.map((q) => q.question).join("\n") });
   };
 
   const canAct = !chat.busy && !!ws.active;
@@ -321,7 +332,7 @@ export function ChatPanel({ ws, panels }: { ws: Workspace; panels: Pick<ReturnTy
   const needCard = contextCard ? undefined : { short: "Open a card first", long: "Select a card on the canvas (or a recent one in the thread menu) to open its own thread, then run this." };
   const summarize = () => ws.openHandoff(contextCard ? { kind: "card", id: contextCard.id } : { kind: "project" });
   const actions: ChatAction[] = [
-    { id: "grill", label: "/grill-me", desc: "Question this card or the project until it's solid", group, command: "/grill-me", run: () => send("/grill-me") },
+    { id: "grill", label: "/grill-me", desc: "Question this card or the project until it's solid", group, command: "/grill-me", run: () => (contextCard?.kind === "checklist" && openQuestions(contextCard.items) > 0 ? ws.startChecklistGrill(contextCard.id) : send("/grill-me")) },
     { id: "related", label: "/related", desc: "Find and link cards related to this one", group, command: "/related", disabled: needCard, run: () => send("/related") },
     { id: "takes", label: "Give me 3 takes", desc: "Three different directions for this card", group, run: () => send("Give me 3 takes") },
     ...(contextCard
@@ -479,7 +490,7 @@ export function ChatPanel({ ws, panels }: { ws: Workspace; panels: Pick<ReturnTy
           <ChatBubble
             key={m.id}
             message={m}
-            onAnswer={(choice) => answer(m, choice)}
+            onAnswer={(answers) => answer(m, answers)}
             onOpenCard={(id, project) => void ws.focusCard(id, project)}
             activeProject={ws.active}
             cardTitle={(id) => ws.data?.cards.find((c) => c.id === id)?.title}
@@ -698,7 +709,7 @@ function ChatBubble({
   onStop: () => void;
   onRetryStalled: () => void;
   message: ChatMessage;
-  onAnswer: (choice: string) => void;
+  onAnswer: (answers: Record<string, string | undefined>) => void;
   onOpenCard: (id: string, project: string) => void;
   activeProject: string | null;
   cardTitle: (id: string) => string | undefined;
@@ -742,7 +753,7 @@ function ChatBubble({
   const localFailed = message.role === "claude" && !live && message.backend === "local" && (!!message.fallback || (message.isError && !message.failure));
   // A turn that still produced something usable (text, a question card, a ghost card, a change)
   // shows a small grey note; the red banner is only for a turn with nothing to show.
-  const usable = !!message.text?.trim() || !!message.question || !!message.organize || !!message.proposals?.length || !!message.steps?.some((s) => s.kind === "tool" && s.status === "done" && USABLE_TOOLS.has(s.tool ?? ""));
+  const usable = !!message.text?.trim() || !!message.questions || !!message.organize || !!message.proposals?.length || !!message.steps?.some((s) => s.kind === "tool" && s.status === "done" && USABLE_TOOLS.has(s.tool ?? ""));
   const retryClaude = localFailed && usable ? (
     <StepFailedNote message={message} retryDisabled={retryDisabled} onRetryWithClaude={onRetryWithClaude} />
   ) : localFailed && (
@@ -801,20 +812,11 @@ function ChatBubble({
       </button>
     </div>
   );
-  if (message.question) {
+  if (message.questions) {
     return (
       <>
       {activity}
-      <div className="msg claude">
-        {message.question.question}
-        <div className="chips question-chips">
-          {message.question.choices.map((c) => (
-            <button key={c} type="button" className={"chip" + (message.question!.answered === c ? " on" : "")} disabled={!!message.question!.answered} onClick={() => onAnswer(c)}>
-              {c}
-            </button>
-          ))}
-        </div>
-      </div>
+      <QuestionForm message={message} onSend={onAnswer} />
       {message.creditAsk && <CreditAsk ask={message.creditAsk} live={!!live} onAnswer={onCredit} />}
       {message.spritecookNote && message.role === "claude" && (
         <div className="chat-failure sc-note" role="note">
@@ -937,6 +939,90 @@ function ChatBubble({
 }
 
 /** "Generate N more (~X credits)?" under a paused artifact turn. */
+const OTHER = "\u0000other";
+
+/**
+ * A question form: every question with its chips (recommended first), "Other…" and Skip, sent
+ * as one reply. Read-only once sent, showing what was chosen.
+ */
+function QuestionForm({ message, onSend }: { message: ChatMessage; onSend: (answers: Record<string, string | undefined>) => void }) {
+  const qs = message.questions!;
+  const done = !!message.answered;
+  const [pick, setPick] = useState<Record<string, string | undefined>>({});
+  const [other, setOther] = useState<Record<string, string>>({});
+  const [skip, setSkip] = useState<Record<string, boolean>>({});
+  const value = (id: string) => (pick[id] === OTHER ? other[id]?.trim() || undefined : pick[id]);
+  const ready = qs.every((q) => skip[q.id] || !!value(q.id));
+  const submit = () => {
+    if (!done && ready) onSend(Object.fromEntries(qs.map((q) => [q.id, skip[q.id] ? undefined : value(q.id)])));
+  };
+  const choose = (id: string, c: string | undefined) => {
+    setPick((p) => ({ ...p, [id]: c }));
+    setSkip((s) => ({ ...s, [id]: false }));
+  };
+  return (
+    <div
+      className="msg claude question-form"
+      onKeyDown={(e) => {
+        if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+          e.preventDefault();
+          submit();
+        }
+      }}
+    >
+      {qs.map((q) => {
+        const choices = q.recommended ? [q.recommended, ...q.choices.filter((c) => c !== q.recommended)] : q.choices;
+        // Sent: the chosen chip, or the Other text; live: this form's picks.
+        const chosen = done ? (q.answer && choices.includes(q.answer) ? q.answer : q.answer ? OTHER : undefined) : pick[q.id];
+        const skipped = done ? !!q.skipped : !!skip[q.id];
+        return (
+          <fieldset key={q.id} className={"question" + (skipped ? " skipped" : "")} disabled={done}>
+            <legend>{q.question}</legend>
+            {q.context && <div className="question-context">{q.context}</div>}
+            <div className="chips question-chips" role="radiogroup" aria-label={q.question}>
+              {choices.map((c) => (
+                <button key={c} type="button" role="radio" aria-checked={chosen === c} className={"chip" + (chosen === c ? " on" : "")} onClick={() => choose(q.id, c)}>
+                  {c}
+                  {c === q.recommended && <span className="rec-tag">Recommended</span>}
+                </button>
+              ))}
+              <button type="button" role="radio" aria-checked={chosen === OTHER} className={"chip" + (chosen === OTHER ? " on" : "")} onClick={() => choose(q.id, OTHER)}>
+                {done && chosen === OTHER ? q.answer : "Other…"}
+              </button>
+              {!done && (
+                <button type="button" className="link-btn question-skip" aria-pressed={skipped} onClick={() => setSkip((s) => ({ ...s, [q.id]: !s[q.id] }))}>
+                  {skipped ? "Skipped" : "Skip"}
+                </button>
+              )}
+              {done && skipped && <span className="question-context">Skipped</span>}
+            </div>
+            {!done && chosen === OTHER && (
+              <input
+                className="question-other"
+                autoFocus
+                aria-label="Your answer"
+                value={other[q.id] ?? ""}
+                onChange={(e) => setOther((o) => ({ ...o, [q.id]: e.target.value }))}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !e.ctrlKey && !e.metaKey) {
+                    e.preventDefault();
+                    choose(q.id, OTHER);
+                  }
+                }}
+              />
+            )}
+          </fieldset>
+        );
+      })}
+      {!done && (
+        <button type="button" className="btn primary question-send" disabled={!ready} onClick={submit} title="Send the answers (Ctrl+Enter)">
+          Send
+        </button>
+      )}
+    </div>
+  );
+}
+
 function CreditAsk({ ask, live, onAnswer }: { ask: NonNullable<ChatMessage["creditAsk"]>; live: boolean; onAnswer: (allow: boolean) => void }) {
   if (ask.answered) {
     return <div className="credit-ask done">{ask.answered === "yes" ? `Allowed ${ask.more} more paid SpriteCook calls.` : "Stopped at the credit cap."}</div>;
@@ -983,7 +1069,7 @@ function BalanceChip({ onSettings }: { onSettings: () => void }) {
 }
 
 /** Tools whose success is visible output of a turn (see `usable` above). */
-const USABLE_TOOLS = new Set(["create_card", "ask_question", "propose_link", "merge_cards", "propose_edit", "propose_organize", "propose_artifact", "escalate_artifact", "remember", "forget"]);
+const USABLE_TOOLS = new Set(["create_card", "ask_question", "ask_questions", "propose_link", "merge_cards", "propose_edit", "propose_organize", "propose_artifact", "escalate_artifact", "remember", "forget"]);
 
 /** "One step failed · Details", with "Retry with Claude" in a ⋯ menu: the turn's output stands. */
 function StepFailedNote({ message, retryDisabled, onRetryWithClaude }: { message: ChatMessage; retryDisabled: boolean; onRetryWithClaude: () => void }) {

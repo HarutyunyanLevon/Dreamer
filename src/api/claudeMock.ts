@@ -162,11 +162,20 @@ export function createClaudeMockApi(): ClaudeApi {
       if (/\/grill-me/i.test(text)) {
         at(600, () => step("g1", "Reading a card", "running", { tool: "read_card" }));
         at(1300, () => step("g1", 'Read "Night market"', "done", { tool: "read_card" }));
-        at(1500, () => step("g2", "Asked a question", "running", { tool: "ask_question" }));
+        // /grill-me checklist: one question per listed `[item_id] question — context` line (up to 4).
+        const items = [...text.matchAll(/^\[([^\]]+)\] (.+?)(?: — (.+))?$/gm)].slice(0, 4);
+        const questions = items.length
+          ? items.map((m, i) => ({ id: `q${i + 1}`, itemId: m[1], question: m[2], choices: ["Yes", "No", "Later"], recommended: "Yes", ...(m[3] ? { context: m[3] } : {}) }))
+          : [
+              { id: "q1", question: "What's the one feeling this idea should give a player in its first minute?", choices: ["Awe", "Tension", "Mischief", "Cozy calm"], recommended: "Awe" },
+              { id: "q2", question: "Who is the target player?", choices: ["Casual", "Core", "Kids"], context: "Shapes difficulty and session length." },
+              { id: "q3", question: "Which platform comes first?", choices: ["PC", "Mobile", "Console"] },
+            ];
+        at(1500, () => step("g2", "Asked questions", "running", { tool: "ask_questions" }));
         at(1700, () => {
-          step("g2", "Asked a question", "done", { tool: "ask_question" });
+          step("g2", "Asked questions", "done", { tool: "ask_questions" });
           call(600, 10000, 90);
-          emit({ type: "question", id, turnId: id, question: "What's the one feeling this idea should give a player in its first minute?", choices: ["Awe", "Tension", "Mischief", "Cozy calm"] });
+          emit({ type: "questions", id, turnId: id, questions });
         });
         at(1900, () => done(""));
         return;

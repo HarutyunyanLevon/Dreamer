@@ -149,8 +149,8 @@ export type ClaudeEvent =
   | ({ type: "usage"; id: string; phase?: "compact" } & TokenUsage)
   /** The memory pass after turn `id` is running (`active`) or ended; input/output tokens so far. */
   | { type: "memory_progress"; id: string; active: boolean; input: number; output: number }
-  /** `item`: the handoff gap item this question settles (the gap interview only). */
-  | { type: "question"; id: string; turnId?: string | null; question: string; choices: string[]; item?: string }
+  /** A question form (ask_questions; ask_question is a form of one). `item` / `itemId`: only in a gap interview / checklist grill. */
+  | { type: "questions"; id: string; turnId?: string | null; questions: { id: string; question: string; choices: string[]; recommended?: string; context?: string; item?: string; itemId?: string }[] }
   | { type: "message_done"; id: string; text: string; sessionId?: string; isError?: boolean; inputTokens?: number; usage?: TokenUsage; durationMs?: number; contextTokens?: number; contextWindow?: number; model?: string; tier?: ModelTier; retried?: boolean; retriedFrom?: string; backend?: Backend; escalated?: boolean; fallback?: LocalFallback; endReason?: EndReason; attempt?: number; localRetried?: boolean; artifact?: { id: string; credits: number; paidCalls: number; jobs: string[]; spritecook: boolean } }
   /** Sent before a turn starts: where it runs. `note`: why the local model wasn't usable (reason "unavailable"). */
   | { type: "route"; id: string; backend: Backend; model: string; escalated: boolean; reason?: RouteReason | null; note?: string | null; canRestart?: boolean }

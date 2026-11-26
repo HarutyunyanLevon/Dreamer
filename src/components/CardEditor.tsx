@@ -10,7 +10,7 @@ import { IconClose, IconFork, IconTrash } from "./Icons";
 import { ScrollArea } from "../ui/Scroll";
 import { asUrl } from "../util/media";
 import { AttachmentsEditor, imageFiles } from "./Attachments";
-import { ChecklistBody, hasStage } from "./kinds";
+import { ChecklistBody, hasStage, openQuestions } from "./kinds";
 import { BuildTab } from "./BuildTab";
 import { needsRebuild } from "../util/build";
 
@@ -208,6 +208,11 @@ export function CardEditor({
 
         {card.kind === "checklist" && (
           <div className="editor-row checklist-row">
+            {openQuestions(card.items) > 0 && (
+              <button type="button" className="btn" onClick={() => ws.startChecklistGrill(card.id)}>
+                Answer with Claude
+              </button>
+            )}
             <ChecklistBody
               card={card}
               roomy

@@ -1727,6 +1727,24 @@ export function useWorkspace() {
    */
   const requestChat = useCallback((r: Omit<ChatRequest, "n">) => setChatRequest({ ...r, n: ++chatSeq.current }), []);
 
+  /** "Answer with Claude": a quiet /grill-me checklist turn in the card's thread over its open questions. */
+  const startChecklistGrill = useCallback(
+    (cardId: string) => {
+      const card = dataRef.current?.cards.find((c) => c.id === cardId);
+      const gone = new Set(card?.dismissed_sources ?? []);
+      const open = (card?.items ?? []).filter((i) => i.question && !i.answer?.trim() && !(i.source && gone.has(i.source)));
+      if (!card || !open.length) return;
+      const lines = open.map((i) => {
+        const p = parseItem(i.text);
+        return `[${i.id}] ${p.body}${p.context ? ` — ${p.context}` : ""}`;
+      });
+      setContextCardId(cardId);
+      requestChat({ thread: cardId, send: true, quiet: true, text: `/grill-me checklist\n${lines.join("\n")}`, display: `/grill-me checklist (${open.length} open)` });
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [requestChat],
+  );
+
   // ----- artifacts -----
 
   /** Runs an artifact turn on Claude in the artifact's own thread (its chat opens there). */
@@ -1943,6 +1961,7 @@ export function useWorkspace() {
     dismissAllSuggestions,
     chatRequest,
     requestChat,
+    startChecklistGrill,
     createArtifact,
     runArtifact,
     clearChatRequest: () => setChatRequest(null),

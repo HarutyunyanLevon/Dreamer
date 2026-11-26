@@ -312,8 +312,8 @@ pub struct TurnResult {
     pub foreign_events: usize,
     pub plan: Option<Value>,
     pub question: bool,
-    /// Every question card this turn put up (ask_question calls that reached the UI), in order.
-    pub questions: Vec<(String, Vec<String>)>,
+    /// Every question form this turn put up (ask_questions / ask_question calls that reached the UI), in order.
+    pub questions: Vec<Vec<(String, Vec<String>)>>,
     #[serde(skip)]
     pub text: String,
 }
@@ -510,11 +510,14 @@ impl Driver {
                     }
                 }
                 "compacted" => r.compacted = true,
-                "question" => {
+                "questions" => {
                     r.question = true;
-                    let q = v.get("question").and_then(Value::as_str).unwrap_or_default().to_string();
-                    let c = v.get("choices").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect()).unwrap_or_default();
-                    r.questions.push((q, c));
+                    let form = v.get("questions").and_then(Value::as_array).into_iter().flatten().map(|x| {
+                        let q = x.get("question").and_then(Value::as_str).unwrap_or_default().to_string();
+                        let c = x.get("choices").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect()).unwrap_or_default();
+                        (q, c)
+                    });
+                    r.questions.push(form.collect());
                 }
                 "organize_proposal" => r.plan = v.get("plan").cloned(),
                 "model_note" => {
@@ -595,21 +598,24 @@ impl Driver {
         }
         self.ended.insert(id.clone());
         let t = self.threads.entry(o.thread.clone()).or_default();
-        // Like the chat panel: the reply shows the last question card the turn put up.
+        // Like the chat panel: the reply shows the last question form the turn put up.
         let mut m = json!({ "id": id, "role": "claude", "text": r.text, "isError": !matches!(r.end, End::Done) });
-        if let Some((q, c)) = r.questions.last() {
+        if let Some(form) = r.questions.last() {
             m["text"] = json!("");
-            m["question"] = json!({ "question": q, "choices": c });
+            m["questions"] = form.iter().enumerate().map(|(i, (q, c))| json!({ "id": format!("q{}", i + 1), "question": q, "choices": c })).collect();
         }
         t.messages.push(m);
         self.save_thread(&o.thread);
         r
     }
 
-    /// The user picked `choice` on the thread's last question card (the chat panel's answerQuestion).
-    fn mark_answered(&mut self, thread: &str, choice: &str) {
-        if let Some(m) = self.threads.get_mut(thread).and_then(|t| t.messages.iter_mut().rev().find(|m| m.get("question").is_some())) {
-            m["question"]["answered"] = json!(choice);
+    /// The user sent `answers` (in question order) on the thread's last question form (the chat panel's answerQuestions).
+    fn mark_answered(&mut self, thread: &str, answers: &[String]) {
+        if let Some(m) = self.threads.get_mut(thread).and_then(|t| t.messages.iter_mut().rev().find(|m| m.get("questions").is_some())) {
+            m["answered"] = json!(true);
+            for (q, a) in m["questions"].as_array_mut().into_iter().flatten().zip(answers) {
+                q["answer"] = json!(a);
+            }
         }
         self.save_thread(thread);
     }
@@ -980,7 +986,7 @@ fn s9(d: &mut Driver, run: usize, card: Option<&str>, dump: &Path) -> RunRecord 
             problems.push(format!("turn {k}: {:?} fallback={:?}", t.end, t.fallback));
         }
         if t.questions.len() > 1 {
-            problems.push(format!("turn {k}: {} question cards", t.questions.len()));
+            problems.push(format!("turn {k}: {} question forms", t.questions.len()));
         }
         // What the model saw in this turn's last request: the previous question and its answer.
         if let Some((q, a)) = &prev {
@@ -994,29 +1000,36 @@ fn s9(d: &mut Driver, run: usize, card: Option<&str>, dump: &Path) -> RunRecord 
         }
         let shown = t.questions.last().cloned();
         turns.push(t);
-        let Some((q, choices)) = shown else {
+        let Some(form) = shown.filter(|f| !f.is_empty()) else {
             if k < 5 {
                 problems.push(format!("turn {k}: no question"));
             }
             break;
         };
-        if let Some(old) = asked.iter().find(|x| is_repeat(x, &q)) {
-            problems.push(format!("turn {k}: repeated \"{old}\""));
+        for (q, _) in &form {
+            if let Some(old) = asked.iter().find(|x| is_repeat(x, q)) {
+                problems.push(format!("turn {k}: repeated \"{old}\""));
+            }
+            asked.push(q.clone());
         }
-        asked.push(q.clone());
         if k == 5 {
             break;
         }
-        let choice = choices.first().cloned().unwrap_or_else(|| "Yes".into());
-        d.mark_answered(id, &choice);
-        body = format!("{body}{}**Q:** {q}\n**A:** {choice}", if body.is_empty() { "" } else { "\n\n" });
+        // Like the chat panel's Send: the first choice of every question, one Q:/A: reply, all pairs in the notes.
+        let picks: Vec<String> = form.iter().map(|(_, c)| c.first().cloned().unwrap_or_else(|| "Yes".into())).collect();
+        d.mark_answered(id, &picks);
+        let pairs: Vec<String> = form.iter().zip(&picks).map(|((q, _), a)| format!("**Q:** {q}\n**A:** {a}")).collect();
+        body = format!("{body}{}{}", if body.is_empty() { "" } else { "\n\n" }, pairs.join("\n\n"));
         let _ = d.state().ws.lock().unwrap().update_card(&d.slug, id, crate::model::CardPatch { body: Some(body.clone()), ..Default::default() });
-        o = TurnOpts { thread: id.into(), text: choice.clone(), context: Some(ctx(&body)), question: Some(q.clone()), ..Default::default() };
-        prev = Some((q, choice));
+        let text = form.iter().zip(&picks).map(|((q, _), a)| format!("Q: {q}\nA: {a}")).collect::<Vec<_>>().join("\n");
+        let question = form.iter().map(|(q, _)| q.as_str()).collect::<Vec<_>>().join("\n");
+        o = TurnOpts { thread: id.into(), text, context: Some(ctx(&body)), question: Some(question), ..Default::default() };
+        // The next prompt must hold this form's last question and its answer.
+        prev = form.last().map(|(q, _)| (q.clone(), picks.last().cloned().unwrap_or_default()));
     }
     let ok = problems.is_empty() && turns.len() == 6;
     let cards: Vec<usize> = turns.iter().map(|t| t.questions.len()).collect();
-    rec("S9", run, ok, format!("{} turns, question cards per turn {cards:?}; {}", turns.len(), if problems.is_empty() { "clean".into() } else { problems.join("; ") }), turns)
+    rec("S9", run, ok, format!("{} turns, question forms per turn {cards:?}; {}", turns.len(), if problems.is_empty() { "clean".into() } else { problems.join("; ") }), turns)
 }
 
 /// Last model request of a turn (the sidecar's prompt dump), as one searchable string.

@@ -657,14 +657,14 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
   const clickRef = useRef(onCardClick);
   clickRef.current = onCardClick;
   const onOpenCard = useCallback((c: Card, additive?: boolean) => clickRef.current(c, additive), []);
-  const { moveCard, resizeCard, flushCanvas, bringToFront, updateCard, deleteCard, keepGhostCard, deleteChecklistItems } = ws;
+  const { moveCard, resizeCard, flushCanvas, bringToFront, updateCard, deleteCard, keepGhostCard, deleteChecklistItems, startChecklistGrill } = ws;
   // shortcut: read through a ref so cards stay memoized; a renamed card shows in checklist group headers on the checklist's next render.
   const cardsRef = useRef(data?.cards);
   cardsRef.current = data?.cards;
   const titleOf = useCallback((id: string) => cardsRef.current?.find((c) => c.id === id)?.title, []);
   const cardActions = useMemo(
-    () => ({ moveCard, resizeCard, flushCanvas, bringToFront, updateCard, deleteCard, keepGhostCard, deleteChecklistItems, titleOf }),
-    [moveCard, resizeCard, flushCanvas, bringToFront, updateCard, deleteCard, keepGhostCard, deleteChecklistItems, titleOf],
+    () => ({ moveCard, resizeCard, flushCanvas, bringToFront, updateCard, deleteCard, keepGhostCard, deleteChecklistItems, startChecklistGrill, titleOf }),
+    [moveCard, resizeCard, flushCanvas, bringToFront, updateCard, deleteCard, keepGhostCard, deleteChecklistItems, startChecklistGrill, titleOf],
   );
   const onPromptCard = useCallback((id: string) => setPromptFor(id), []);
   const cardDrag = useMemo(
@@ -1781,7 +1781,7 @@ function CrossLinks({ cards, all, data, rectOf, ws }: { cards: Card[]; all: Map<
 /** What an artifact card can ask the canvas to do. */
 type ArtifactActions = { chip: (id: string, prompt: string, label: string) => void; open: (id: string) => void; settings: () => void };
 
-type CardActions = Pick<Workspace, "moveCard" | "resizeCard" | "flushCanvas" | "bringToFront" | "updateCard" | "deleteCard" | "keepGhostCard" | "deleteChecklistItems"> & { titleOf: (id: string) => string | undefined };
+type CardActions = Pick<Workspace, "moveCard" | "resizeCard" | "flushCanvas" | "bringToFront" | "updateCard" | "deleteCard" | "keepGhostCard" | "deleteChecklistItems" | "startChecklistGrill"> & { titleOf: (id: string) => string | undefined };
 /** Drag into a folder: start, hover (highlight), release (true = moved into a folder). */
 type CardDrag = { begin: () => void; over: (x: number, y: number, id: string) => void; drop: (x: number, y: number, id: string) => boolean; unpin: (id: string) => void };
 
@@ -1990,7 +1990,21 @@ const CardView = memo(function CardView({
     <div className="card-head">
       <IconChecklist />
       <span className="stage-name">Checklist{card.items?.length ? ` · ${doneCount}/${card.items.length}` : ""}</span>
-      {open > 0 && <span className="q-badge" title={`${open} unanswered question${open === 1 ? "" : "s"}`}>? {open}</span>}
+      {open > 0 && (
+        <button
+          type="button"
+          className="q-badge"
+          title="Answer with Claude"
+          aria-label={`${open} unanswered question${open === 1 ? "" : "s"}: answer with Claude`}
+          onPointerDown={(e) => e.stopPropagation()}
+          onClick={(e) => {
+            e.stopPropagation();
+            ws.startChecklistGrill(card.id);
+          }}
+        >
+          ? {open}
+        </button>
+      )}
       {menuBtn}
     </div>
   ) : kind === "label" && ghost ? null : (

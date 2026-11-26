@@ -327,14 +327,44 @@ fn transcript_lines(file: &Value) -> Vec<String> {
         if m.get("isError").and_then(Value::as_bool) == Some(true) {
             continue;
         }
-        if let Some(q) = m.get("question") {
-            let question = q.get("question").and_then(Value::as_str).unwrap_or("");
-            let answer = q.get("answered").and_then(Value::as_str);
-            out.push(format!("Claude asked: {question}{}", answer.map(|a| format!(" -> user answered: {a}")).unwrap_or_default()));
+        let asked = asked_pairs(m);
+        if !asked.is_empty() {
+            for (question, answer) in asked {
+                out.push(format!("Claude asked: {question}{}", answer.map(|a| format!(" -> user answered: {a}")).unwrap_or_default()));
+            }
         } else if let Some(line) = m.get("line").and_then(Value::as_str).filter(|_| m.get("kind").and_then(Value::as_str) == Some("change")) {
             out.push(format!("Change: {line}")); // a change-log line
         } else if !text.is_empty() {
             out.push(format!("{}: {text}", if role == "user" { "User" } else { "Claude" }));
+        }
+    }
+    out
+}
+
+/// The questions a saved message asked, with their answers: the question form (`questions`, a
+/// skipped one answered "(skipped)") or an older thread's single `question`.
+fn asked_pairs(m: &Value) -> Vec<(&str, Option<&str>)> {
+    if let Some(qs) = m.get("questions").and_then(Value::as_array) {
+        return qs
+            .iter()
+            .map(|q| {
+                let skipped = q.get("skipped").and_then(Value::as_bool) == Some(true);
+                (q.get("question").and_then(Value::as_str).unwrap_or(""), if skipped { Some("(skipped)") } else { q.get("answer").and_then(Value::as_str) })
+            })
+            .collect();
+    }
+    m.get("question").map(|q| vec![(q.get("question").and_then(Value::as_str).unwrap_or(""), q.get("answered").and_then(Value::as_str))]).unwrap_or_default()
+}
+
+/// The pairs of a batched answer message (`Q: <question>` / `A: <answer>` lines); empty when it is not one.
+fn qa_lines(text: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let mut q: Option<&str> = None;
+    for l in text.lines() {
+        if let Some(x) = l.strip_prefix("Q: ") {
+            q = Some(x.trim());
+        } else if let (Some(a), Some(qq)) = (l.strip_prefix("A: "), q.take()) {
+            out.push((qq.to_string(), a.trim().to_string()));
         }
     }
     out
@@ -357,15 +387,18 @@ pub fn answered_block(file: &Value, current: Option<(&str, &str)>, card_memory: 
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-        .filter_map(|m| {
-            let q = m.get("question")?;
-            Some((q.get("question")?.as_str()?.trim().to_string(), q.get("answered")?.as_str()?.trim().to_string()))
-        })
+        .flat_map(asked_pairs)
+        .filter_map(|(q, a)| Some((q.trim().to_string(), a?.trim().to_string())))
         .filter(|(q, a)| !q.is_empty() && !a.is_empty())
         .collect();
-    if let Some((q, a)) = current.map(|(q, a)| (q.trim(), a.trim())).filter(|(q, a)| !q.is_empty() && !a.is_empty()) {
-        if pairs.last().is_none_or(|(lq, _)| lq != q) {
-            pairs.push((q.to_string(), a.to_string()));
+    if let Some((q, a)) = current {
+        // A batched answer is "Q: ..\nA: .." lines; a single one is the choice itself.
+        let batch = qa_lines(a);
+        let current: Vec<(String, String)> = if batch.is_empty() { vec![(q.trim().to_string(), a.trim().to_string())] } else { batch };
+        for (q, a) in current.into_iter().filter(|(q, a)| !q.is_empty() && !a.is_empty()) {
+            if !pairs.iter().any(|(lq, _)| *lq == q) {
+                pairs.push((q, a));
+            }
         }
     }
     let memory: Vec<&str> = card_memory.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
@@ -437,6 +470,19 @@ mod tests {
         let again = answered_block(&file, Some(("Play order?", "List")), "").unwrap();
         assert_eq!(again.matches("Play order?").count(), 1);
         assert!(answered_block(&json!({ "messages": [] }), None, "").is_none());
+    }
+
+    #[test]
+    fn answered_block_reads_question_forms_and_batched_answers() {
+        let file = json!({ "messages": [
+            { "role": "claude", "text": "", "answered": true, "questions": [
+                { "id": "q1", "question": "Who plays?", "choices": ["Kids", "Adults"], "answer": "Adults" },
+                { "id": "q2", "question": "Mood?", "choices": ["a", "b"], "skipped": true },
+            ] },
+        ] });
+        let b = answered_block(&file, Some(("Platform?\nLength?", "Q: Platform?\nA: PC\nQ: Who plays?\nA: Adults\nQ: Length?\nA: (skipped)")), "").unwrap();
+        assert_eq!(b, "[Answered so far]\n- Q: Who plays? -> A: Adults\n- Q: Mood? -> A: (skipped)\n- Q: Platform? -> A: PC\n- Q: Length? -> A: (skipped)");
+        assert!(transcript(&file).contains("Claude asked: Mood? -> user answered: (skipped)"));
     }
 
     #[test]

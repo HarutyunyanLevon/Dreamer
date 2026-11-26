@@ -464,7 +464,15 @@ button:disabled { cursor: default; }
 .chat-head { position: relative; }
 .msg.user { align-self: flex-end; background: var(--accent-soft); }
 .msg.error { background: color-mix(in srgb, #e05a5a 16%, rgba(255, 255, 255, 0.75)); color: #7a2323; }
-.question-chips { padding: 10px 0 0; margin: 0; }
+.question-chips { padding: 10px 0 0; margin: 0; align-items: center; }
+.question-form { display: flex; flex-direction: column; gap: 14px; }
+.question-form .question { border: 0; margin: 0; padding: 0; min-width: 0; }
+.question-form legend { padding: 0; font-weight: 600; }
+.question-form .question.skipped legend { opacity: 0.55; }
+.question-context { font-size: 12.5px; color: var(--muted); margin-top: 2px; }
+.rec-tag { margin-left: 6px; font-size: 10.5px; font-weight: 700; opacity: 0.75; text-transform: uppercase; letter-spacing: 0.03em; }
+.question-other { margin-top: 8px; width: 100%; box-sizing: border-box; font: inherit; padding: 6px 10px; border-radius: 10px; border: 1px solid var(--muted); background: rgba(255, 255, 255, 0.8); color: var(--ink); }
+.question-send { align-self: flex-end; }
 .chip.on { background: var(--accent); color: #fff; border-color: transparent; }
 .setup-screen { gap: 10px; padding: 4px 20px 16px; }
 .setup-screen p { margin: 0; }
@@ -811,7 +819,9 @@ button:disabled { cursor: default; }
 .q-badge {
   font-size: 11px; font-weight: 800; padding: 1px 8px; border-radius: 999px; margin-right: 40px;
   background: #e4d9fb; color: #4b3290;
+  border: 0; font-family: inherit; cursor: pointer;
 }
+.q-badge:hover { background: #d6c6f8; }
 .checklist { display: flex; flex-direction: column; gap: 2px; margin-top: 2px; }
 .check-items { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
 .check-row { display: flex; align-items: flex-start; gap: 6px; }

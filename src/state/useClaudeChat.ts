@@ -62,14 +62,35 @@ export interface ThreadContext {
   window: number;
 }
 
+/** `item`: the handoff gap item it settles (the answer goes to the Tech or Project decisions card); `itemId`: the checklist item it answers (checklist grill). */
+export interface AskedQuestion {
+  id: string;
+  question: string;
+  choices: string[];
+  recommended?: string;
+  context?: string;
+  item?: string;
+  itemId?: string;
+  answer?: string;
+  skipped?: boolean;
+}
+
+/** A saved message from before question forms (`question: {question, choices, answered?, item?}`) as a one-question form. */
+function migrateQuestion(m: ChatMessage & { question?: { question: string; choices: string[]; answered?: string; item?: string } }): ChatMessage {
+  if (!m.question || m.questions) return m;
+  const { question: q, ...rest } = m;
+  return { ...rest, questions: [{ id: "q1", question: q.question, choices: q.choices, ...(q.item ? { item: q.item } : {}), ...(q.answered ? { answer: q.answered } : {}) }], ...(q.answered ? { answered: true } : {}) };
+}
+
 export interface ChatMessage {
   id: string;
   role: "user" | "claude";
   text: string;
   streaming?: boolean;
   isError?: boolean;
-  /** `item`: the handoff gap item it settles (gap interview: the answer goes to the Tech or Project decisions card). */
-  question?: { question: string; choices: string[]; answered?: string; item?: string };
+  /** A question form (ask_questions); `answered` once it was sent. */
+  questions?: AskedQuestion[];
+  answered?: boolean;
   /** search_cards calls Claude made while writing this reply (shown as result chips). */
   searches?: { query: string; results: SearchResultRef[] }[];
   /** propose_edit calls: the proposal itself lives on the card (badge + diff); this is a pointer. */
@@ -261,7 +282,7 @@ export function useClaudeChat(opts: { slug: string | null; thread: string; onLin
     t.loading = api
       .loadChat(slug, thread)
       .then((file) => {
-        t.messages = [...(Array.isArray(file.messages) ? (file.messages as ChatMessage[]) : []), ...t.messages];
+        t.messages = [...(Array.isArray(file.messages) ? (file.messages as ChatMessage[]).map(migrateQuestion) : []), ...t.messages];
         t.sessionId = file.sessionId ?? t.sessionId;
         t.localSessionId = file.localSessionId ?? t.localSessionId;
         if (!t.context && typeof file.last_input_tokens === "number" && file.last_input_tokens > 0) {
@@ -292,7 +313,7 @@ export function useClaudeChat(opts: { slug: string | null; thread: string; onLin
       .onEvent((e) => {
         const at = Date.now();
         const eid = "id" in e && typeof e.id === "string" ? e.id : null;
-        const turnOf = e.type === "question" ? e.turnId ?? null : eid;
+        const turnOf = e.type === "questions" ? e.turnId ?? null : eid;
         // A turn that has ended here (Stop, timeout, its answer) takes nothing more: a late event
         // must never reopen it or land on the next turn.
         if (turnOf && finished.current.has(turnOf) && !AFTER_END.has(e.type)) return;
@@ -353,7 +374,7 @@ export function useClaudeChat(opts: { slug: string | null; thread: string; onLin
                 m.id === e.id
                   ? {
                       ...m,
-                      text: m.question ? "" : e.text || m.text,
+                      text: m.questions ? "" : e.text || m.text,
                       streaming: false,
                       isError: e.isError,
                       steps: trimThinking(closeSteps(m.steps, e.isError ? "error" : "done")),
@@ -444,15 +465,15 @@ export function useClaudeChat(opts: { slug: string | null; thread: string; onLin
           const key = e.id ? idToKey.current.get(e.id) : undefined;
           const t = key ? threads.current.get(key) : undefined;
           if (t) onArtifactEscalate.current?.(e, { slug: t.slug, thread: t.thread });
-        } else if (e.type === "question") {
-          // Attach the question to the reply it belongs to: that reply then renders only as the
-          // question card, so the question never appears twice (as streamed text and as a card).
+        } else if (e.type === "questions") {
+          // Attach the form to the reply it belongs to: that reply then renders only as the
+          // question form, so the questions never appear twice (as streamed text and as a form).
           const turn = e.turnId ?? busyId.current;
           const key = (turn && idToKey.current.get(turn)) || currentKey.current || undefined;
-          const q = { question: e.question, choices: e.choices, ...(e.item ? { item: e.item } : {}) };
+          const questions = e.questions;
           update(
             key,
-            (ms) => (turn && ms.some((m) => m.id === turn) ? ms.map((m) => (m.id === turn ? { ...m, text: "", question: q } : m)) : [...ms, { id: e.id, role: "claude", text: "", question: q }]),
+            (ms) => (turn && ms.some((m) => m.id === turn) ? ms.map((m) => (m.id === turn ? { ...m, text: "", questions } : m)) : [...ms, { id: e.id, role: "claude", text: "", questions }]),
             true,
           );
         } else if (e.type === "sidecar_exit") {
@@ -569,9 +590,14 @@ export function useClaudeChat(opts: { slug: string | null; thread: string; onLin
     [update],
   );
 
-  const answerQuestion = useCallback(
-    (questionId: string, choice: string) => {
-      update(currentKey.current ?? undefined, (ms) => ms.map((m) => (m.id === questionId && m.question ? { ...m, question: { ...m.question, answered: choice } } : m)), true);
+  /** Marks a question form sent, with the answers (by question id; absent = skipped). */
+  const answerQuestions = useCallback(
+    (messageId: string, answers: Record<string, string | undefined>) => {
+      update(
+        currentKey.current ?? undefined,
+        (ms) => ms.map((m) => (m.id === messageId && m.questions ? { ...m, answered: true, questions: m.questions.map((q) => (answers[q.id] ? { ...q, answer: answers[q.id] } : { ...q, skipped: true })) } : m)),
+        true,
+      );
     },
     [update],
   );
@@ -679,7 +705,7 @@ export function useClaudeChat(opts: { slug: string | null; thread: string; onLin
     }
   }, []);
 
-  return { status, refreshStatus, messages, busy, context, addBuildNote, sendText, retry, retryWithClaude, retryLocally, retryStalled, answerQuestion, answerCredit, markFetchSaved, setOrganize, undoMemory, interrupt, reset };
+  return { status, refreshStatus, messages, busy, context, addBuildNote, sendText, retry, retryWithClaude, retryLocally, retryStalled, answerQuestions, answerCredit, markFetchSaved, setOrganize, undoMemory, interrupt, reset };
 }
 
 export type ClaudeChat = ReturnType<typeof useClaudeChat>;
