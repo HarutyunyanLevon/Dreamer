@@ -1,6 +1,8 @@
 import { Fragment, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { api, type Card, type OrganizePlanData, type ProjectData } from "../api";
 import { openQuestions } from "./kinds";
+import { isImage } from "./Attachments";
+import { NO_MEMORY, VERBS, selectionBlock } from "./verbs";
 import { useClaudeChat, type ChatMessage } from "../state/useClaudeChat";
 import type { Workspace } from "../state/useWorkspace";
 import { ClaudeSetup, needsSetup } from "./ClaudeSetup";
@@ -52,14 +54,13 @@ function parseOrganize(text: string, data: ProjectData | null, selection: string
 const planScope = (p: OrganizePlanData): Pick<OrganizeReq, "scope" | "ids" | "name"> => ({ scope: p.scope, ids: p.scopeIds ?? undefined, name: p.scopeName });
 const scopeWords = (r: OrganizeReq) => (r.scope === "frame" ? `frame "${r.name}"` : r.scope === "selection" ? `the ${r.ids?.length ?? 0} selected cards` : "the whole project");
 
-/** Fixed chip / menu commands: the memory pass skips these turns (an answer to a grill-me question is not one). */
-const NO_MEMORY = /^(\/expand|\/critique|\/describe|\/merge|\/related|\/grill-me|Give me 3 takes|Merge \d+ cards)/;
 
 /**
  * The selected card's details for this turn. The project overview (every card's title, tags and
  * stage) is added by Rust on every turn, so it isn't repeated here.
  */
-function formatContext(card: Card | null): string | undefined {
+function formatContext(card: Card | null, sel: Card[] = []): string | undefined {
+  if (sel.length > 1) return selectionBlock(sel);
   if (!card) return undefined;
   return [
     `[Selected card] "${card.title}" (id ${card.id}, stage: ${card.stage}${card.tags.length ? `, tags: ${card.tags.join(", ")}` : ""})`,
@@ -71,21 +72,22 @@ function formatContext(card: Card | null): string | undefined {
  * What a chip / context-menu command actually sends: some short commands expand to a fixed
  * instruction about the selected card. `quiet` turns show only a typing indicator.
  */
-function expand(display: string, card: Card | null): { text: string; quiet: boolean } {
+function expand(display: string, card: Card | null, sel: Card[] = []): { text: string; quiet: boolean } {
+  const many = sel.length > 1;
+  const subject = many ? `the selection (ids ${sel.map((c) => c.id).join(", ")}), as ONE idea` : card ? `"${card.title}" (id ${card.id})` : null;
+  const ids = many ? sel.map((c) => c.id) : card ? [card.id] : [];
   let text = display;
-  if (display === "Give me 3 takes" && card) {
-    const group = crypto.randomUUID();
-    text = `Give me 3 distinctly different takes branching from this card. Call create_card exactly 3 times (not more, not fewer); on every one of the 3 calls set branch_group to exactly "${group}" and variant_of to "${card.id}", so they can be grouped and compared.`;
-  } else if (display === "/related" && card) {
-    text = `/related: find cards related to "${card.title}" (id ${card.id}) in this project and propose the strongest links from it with propose_link (from "${card.id}"). Don't create cards.`;
-  } else if (display === "/expand" && card) {
-    text = `/expand: expand "${card.title}" (id ${card.id}).`;
-  } else if (display === "/critique" && card) {
-    text = `/critique: critique "${card.title}" (id ${card.id}).`;
-  } else if (display === "/describe" && card) {
-    text = `/describe: describe the images on "${card.title}" (id ${card.id}).`;
+  if (subject) {
+    if (display === "Give me 3 takes") {
+      const group = crypto.randomUUID();
+      text = `Give me 3 distinctly different takes branching from ${subject}. Call create_card exactly 3 times (not more, not fewer); on every one of the 3 calls set branch_group to exactly "${group}", variant_of to "${ids[0]}" and linked_from to every source card, so they can be grouped and compared.`;
+    } else if (display === "/related") {
+      text = `/related: find cards related to ${subject} in this project and propose the strongest links from it with propose_link (from each of ${ids.map((i) => `"${i}"`).join(", ")}). Don't create cards.`;
+    } else if (["/expand", "/critique", "/describe", "/what-if", "/references", "/grill-me"].includes(display)) {
+      text = `${display}: ${display.slice(1)} ${subject}.`;
+    }
   }
-  return { text, quiet: display === "/grill-me" };
+  return { text, quiet: display === "/grill-me" || display === "/grill-project" };
 }
 
 export function ChatPanel({ ws, panels }: { ws: Workspace; panels: Pick<ReturnType<typeof usePanels>, "pins" | "setPin" | "resize"> }) {
@@ -173,6 +175,11 @@ export function ChatPanel({ ws, panels }: { ws: Workspace; panels: Pick<ReturnTy
   const handledReq = useRef(0);
 
   const contextCard = (thread !== "project" && ws.data?.cards.find((c) => c.id === thread)) || null;
+  /** The canvas selection when it is 2+ cards (one idea for Claude); otherwise empty. */
+  const selectedCards = (): Card[] => {
+    const ids = ws.getCanvasSelection();
+    return ids.length > 1 ? ids.map((id) => ws.data?.cards.find((c) => c.id === id)).filter((c): c is Card => !!c) : [];
+  };
 
   // A pinned card that was trashed releases the pin.
   const { setPin } = panels;
@@ -208,8 +215,9 @@ export function ChatPanel({ ws, panels }: { ws: Workspace; panels: Pick<ReturnTy
       else if (org && "error" in org) ws.setError(org.error);
       else if (org) runOrganize(org);
       else if (ws.active) {
-        const x = req.display ? { text: req.text, quiet: !!req.quiet } : expand(req.text, contextCard);
-        chat.sendText(x.text, formatContext(contextCard), req.display ?? req.text, { quiet: x.quiet, memory: !NO_MEMORY.test(req.display ?? req.text) });
+        const sel = selectedCards();
+        const x = req.display ? { text: req.text, quiet: !!req.quiet } : expand(req.text, contextCard, sel);
+        chat.sendText(x.text, formatContext(contextCard, sel), req.display ?? req.text, { quiet: x.quiet, selection: ws.getCanvasSelection(), memory: !NO_MEMORY.test(req.display ?? req.text) });
       }
       return;
     }
@@ -256,11 +264,12 @@ export function ChatPanel({ ws, panels }: { ws: Workspace; panels: Pick<ReturnTy
       setThink(false);
       return;
     }
-    const x = expand(display, contextCard);
+    const sel = selectedCards();
+    const x = expand(display, contextCard, sel);
     // Answering a question Claude asked (e.g. /grill-me) keeps the Think of the message that started it.
     const thinkNow = opts?.answering ? think || lastThink.current : think;
     if (!opts?.answering) lastThink.current = think;
-    chat.sendText(x.text, formatContext(contextCard), display, { quiet: x.quiet || !!opts?.answering, web, think: thinkNow, pin: modelPin, selection: ws.getCanvasSelection(), memory: !!opts?.answering || !NO_MEMORY.test(display), question: opts?.question });
+    chat.sendText(x.text, formatContext(contextCard, sel), display, { quiet: x.quiet || !!opts?.answering, web, think: thinkNow, pin: modelPin, selection: ws.getCanvasSelection(), memory: !!opts?.answering || !NO_MEMORY.test(display), question: opts?.question });
     setText("");
     setWeb(false);
     setThink(false);
@@ -300,20 +309,24 @@ export function ChatPanel({ ws, panels }: { ws: Workspace; panels: Pick<ReturnTy
   };
 
   const canAct = !chat.busy && !!ws.active;
-  const group = contextCard ? "card" : "project";
-  const needCard = contextCard ? undefined : { short: "Open a card first", long: "Select a card on the canvas (or a recent one in the thread menu) to open its own thread, then run this." };
+  const subjectCards = selectedCards().length ? selectedCards() : contextCard ? [contextCard] : [];
+  const subject = subjectCards.length > 0;
   const summarize = () => ws.openHandoff(contextCard ? { kind: "card", id: contextCard.id } : { kind: "project" });
   const actions: ChatAction[] = [
-    { id: "grill", label: "/grill-me", desc: "Question this card or the project until it's solid", group, command: "/grill-me", run: () => (contextCard?.kind === "checklist" && openQuestions(contextCard.items) > 0 ? ws.startChecklistGrill(contextCard.id) : send("/grill-me")) },
-    { id: "related", label: "/related", desc: "Find and link cards related to this one", group, command: "/related", disabled: needCard, run: () => send("/related") },
-    { id: "takes", label: "Give me 3 takes", desc: "Three different directions for this card", group, run: () => send("Give me 3 takes") },
-    ...(contextCard
-      ? ([
-          { id: "expand", label: "/expand", desc: "Develop this card further", group: "card", command: "/expand", run: () => send("/expand") },
-          { id: "critique", label: "/critique", desc: "Find weak spots in this card", group: "card", command: "/critique", run: () => send("/critique") },
-          { id: "describe", label: "/describe", desc: "Describe the images on this card", group: "card", command: "/describe", run: () => send("/describe") },
-        ] satisfies ChatAction[])
-      : []),
+    ...(subject
+      ? VERBS.flatMap((g) => g.items.map((v): ChatAction => {
+          const noImg = v.needsImages && !subjectCards.some((c) => c.attachments.some(isImage));
+          return {
+            id: v.cmd,
+            label: v.label,
+            desc: `${g.group}: ${v.desc}`,
+            group: "card",
+            command: v.cmd.startsWith("/") ? v.cmd : undefined,
+            disabled: noImg ? { short: "No images", long: "There are no images here." } : undefined,
+            run: () => (v.cmd === "/grill-me" && contextCard?.kind === "checklist" && openQuestions(contextCard.items) > 0 ? ws.startChecklistGrill(contextCard.id) : send(v.cmd)),
+          };
+        }))
+      : [{ id: "grill-project", label: "Grill the project", desc: "Project-wide questions: player, platform, scope, tone", group: "project", command: "/grill-project", run: () => send("/grill-project") } satisfies ChatAction]),
     { id: "summarize", label: "Summarize", desc: "Turn the project into design docs for Claude Code", group: "project", run: summarize },
     { id: "org-project", label: "Organize the project", desc: "Claude proposes a tidy-up plan you review", group: "project", command: "/organize", run: () => runOrganize({ scope: "project", instruction: "" }) },
     { id: "org-selection", label: "Organize the selection", desc: "Claude proposes a plan for the selected cards", group: "project", command: "/organize selection", run: () => send("/organize selection") },

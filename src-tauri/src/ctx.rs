@@ -408,6 +408,36 @@ pub fn answered_block(file: &Value, current: Option<(&str, &str)>, card_memory: 
     Some(out.join("\n"))
 }
 
+const ASKED_MAX: usize = 200;
+
+/// A question reduced to lowercase words, so a paraphrase's punctuation/case never hides a repeat.
+pub fn norm_q(q: &str) -> String {
+    q.to_lowercase().split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).collect::<Vec<_>>().join(" ")
+}
+
+/// Appends the asked questions to the project's log (`[{q, cards}]`), keeping the last [`ASKED_MAX`].
+/// `cards` = the card ids the grill was about, or ["project"].
+pub fn asked_push(log: &mut Vec<Value>, qs: &[String], cards: &[String]) {
+    for q in qs.iter().map(|q| norm_q(q)).filter(|q| !q.is_empty()) {
+        log.retain(|e| e.get("q").and_then(Value::as_str) != Some(q.as_str()) || e.get("cards") != Some(&serde_json::json!(cards)));
+        log.push(serde_json::json!({ "q": q, "cards": cards }));
+    }
+    let skip = log.len().saturating_sub(ASKED_MAX);
+    log.drain(..skip);
+}
+
+/// The `[Asked before]` block: logged questions about any of `cards` (oldest first). None when none.
+pub fn asked_block(log: &[Value], cards: &[String]) -> Option<String> {
+    let lines: Vec<String> = log
+        .iter()
+        .filter(|e| e.get("cards").and_then(Value::as_array).is_some_and(|c| c.iter().filter_map(Value::as_str).any(|c| cards.iter().any(|x| x == c))))
+        .filter_map(|e| e.get("q").and_then(Value::as_str).map(|q| format!("- {}", cap_chars(q, ANSWERED_Q_CHARS))))
+        .collect();
+    (!lines.is_empty()).then(|| format!("[Asked before]
+{}", lines.join("
+")))
+}
+
 /// Characters kept per message in [`recent_turns`].
 const RECENT_LINE_CHARS: usize = 1_500;
 
@@ -438,6 +468,22 @@ mod tests {
 
     fn base() -> Vec<OverviewCard> {
         vec![oc("a", "Alpha", "1", Stage::Mist, false), oc("b", "Beta", "1", Stage::Mist, false)]
+    }
+
+    #[test]
+    fn asked_log_is_per_card_capped_and_normalized() {
+        let mut log = vec![];
+        asked_push(&mut log, &["Who plays?!".into(), "Mood?".into()], &["a".into()]);
+        asked_push(&mut log, &["Boss count?".into()], &["b".into()]);
+        asked_push(&mut log, &["who  plays".into()], &["a".into()]);
+        assert_eq!(asked_block(&log, &["a".into()]).unwrap(), "[Asked before]
+- mood
+- who plays");
+        assert!(asked_block(&log, &["c".into()]).is_none());
+        for i in 0..250 {
+            asked_push(&mut log, &[format!("q{i}")], &["a".into()]);
+        }
+        assert_eq!(log.len(), 200);
     }
 
     #[test]

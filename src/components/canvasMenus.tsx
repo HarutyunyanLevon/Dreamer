@@ -5,6 +5,7 @@ import type { Rect } from "./cardGeometry";
 import type { MenuItem, MenuSection } from "./ContextMenu";
 import { CONVERTIBLE, KIND_LABEL, isAnswered, SWATCHES, SWATCH_LABEL, hasStage, swatchOf } from "./kinds";
 import { isClip, isImage } from "./Attachments";
+import { VERBS } from "./verbs";
 import { pickBundle } from "./Import";
 import type { ArtifactType } from "../api";
 import { ARTIFACT_LABEL, ARTIFACT_TYPES, artifactType } from "./artifacts/prompts";
@@ -135,7 +136,7 @@ function canvasMenu(p: { x: number; y: number }, env: MenuEnv): MenuSection[] {
           submenu: [
             {
               items: [
-                { label: "Grill the project", run: () => env.askClaude(null, "/grill-me") },
+                { label: "Grill the project", run: () => env.askClaude(null, "/grill-project") },
                 { label: "Organize project", run: () => env.ws.requestChat({ text: "/organize", send: true }) },
                 { label: "Hand off project…", run: () => env.ws.openHandoff({ kind: "project" }) },
               ],
@@ -198,11 +199,8 @@ export function selectionMenu(cards: Card[], env: MenuEnv): MenuSection[] {
   const att = one?.kind === "image" ? one.attachments.find(isImage) : clip;
   const checklists = cards.filter((c) => c.kind === "checklist" && (c.items ?? []).some(isAnswered));
 
-  // Always ONE Claude turn; several cards go in together as one idea.
-  const ask = (cmd: string) => () =>
-    one
-      ? env.askClaude(one.id, cmd)
-      : env.askClaude(null, `${cmd}: treat these ${n} cards together as one idea: ${cards.map((c) => `"${c.title}" (id ${c.id})`).join(", ")}`, { display: `${cmd} (${n} cards)` });
+  // Always ONE Claude turn; several cards go in together as one [Selection] (the chat reads the canvas selection).
+  const ask = (cmd: string) => () => env.askClaude(one ? one.id : null, cmd);
   const hasImages = cards.some((c) => c.attachments.some(isImage));
   const sub = (label: string, items: MenuItem[]): MenuItem => ({ label, submenu: [{ items }] });
 
@@ -279,9 +277,9 @@ export function selectionMenu(cards: Card[], env: MenuEnv): MenuSection[] {
   }
 
   const claude: MenuItem[] = [
-    sub("Deepen", [{ label: "Grill me", run: ask("/grill-me") }, { label: "Expand", run: ask("/expand") }, { label: "Critique", run: ask("/critique") }]),
-    sub("Broaden", [{ label: "Give me 3 takes", run: ask("Give me 3 takes") }, { label: "Find related", run: ask("/related") }]),
-    sub("Inspire", [{ label: "Describe images", disabled: hasImages ? undefined : "There are no images here", run: ask("/describe") }]),
+    ...VERBS.map((g) =>
+      sub(g.group, g.items.map((v) => ({ label: v.label, disabled: v.needsImages && !hasImages ? "There are no images here" : undefined, run: ask(v.cmd) }))),
+    ),
     sub("Visualize", ARTIFACT_TYPES.map((t) => ({ label: ARTIFACT_LABEL[t], run: () => env.visualize(cards, t) }))),
   ];
   if (n > 1) claude.push({ label: "Merge", run: () => env.merge(ids) });

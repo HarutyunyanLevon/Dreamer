@@ -434,3 +434,12 @@ Manual (`npm run tauri dev`):
 2. Right-click an unselected card: only it is selected and its menu opens. Right-click inside a multi-selection: selection kept. Right-click empty canvas: canvas menu.
 3. Menu key / Shift+F10: menu for the selection, else canvas menu at the canvas centre.
 4. Select 3 cards: Stage, Add tag, Pin, Bring to front, Duplicate, each undoes with ONE Ctrl+Z. Deepen ▸ Grill me sends one chat turn naming all three.
+
+## Strip-down step 4 (verbs and the adaptive grill)
+Automated: `npm run test:menu` (VERBS labels present, `[Selection]` block, bare command for a selection), `cargo test --lib ctx::` (asked log: normalized, per card, capped at 200), `npx tsc --noEmit`, `npm run build`, `npm run build:sidecar`.
+
+Manual (browser preview, `npm run dev`):
+1. Right-click a card, then a multi-selection: Deepen / Broaden / Inspire / Visualize; Describe images disabled without images. The chat "/" menu lists the same verbs.
+2. Grill me on two different cards: the questions differ. Grill the project (canvas menu or chip with nothing selected): only player / platform / scope / what makes it different. Project questions never appear in a card grill.
+3. What if…, Find related, Find references (mock: "turn web on") each give one canned reply.
+Manual (real app): grill a card twice; no question repeats (see `asked.json`). Select 3 cards, Expand: ghost cards link from all 3. Find references with web on: ghost clip cards linked "inspired by"; with web off the reply says to turn it on.

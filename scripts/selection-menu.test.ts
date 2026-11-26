@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { selectionMenu, type MenuEnv } from "../src/components/canvasMenus";
 import type { MenuItem, MenuSection } from "../src/components/ContextMenu";
 import type { Card } from "../src/api";
+import { VERBS, selectionBlock } from "../src/components/verbs";
 
 const card = (id: string, o: Partial<Card> = {}): Card => ({ id, title: id, body: "", stage: "mist", tags: [], links: [], attachments: [], kind: "card", ...o }) as Card;
 const calls: [string, ...unknown[]][] = [];
@@ -71,7 +72,12 @@ calls.length = 0;
 find(m, "Grill me").run!();
 assert.equal(calls.length, 1);
 assert.equal(calls[0][1], null);
-assert.match(String(calls[0][2]), /"a".*"c".*"i"/);
+assert.equal(calls[0][2], "/grill-me"); // the chat adds the [Selection] block from the canvas selection
+for (const v of VERBS.flatMap((g) => g.items)) assert.ok(find(m, v.label), v.label);
+const blk = selectionBlock([{ id: "a", title: "A", stage: "mist", tags: [], body: "x", links: [{ to: "c", label: "feeds" }] }, { id: "c", title: "C", stage: "lucid", tags: ["t"], body: "", links: [{ to: "zz" }] }] as unknown as Card[]);
+assert.match(blk, /^\[Selection\] 2 cards/);
+assert.match(blk, /feeds -> c/);
+assert.doesNotMatch(blk, /zz/); // only links among the selected cards
 // Clear answered goes through grouped (one undo step).
 assert.equal(one("Clear answered").length, 1);
 console.log("selection menu: ok");

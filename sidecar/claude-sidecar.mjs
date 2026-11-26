@@ -237,9 +237,9 @@ function chatTools(s) {
       stage: z.enum(["mist", "reverie", "lucid", "dream", "built"]).optional(),
       links: z.array(z.object({ to: z.string(), label: z.string().optional() })).optional(),
       linked_from: z
-        .object({ id: z.string(), label: z.string().max(40).optional() })
+        .union([z.object({ id: z.string(), label: z.string().max(40).optional() }), z.array(z.object({ id: z.string(), label: z.string().max(40).optional() }))])
         .optional()
-        .describe("Propose a link from this existing card to the new one (shown as a ghost link the user keeps or dismisses)"),
+        .describe("Propose a link from this existing card (or from each card of an array: every card of a [Selection]) to the new one (shown as ghost links the user keeps or dismisses)"),
       kind: z.enum(["card", "checklist"]).optional().describe("Object kind (default 'card'). Use 'checklist' with items for a list of points or questions."),
       items: z
         .array(z.object({ text: z.string(), question: z.boolean().optional().describe("true when the item is an open question") }))
@@ -257,13 +257,13 @@ function chatTools(s) {
         const { linked_from, ...rest } = args;
         const card = await requestTool("create_card", rest);
         let note = "";
-        if (linked_from) {
+        for (const lf of [].concat(linked_from ?? [])) {
           try {
-            const ok = await requestTool("propose_link", { from: linked_from.id, to: card.id });
-            send({ type: "link_proposal", id: tid(), slug: ok.slug, from: linked_from.id, to: card.id, label: linked_from.label });
-            note = ` Proposed a ghost link from "${ok.fromTitle}".`;
+            const ok = await requestTool("propose_link", { from: lf.id, to: card.id });
+            send({ type: "link_proposal", id: tid(), slug: ok.slug, from: lf.id, to: card.id, label: lf.label });
+            note += ` Proposed a ghost link from "${ok.fromTitle}".`;
           } catch (e) {
-            note = ` (Could not propose the link: ${e.message})`;
+            note += ` (Could not propose the link: ${e.message})`;
           }
         }
         return { content: [{ type: "text", text: `Created ghost card "${card.title}" (id ${card.id}). It awaits the user's Keep/Dismiss.${note}` }] };
@@ -621,26 +621,42 @@ function chatTools(s) {
     },
   );
 
-  return [createCardTool, askQuestionTool, askQuestionsTool, readCardTool, proposeLinkTool, mergeCardsTool, viewAttachmentTool, proposeEditTool, rememberTool, forgetTool, listTreeTool, proposeOrganizeTool, escalateArtifactTool, proposeArtifactTool];
+  // Find references: a ghost web-clip card for a page that was really fetched this session.
+  const proposeReferenceTool = tool(
+    "propose_reference",
+    "Propose a reference page as a ghost web-clip card, linked 'inspired by' from the source card(s). Only for a URL you " +
+      "opened with WebFetch in this session; never a URL from memory or from search results alone.",
+    {
+      url: z.string().describe("The exact URL you fetched"),
+      take: z.string().max(200).describe("One line: what to take from it"),
+      from: z.array(z.string()).min(1).describe("Source card ids (every card of a [Selection])"),
+    },
+    async (args) => {
+      {
+        const lim = hitLimit("any");
+        if (lim) return lim;
+      }
+      if (!s.fetched?.has(args.url)) return text("Refused: that URL was not fetched with WebFetch. Fetch it first, or skip it.");
+      try {
+        const card = await requestTool("create_reference", { url: args.url, take: args.take }, 30000);
+        for (const from of args.from) {
+          const ok = await requestTool("propose_link", { from, to: card.id });
+          send({ type: "link_proposal", id: tid(), slug: ok.slug, from, to: card.id, label: "inspired by" });
+        }
+        return text(`Proposed the reference "${card.title}" as a ghost card. It awaits the user's Keep/Dismiss.`);
+      } catch (e) {
+        return fail(e);
+      }
+    },
+  );
+
+  return [proposeReferenceTool, createCardTool, askQuestionTool, askQuestionsTool, readCardTool, proposeLinkTool, mergeCardsTool, viewAttachmentTool, proposeEditTool, rememberTool, forgetTool, listTreeTool, proposeOrganizeTool, escalateArtifactTool, proposeArtifactTool];
 }
 
 // A fresh MCP server instance per session: an SDK server object binds to one transport.
 const makeServer = (s) => createSdkMcpServer({ name: "dreamer", version: "1.0.0", tools: chatTools(s) });
 
 const ARTIFACT_TYPES = ["theme", "character", "concept", "mockup"];
-
-// The checklist /grill-me works through, in order. Kept here so the prompt and any future UI
-// progress indicator agree on what "every item covered" means.
-const GRILL_ITEMS = [
-  "core experience (what the player should feel)",
-  "target player",
-  "core loop",
-  "key mechanics",
-  "setting and tone",
-  "scope and platform",
-  "what makes it different",
-  "biggest risk or open question",
-];
 
 const BATCH_RULE =
   "Ask 3-4 questions per turn with ask_questions (fewer only when fewer branches are open); group questions that " +
@@ -669,20 +685,27 @@ const SYSTEM_PROMPT = [
     "say web access is off and that they can turn it on with the globe button; do not retry. Cite the pages you used.",
   "/merge: read each listed card, then call merge_cards exactly once with all their ids and one synthesized " +
     "title and body. Do not call create_card. Then reply with exactly: Proposed a merged card.",
-  "/grill-me: interview the user about the selected card with multiple-choice questions, working through " +
-    "these items in order and skipping any the card's notes already answer: " +
-    GRILL_ITEMS.map((x, i) => `${i + 1}. ${x}`).join("; ") +
-    ". " +
+  "/grill-me (a card, or a [Selection] treated as one idea): first, silently, build the list of OPEN branches of THIS " +
+    "card: what its body leaves undecided, contradictions with linked cards, and pieces its kind implies (mechanic: inputs, " +
+    "feedback, failure; story: who, why, stakes; tech: constraint, risk; art: references, mood). There is no fixed list. " +
+    "Skip anything already settled by [Project memory], linked cards, the card's notes, [Answered so far] or [Asked before]. " +
+    "Never ask a project-wide topic here (target player, platform, scope, monetization, what makes the project different, " +
+    "setting or tone of the whole game): those belong to /grill-project. " +
     BATCH_RULE +
     " On each turn, call ask_questions exactly once and write NO other text: no preamble, no restating the questions, " +
     "no reaction to the previous answers, no praise or encouragement, no commentary on the options the user chose. " +
-    "Questions and options are neutral and specific (2-5 options). Never ask a question listed in [Answered so far] " +
-    "again; move to the next open branch, or say the grill is done. The user's answers are recorded in the card's " +
-    "notes automatically. When every item has been covered, do not ask another question and do not write a summary " +
-    "in chat: call create_card exactly once to propose a spec card with title 'Spec: <card title>', stage 'lucid', " +
-    "tags including 'spec', a link to the selected card with label 'spec of', and a markdown body with one short " +
-    "section per item, built only from the user's answers and the card's notes. Then reply with exactly: " +
-    "Proposed a spec card.",
+    "Questions and options are neutral and specific (2-5 options). Never ask a question listed in [Answered so far] or " +
+    "[Asked before], nor a near-paraphrase of one. When no branch is open, reply exactly: Nothing open on this card. " +
+    "Then, unless it was the first turn, call create_card exactly once to propose a spec card with title 'Spec: <card title>', " +
+    "stage 'lucid', tags including 'spec', linked_from the card(s) with label 'spec of', and a markdown body with one short " +
+    "section per decision, built only from the user's answers and the card's notes. Then reply with exactly: " +
+    "Proposed a spec card. (If the very first turn has nothing open, reply only: Nothing open on this card.)",
+  "/grill-project: ask ONLY the project-wide topics: target player, platform, scope, monetization, what makes the project " +
+    "different, setting and tone of the whole game. Skip every topic [Project memory] already holds, and anything in " +
+    "[Answered so far] or [Asked before]. " +
+    BATCH_RULE +
+    " Call ask_questions once per turn, no other text. The answers are recorded as project Decisions in memory " +
+    "automatically; never write them to a card. When every topic is held, reply exactly: Nothing open on the project.",
   "/grill-me checklist: the message lists the card's open questions as `[item_id] question — context`. Work through " +
     "them in the given order, 3-4 per turn, calling ask_questions once per turn with no other text: one entry per " +
     "listed item with item_id set to its id, question = the item's question (rephrased only if needed to be " +
@@ -692,6 +715,15 @@ const SYSTEM_PROMPT = [
   "/related: from the [Related cards] block, call propose_link for the 1-5 strongest connections to the selected card, " +
     "each with a short label and reason, and list them briefly.",
   "'Give me 3 takes': propose three distinctly different create_card calls.",
+  "[Selection]: when a message carries a [Selection] block, its cards are ONE idea. Every ghost card you create from it " +
+    "uses linked_from with an entry for every selected card.",
+  "/what-if: call create_card exactly 3 times; each ghost card changes ONE core assumption of the source (a constraint " +
+    "flip, a genre swap, or a scale change; use a different kind of change for each), body starting with a line " +
+    "'What changes: <one line>'. linked_from = the source card(s), label 'what if'.",
+  "/references: needs web. If a WebSearch or WebFetch call is refused, reply that web access is off and the user can turn " +
+    "it on with the globe button, and stop. Otherwise search, open the pages with WebFetch, then call propose_reference " +
+    "3-6 times (similar games, mechanics, art or mood, real-world inspiration) with a one-line 'take' and from = the " +
+    "source card id(s). Never invent or guess a URL; only pages you actually fetched.",
   "Ghost artifacts: during /grill-me or /expand, when a visual would settle an open question, you may call " +
     "propose_artifact once (type, title, a brief naming the question, source_card = the card). It costs nothing until " +
     "the user keeps it. Never more than one per turn.",
@@ -778,6 +810,8 @@ function toolLabel(name, input, r) {
       return a.title ? `Edited "${clip(a.title)}"` : "Edited a card";
     case "propose_edit":
       return "Suggested an edit";
+    case "propose_reference":
+      return "Suggested a reference";
     case "propose_link":
       return "Suggested a link";
     case "list_tree":
@@ -1055,6 +1089,7 @@ const BASE_OPTIONS = {
     "mcp__dreamer__merge_cards",
     "mcp__dreamer__view_attachment",
     "mcp__dreamer__propose_edit",
+    "mcp__dreamer__propose_reference",
     "mcp__dreamer__remember",
     "mcp__dreamer__forget",
     "mcp__dreamer__list_tree",
@@ -1124,6 +1159,7 @@ function webGate(s) {
     if (!s.web) {
       return { behavior: "deny", message: "Web access is off for this message. The user can switch it on with the globe button next to the chat input." };
     }
+    if (toolName === "WebFetch" && typeof input.url === "string") (s.fetched ??= new Set()).add(input.url);
     if (toolName === "WebFetch" && typeof input.url === "string") emit(s.turn?.s === s ? s.turn : null, { type: "web_fetch", url: input.url });
     return { behavior: "allow", updatedInput: input };
   };
@@ -1565,7 +1601,7 @@ const toolLimitMs = (name) => (SPRITECOOK_TOOLS.includes(name) ? 300000 : WEB_TO
 const SUMMARY_MS = 120000;
 const HEARTBEAT_MS = 10000;
 /** Tools whose success means the turn did its job even without text. */
-const ACTION_TOOLS = new Set(["create_card", "ask_question", "ask_questions", "propose_link", "merge_cards", "propose_edit", "propose_organize", "remember", "forget", "escalate_artifact", "propose_artifact"]);
+const ACTION_TOOLS = new Set(["create_card", "ask_question", "ask_questions", "propose_link", "merge_cards", "propose_edit", "propose_organize", "propose_reference", "remember", "forget", "escalate_artifact", "propose_artifact"]);
 
 function newTurn(msg, { artifact, model }) {
   const now = Date.now();

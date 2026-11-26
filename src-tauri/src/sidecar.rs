@@ -73,6 +73,8 @@ struct PendingCtx {
     slug: String,
     thread: String,
     ctx: crate::ctx::Ctx,
+    /// The cards a grill in this turn is about (card thread + selection), or ["project"]: keys of the asked-questions log.
+    asked_cards: Vec<String>,
     /// What the memory pass needs once Claude has answered (None: a fixed chip command, no pass).
     memory: Option<MemoryTurn>,
 }
@@ -380,6 +382,25 @@ fn on_exit(app: &AppHandle, generation: u64, reason: &str, keep: Option<&str>) {
     fail_in_flight(app, generation, code, &tail, keep, false);
 }
 
+/// A question form Claude showed goes into the project's asked-questions log (asked.json).
+fn log_asked(app: &AppHandle, msg: &Value) {
+    if msg.get("type").and_then(Value::as_str) != Some("questions") {
+        return;
+    }
+    let Some(turn) = msg.get("turnId").and_then(Value::as_str) else { return };
+    let qs: Vec<String> = msg.get("questions").and_then(Value::as_array).into_iter().flatten().filter_map(|q| q.get("question").and_then(Value::as_str).map(str::to_string)).collect();
+    let state = app.state::<AppState>();
+    let Some((slug, cards)) = state.claude.pending_ctx.lock().ok().and_then(|p| p.get(turn).map(|p| (p.slug.clone(), p.asked_cards.clone()))) else { return };
+    let Some(path) = state.ws.lock().ok().and_then(|ws| ws.existing_project_dir(&slug).ok()).map(|d| d.join("asked.json")) else { return };
+    let mut log = read_asked(&path);
+    crate::ctx::asked_push(&mut log, &qs, &cards);
+    let _ = crate::storage::atomic_write(&path, serde_json::to_string(&log).unwrap_or_default().as_bytes());
+}
+
+fn read_asked(path: &std::path::Path) -> Vec<Value> {
+    std::fs::read_to_string(path).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
+}
+
 /// Fails the chat turns, handoff session and memory passes that were running on a sidecar that is
 /// gone, so nothing waits forever. `restarted`: the app stopped it on purpose (not a crash).
 fn fail_in_flight(app: &AppHandle, generation: u64, code: Option<i32>, tail: &[String], keep: Option<&str>, restarted: bool) {
@@ -518,6 +539,7 @@ fn handle_sidecar_message(app: &AppHandle, msg: Value) {
         std::thread::spawn(move || crate::handoff::finish(&app, &app.state::<AppState>(), &msg));
         return;
     }
+    log_asked(app, &msg);
     record_turn_result(app, &msg);
     let _ = app.emit("claude-event", msg);
 }
@@ -800,6 +822,31 @@ fn run_tool(state: &AppState, tool: &str, input: Value) -> Result<Value> {
                 idx.mark_dirty(Some(&slug));
             }
             to_json(&card, "create_card result")
+        }
+        // A reference page as a ghost web-clip card. The page is fetched here; one that can't be is refused.
+        "create_reference" => {
+            let slug = active_slug(state)?;
+            let url = input.get("url").and_then(Value::as_str).unwrap_or_default().to_string();
+            let fetched = tauri::async_runtime::block_on(crate::clip::fetch(&url));
+            if let Some(e) = &fetched.error {
+                return Err(AppError::Invalid(format!("could not fetch {url}: {e}")));
+            }
+            let title = fetched.title.clone().unwrap_or_else(|| url.clone());
+            let att = state.ws.lock().map_err(|_| AppError::Invalid("workspace lock poisoned".into()))?.store_clip(&slug, &ulid::Ulid::generate().to_string(), &url, fetched)?;
+            let new_card = NewCard {
+                title: Some(title),
+                body: input.get("take").and_then(Value::as_str).map(str::to_string),
+                source: Some(Source::Claude),
+                ghost: Some(true),
+                kind: Some(crate::model::CardKind::Clip),
+                attachments: Some(vec![att]),
+                ..Default::default()
+            };
+            let card = state.ws.lock().map_err(|_| AppError::Invalid("workspace lock poisoned".into()))?.create_card(&slug, new_card)?;
+            if let Ok(mut idx) = state.search.lock() {
+                idx.mark_dirty(Some(&slug));
+            }
+            to_json(&card, "create_reference result")
         }
         // A merge is only a ghost: the originals are moved to Trash by the UI when the user Keeps it.
         "merge_cards" => {
@@ -1196,7 +1243,25 @@ pub fn send_message(app: &AppHandle, state: &AppState, turn: Turn) -> Result<()>
     }
     // A grill turn says what is settled (the model re-asked answered questions without it): every
     // question asked in this thread with its chosen answer, plus the card's memory lines.
-    let grill = turn.question.is_some() || turn.text.starts_with("/grill-me");
+    let project_grill = turn.text.starts_with("/grill-project");
+    let grill = turn.question.is_some() || project_grill || turn.text.starts_with("/grill-me");
+    let asked_cards: Vec<String> = if project_grill {
+        vec!["project".into()]
+    } else if turn.thread != "project" {
+        std::iter::once(turn.thread.clone()).chain(turn.selection.iter().cloned()).collect()
+    } else if turn.selection.is_empty() {
+        vec!["project".into()]
+    } else {
+        turn.selection.clone()
+    };
+    let asked = grill
+        .then(|| {
+            let mut rel = asked_cards.clone();
+            rel.extend(card.iter().flat_map(|c| c.meta.links.iter().map(|l| l.to.clone())));
+            let path = state.ws.lock().ok()?.existing_project_dir(&turn.slug).ok()?.join("asked.json");
+            crate::ctx::asked_block(&read_asked(&path), &rel)
+        })
+        .flatten();
     let answered = grill
         .then(|| {
             let memory = card.as_ref().map_or_else(String::new, |c| {
@@ -1208,6 +1273,9 @@ pub fn send_message(app: &AppHandle, state: &AppState, turn: Turn) -> Result<()>
         })
         .flatten();
     if let Some(a) = &answered {
+        parts.push(a.clone());
+    }
+    if let Some(a) = &asked {
         parts.push(a.clone());
     }
     let transcript = crate::ctx::transcript(&file);
@@ -1227,7 +1295,7 @@ pub fn send_message(app: &AppHandle, state: &AppState, turn: Turn) -> Result<()>
     }
     let full_text = if parts.is_empty() { turn.text.clone() } else { format!("{}\n\n---\n\n{}", parts.join("\n\n"), turn.text) };
     // A live session gets the change block plus the related cards; the full text above is for a new one.
-    let delta_block = [answered.clone(), block, related_block.clone()].into_iter().flatten().collect::<Vec<_>>();
+    let delta_block = [answered.clone(), asked.clone(), block, related_block.clone()].into_iter().flatten().collect::<Vec<_>>();
     let delta_block = (!delta_block.is_empty()).then(|| delta_block.join("\n\n"));
     let delta_text = crate::ctx::with_block(delta_block, &turn.text);
 
@@ -1256,7 +1324,7 @@ pub fn send_message(app: &AppHandle, state: &AppState, turn: Turn) -> Result<()>
         let generation = state.claude.generation.load(Ordering::SeqCst);
         pending.insert(
             turn.id.clone(),
-            PendingCtx { generation, slug: turn.slug.clone(), thread: turn.thread.clone(), ctx: now, memory: turn.memory.then(|| MemoryTurn { user: turn.text.clone(), question: turn.question.clone() }) },
+            PendingCtx { generation, slug: turn.slug.clone(), thread: turn.thread.clone(), ctx: now, asked_cards, memory: turn.memory.then(|| MemoryTurn { user: turn.text.clone(), question: turn.question.clone() }) },
         );
         if let Ok(mut w) = state.claude.watch.lock() {
             w.insert(turn.id.clone(), Watch { generation, last: Instant::now() });
