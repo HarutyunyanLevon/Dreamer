@@ -418,7 +418,7 @@ impl Workspace {
             return Ok(());
         }
         let done = matches!(e.status.as_deref(), Some("built" | "partial"));
-        let (folder, x, y) = Self::place_in_built_frame(dir)?;
+        let (x, y) = Self::place_in_built_frame(dir)?;
         let mut card = self.create_card(
             slug,
             NewCard {
@@ -427,7 +427,6 @@ impl Workspace {
                 stage: Some(if done { Stage::Built } else { Stage::Mist }),
                 source: Some(Source::Claude),
                 ghost: Some(true),
-                folder,
                 x: Some(x),
                 y: Some(y),
                 ..Default::default()
@@ -440,12 +439,10 @@ impl Workspace {
         Ok(())
     }
 
-    /// The open version's folder, and the next free slot inside its "Built outside Dreamer" frame
-    /// (created to the right of existing content, and grown, as needed).
-    fn place_in_built_frame(dir: &Path) -> Result<(Option<String>, f64, f64)> {
-        let folders = Self::read_folders(dir)?;
-        let folder = Self::open_version_in(dir, &folders).map(|f| f.id);
-        let mut canvas = Self::read_canvas_at(dir, folder.as_deref())?;
+    /// The next free slot inside the "Built outside Dreamer" frame (created to the right of
+    /// existing content, and grown, as needed).
+    fn place_in_built_frame(dir: &Path) -> Result<(f64, f64)> {
+        let mut canvas = Self::read_canvas(dir)?;
         let mut changed = false;
         let fid = match canvas.frames.iter().find(|(_, f)| f.title.trim().eq_ignore_ascii_case(FRAME_TITLE)).map(|(id, _)| id.clone()) {
             Some(id) => id,
@@ -474,31 +471,24 @@ impl Workspace {
             changed = true;
         }
         if changed {
-            Self::write_canvas(dir, folder.as_deref(), &canvas)?;
+            Self::write_canvas(dir, &canvas)?;
         }
-        Ok((folder, fr.x + 24.0 + col * 250.0, fr.y + 56.0 + row * 190.0))
+        Ok((fr.x + 24.0 + col * 250.0, fr.y + 56.0 + row * 190.0))
     }
 
     // ----- <repo>/.dreamer/link.json -----
 
-    /// The link file for the project's repo: where it goes and what it says (open version only).
+    /// The link file for the project's repo: where it goes and what it says.
     pub fn link_value(&self, slug: &str) -> Result<Option<(PathBuf, Value)>> {
         let dir = self.existing_project_dir(slug)?;
         let meta = read_json_or_default_meta(&dir.join("project.json"), slug)?;
         // Nothing is written into a repo the user has not confirmed.
         let Some(repo) = meta.handoff_target.clone().filter(|t| meta.handoff_target_confirmed.as_deref() == Some(t.as_str())).map(PathBuf::from) else { return Ok(None) };
-        let folders = Self::read_folders(&dir)?;
-        let open = Self::open_version_in(&dir, &folders);
-        let of = Self::card_versions_in(&dir)?;
         let frames = self.card_frames(slug)?;
         let mut tags: Vec<String> = Vec::new();
         let mut cards = Vec::new();
         for c in Self::list_cards_in(&dir).0 {
-            let in_open = match &open {
-                Some(v) => of.get(&c.meta.id) == Some(&v.id),
-                None => true,
-            };
-            if c.meta.ghost || c.meta.kind != CardKind::Card || c.meta.role.is_some() || !in_open {
+            if c.meta.ghost || c.meta.kind != CardKind::Card || c.meta.role.is_some() {
                 continue;
             }
             for t in &c.meta.tags {
@@ -516,8 +506,6 @@ impl Workspace {
             "dreamer": 1,
             "workspace": self.root.display().to_string(),
             "project": { "slug": slug, "name": meta.name },
-            "version": open.as_ref().map(|v| json!({ "id": v.id, "title": v.title })),
-            "versions": versions_of(&folders).iter().map(|v| v.title.clone()).collect::<Vec<_>>(),
             "status_file": STATUS_REL,
             "tasks_dir": TASKS_REL,
             "outbox": OUTBOX_REL,
@@ -729,7 +717,7 @@ mod tests {
     }
 
     #[test]
-    fn link_json_lists_the_open_version_and_is_only_rewritten_on_change() {
+    fn link_json_lists_the_cards_and_is_only_rewritten_on_change() {
         let (_d, ws, slug, repo) = setup();
         let a = card(&ws, &slug, "Harpoon", "a rod");
         ws.update_card(&slug, &a.meta.id, CardPatch { tags: Some(vec!["gear".into()]), ..Default::default() }).unwrap();
@@ -744,9 +732,7 @@ mod tests {
         assert_eq!((v["dreamer"].as_i64(), v["project"]["slug"].as_str(), v["project"]["name"].as_str()), (Some(1), Some(slug.as_str()), Some("Fish")));
         assert_eq!((v["status_file"].as_str(), v["tasks_dir"].as_str(), v["outbox"].as_str()), (Some("docs/design/STATUS.md"), Some("docs/design/tasks"), Some(".dreamer/outbox")));
         assert_eq!(v["tags"], json!(["gear"]));
-        let ver = ws.open_version(&slug).unwrap().unwrap();
-        assert_eq!((v["version"]["id"].as_str(), v["version"]["title"].as_str()), (Some(ver.id.as_str()), Some(ver.title.as_str())));
-        assert_eq!(v["versions"], json!([ver.title]));
+        assert!(v.get("version").is_none() && v.get("versions").is_none());
         let cards = v["cards"].as_array().unwrap();
         assert_eq!(cards.len(), 2);
         let rod = cards.iter().find(|c| c["title"] == "Harpoon").unwrap();
@@ -754,15 +740,11 @@ mod tests {
         let net = cards.iter().find(|c| c["title"] == "Net").unwrap();
         assert!(net["build_status"].is_null() && net["frame"].is_null());
         assert!(!ws.write_link(&slug).unwrap(), "unchanged: not rewritten");
-        // Another version's cards stay out; an edit shows as dirty.
+        // An edit shows as dirty.
         ws.update_card(&slug, &a.meta.id, CardPatch { body: Some("changed".into()), ..Default::default() }).unwrap();
         assert!(ws.write_link(&slug).unwrap());
         let v: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(v["cards"].as_array().unwrap().iter().find(|c| c["title"] == "Harpoon").unwrap()["dirty"], true);
-        ws.new_version(&slug, &ver.id, "v2").unwrap();
-        ws.write_link(&slug).unwrap();
-        let v: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!((v["version"]["title"].as_str(), v["versions"].as_array().unwrap().len(), v["cards"].as_array().unwrap().len()), (Some("v2"), 2, 2));
     }
 
     #[test]

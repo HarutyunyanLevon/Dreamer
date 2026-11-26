@@ -274,10 +274,6 @@ pub struct Frontmatter {
     /// Display order; the first image is the cover.
     #[serde(default, deserialize_with = "lenient_list")]
     pub attachments: Vec<Attachment>,
-    /// The card this one was copied from (a new project version, or "Apply to" in Compare). Set on
-    /// copy, never changed after.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub origin: Option<Origin>,
     /// The bundle and ref this card was imported from (a re-sent bundle updates it).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub import: Option<ImportRef>,
@@ -293,14 +289,6 @@ pub struct ImportRef {
     pub r#ref: String,
     #[serde(default)]
     pub source: String,
-}
-
-/// A card's lineage: the card it was copied from and the version (folder id) that card was in.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
-pub struct Origin {
-    pub card: String,
-    #[serde(default)]
-    pub version: String,
 }
 
 impl Frontmatter {
@@ -380,12 +368,6 @@ pub struct NewCard {
     pub attachments: Option<Vec<Attachment>>,
     pub x: Option<f64>,
     pub y: Option<f64>,
-    /// The folder whose canvas the card lands on (None = the open version, or the root without versions).
-    #[serde(default)]
-    pub folder: Option<String>,
-    /// Lineage of a card copied across versions (Compare's "Apply to").
-    #[serde(default)]
-    pub origin: Option<Origin>,
     #[serde(default)]
     pub import: Option<ImportRef>,
     /// A bundle's build block, kept in the frontmatter as-is.
@@ -471,66 +453,10 @@ pub struct Frame {
 
 pub const MIN_FRAME_SIDE: f64 = 80.0;
 pub const MAX_FRAME_SIDE: f64 = 100_000.0;
-/// v2 added `frames`, v3 `folders`. Older files read fine (none of either) and are written back as v3.
+/// v2 added `frames`; v3 had folder tiles (gone with layout 2). Older files read fine and are written back as v3.
 pub const CANVAS_VERSION: u32 = 3;
 
-/// A folder inside a project (one record in folders.json). Its contents live on its own canvas,
-/// `canvases/<id>.json`; card files stay flat in cards/.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
-pub struct Folder {
-    pub id: String,
-    #[serde(default)]
-    pub title: String,
-    /// Parent folder id; None = the project root.
-    #[serde(default)]
-    pub parent: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub color: Option<String>,
-    #[serde(default)]
-    pub created: String,
-    #[serde(default)]
-    pub updated: String,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub nudge_off: bool,
-    /// "version" for a project version (always top-level); absent = an ordinary folder.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub kind: Option<String>,
-    /// A version: the version it was copied from.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub created_from: Option<String>,
-    #[serde(flatten)]
-    pub extra: BTreeMap<String, Value>,
-}
-
-pub const KIND_VERSION: &str = "version";
-
-impl Folder {
-    pub fn is_version(&self) -> bool {
-        self.kind.as_deref() == Some(KIND_VERSION) && self.parent.is_none()
-    }
-    pub fn name(&self) -> String {
-        if self.title.trim().is_empty() { "Untitled folder".into() } else { self.title.trim().to_string() }
-    }
-}
-
-/// folders.json.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
-pub struct FolderIndex {
-    #[serde(default)]
-    pub folders: Vec<Folder>,
-}
-
-/// One `save_layout` call: canvases to write (key "" = the root canvas) and, when present, the
-/// whole folder list (folders that left it lose their canvas file).
-#[derive(Deserialize, Debug, Default)]
-pub struct LayoutWrite {
-    #[serde(default)]
-    pub canvases: BTreeMap<String, Canvas>,
-    #[serde(default)]
-    pub folders: Option<Vec<Folder>>,
-}
-
-/// canvas.json / canvases/<folder>.json: camera, card and child-folder positions, frames.
+/// canvas.json: camera, card positions, frames.
 /// Links live in each card's frontmatter.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Canvas {
@@ -541,26 +467,23 @@ pub struct Canvas {
     pub cards: BTreeMap<String, Pos>,
     #[serde(default)]
     pub frames: BTreeMap<String, Frame>,
-    /// Child folders shown on this canvas.
-    #[serde(default)]
-    pub folders: BTreeMap<String, Pos>,
 }
 impl Default for Canvas {
     fn default() -> Self {
-        Canvas { version: CANVAS_VERSION, viewport: Viewport::default(), cards: BTreeMap::new(), frames: BTreeMap::new(), folders: BTreeMap::new() }
+        Canvas { version: CANVAS_VERSION, viewport: Viewport::default(), cards: BTreeMap::new(), frames: BTreeMap::new() }
     }
 }
 
 impl Canvas {
     /// The highest stacking order in use (0 when no card has one yet).
     pub fn max_z(&self) -> i64 {
-        self.cards.values().chain(self.folders.values()).filter_map(|p| p.z).max().unwrap_or(0)
+        self.cards.values().filter_map(|p| p.z).max().unwrap_or(0)
     }
 
     /// Repairs values a hand edit (or a bug) could leave behind: non-finite coordinates are
     /// reset, sizes are clamped to sane bounds, and a non-finite size falls back to "auto".
     pub fn sanitize(&mut self) {
-        for p in self.cards.values_mut().chain(self.folders.values_mut()) {
+        for p in self.cards.values_mut() {
             if !p.x.is_finite() {
                 p.x = 0.0;
             }
@@ -600,9 +523,6 @@ pub struct ProjectMeta {
     /// while this equals `handoff_target`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub handoff_target_confirmed: Option<String>,
-    /// The project version (folder id) that opens by default; also the "open version" Claude works in.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_version: Option<String>,
     /// Keys Dreamer doesn't know (hand edits, newer versions) survive a rewrite.
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
@@ -610,7 +530,7 @@ pub struct ProjectMeta {
 
 impl ProjectMeta {
     pub fn named(name: &str) -> ProjectMeta {
-        ProjectMeta { name: name.into(), theme: None, created: now_stamp(), handoff_target: None, handoff_target_confirmed: None, last_version: None, extra: BTreeMap::new() }
+        ProjectMeta { name: name.into(), theme: None, created: now_stamp(), handoff_target: None, handoff_target_confirmed: None, extra: BTreeMap::new() }
     }
 }
 
@@ -624,10 +544,6 @@ pub struct ProjectSummary {
     pub name: String,
     pub theme: Option<String>,
     pub card_count: usize,
-    pub is_inbox: bool,
-    /// Handoff pack versions under design/ (design/index.json).
-    #[serde(default)]
-    pub design_versions: usize,
     /// Unanswered lines in the handoff repo's docs/design/QUESTIONS.md.
     #[serde(default)]
     pub open_questions: usize,
@@ -642,12 +558,6 @@ pub struct ProjectPatch {
     pub handoff_target: Option<String>,
     /// Records that the user confirmed this exact target (first use).
     pub handoff_target_confirmed: Option<String>,
-    /// Hides the root canvas's "Tidy this folder?" hint (folders keep theirs in folders.json).
-    #[serde(default)]
-    pub nudge_off: Option<bool>,
-    /// The version that opens by default (must be a version folder).
-    #[serde(default)]
-    pub last_version: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -875,15 +785,6 @@ pub struct TrashItem {
     pub reason: String,
     pub deleted_at: String,
     pub pos: Option<Pos>,
-    /// "folder" for a trashed folder (its subtree is in trash/<id>.folder.json); absent = a card.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub kind: Option<String>,
-    /// The folder whose canvas it was on (None = the root).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub folder: Option<String>,
-    /// A trashed folder: how many cards went with it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub count: Option<usize>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
@@ -903,21 +804,14 @@ pub struct DeletedProject {
 #[derive(Serialize, Clone, Debug)]
 pub struct ProjectData {
     pub slug: String,
-    pub is_inbox: bool,
     pub meta: ProjectMeta,
-    /// The root canvas (canvas.json).
+    /// The project's one canvas (canvas.json).
     pub canvas: Canvas,
-    pub folders: Vec<Folder>,
-    /// Each folder's canvas by folder id.
-    pub canvases: BTreeMap<String, Canvas>,
     pub cards: Vec<Card>,
     /// Pending Claude edit proposals by card id (`cards/<id>.proposal.json`).
     pub proposals: BTreeMap<String, Value>,
     /// Files that could not be read (shown to the user, never fatal).
     pub warnings: Vec<String>,
-    /// The root has ordinary top-level folders and no versions yet: the UI asks which are versions.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub version_migration: Option<Value>,
 }
 
 #[cfg(test)]

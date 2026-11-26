@@ -10,7 +10,6 @@ pub struct Header {
     pub bundle_id: String,
     pub title: String,
     pub project: Option<String>,
-    pub version: Option<String>,
     pub frame: Option<String>,
     pub source: String,
     pub created: String,
@@ -116,8 +115,9 @@ pub fn parse(text: &str) -> Result<Bundle, String> {
             "bundle_id" => h.bundle_id = val.unwrap_or_default(),
             "title" => h.title = val.unwrap_or_default(),
             "project" => h.project = val,
-            "version" => h.version = val,
-            "frame" => h.frame = val,
+            // Layout 1 had project versions and folders: a version is ignored, a folder is a frame.
+            "version" => {}
+            "frame" | "folder" => h.frame = val,
             "source" => h.source = val.unwrap_or_default(),
             "created" => h.created = val.unwrap_or_default(),
             other => warnings.push(format!("Unknown header key \"{other}\" ignored.")),
@@ -199,7 +199,7 @@ pub fn parse(text: &str) -> Result<Bundle, String> {
                     serde_yaml::Value::Sequence(l) => c.tags = l.iter().filter_map(s).collect(),
                     other => c.tags = s(other).map(|x| vec![x]).unwrap_or_default(),
                 },
-                "frame" => c.frame = s(v),
+                "frame" | "folder" => c.frame = s(v),
                 "links" => {
                     if let serde_yaml::Value::Sequence(l) = v {
                         for e in l {
@@ -291,6 +291,15 @@ mod tests {
         assert!(detect(&t));
         assert_eq!(parse(&t).unwrap().cards.len(), 2);
         assert!(detect(&format!("\n\n```markdown\n{GOOD}\n```")));
+    }
+
+    #[test]
+    fn layout_1_version_is_ignored_and_folder_is_a_frame() {
+        let t = "---\ndreamer_bundle: 1\nbundle_id: b\nversion: v2\nfolder: Combat\n---\n<!-- card -->\n---\nref: a\ntitle: A\nfolder: Bosses\n---\nx\n";
+        let b = parse(t).unwrap();
+        assert_eq!(b.header.frame.as_deref(), Some("Combat"));
+        assert_eq!(b.cards[0].frame.as_deref(), Some("Bosses"));
+        assert!(b.warnings.is_empty(), "{:?}", b.warnings);
     }
 
     #[test]

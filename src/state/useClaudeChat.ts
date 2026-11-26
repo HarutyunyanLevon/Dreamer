@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, type BuildUpdate, type OrganizePlanData } from "../api";
+import { api, type BuildUpdate, type OrganizePlanData, type OrganizeScope } from "../api";
 import { claudeApi, type ClaudeEvent, type ClaudeStatus, type SearchResultRef } from "../api/claudeIndex";
 import type { ActivityStep, Backend, LocalFallback, ModelTier, RouteReason, TokenUsage } from "../api/claude";
 import { artifactRuns } from "./artifactRuns";
@@ -155,7 +155,10 @@ const TRANSIENT: (keyof ChatMessage)[] = ["localLoading", "streaming", "startedA
 
 /** An organize turn: its scope, the user's optional instruction, and a backend they forced (Redo). */
 export interface OrganizeReq {
-  scope: "folder" | "project";
+  scope: OrganizeScope;
+  /** frame / selection: the cards in scope; `name` = the frame's title. */
+  ids?: string[];
+  name?: string;
   instruction: string;
   backend?: Backend | null;
   /** The plan this one continues from: a revision, or only its unplaced cards (`rest`). */
@@ -163,7 +166,7 @@ export interface OrganizeReq {
   rest?: boolean;
 }
 
-type SendOpts = { quiet?: boolean; web?: boolean; selection?: string[]; folder?: string | null; memory?: boolean; question?: string; think?: boolean; pin?: ModelTier | null; escalate?: "retry"; organize?: OrganizeReq; artifact?: string; recapFrom?: string };
+type SendOpts = { quiet?: boolean; web?: boolean; selection?: string[]; memory?: boolean; question?: string; think?: boolean; pin?: ModelTier | null; escalate?: "retry"; organize?: OrganizeReq; artifact?: string; recapFrom?: string };
 type ArtifactEscalation = Extract<ClaudeEvent, { type: "artifact_escalate" }>;
 
 type LinkProposal = Extract<ClaudeEvent, { type: "link_proposal" }>;
@@ -516,7 +519,7 @@ export function useClaudeChat(opts: { slug: string | null; thread: string; onLin
       update(key, (ms) => [...ms, { id: `${id}-u`, role: "user", text: displayText ?? text }, { id, role: "claude", text: "", streaming: true, quiet: opts?.quiet, startedAt: now, lastEventAt: now, ...(opts?.organize ? { organizeReq: opts.organize } : {}), ...(opts?.artifact ? { artifact: { id: opts.artifact } } : {}) }], true);
       if (opts?.artifact) artifactRuns.start(opts.artifact, id);
       // A thread opened a moment ago (e.g. from the canvas context menu) may still be loading.
-      Promise.resolve(t.loaded ? undefined : t.loading).then(() => claudeApi.send(t.slug, id, text, context, t.thread, t.sessionId, { web: opts?.web, selection: opts?.selection, folder: opts?.folder, memory: opts?.memory, question: opts?.question, think: opts?.think, pin: opts?.pin, resumeLocal: t.localSessionId, escalate: opts?.escalate, organize: opts?.organize?.scope, organizeBackend: opts?.organize?.backend ?? null, organizeInstruction: opts?.organize?.instruction ?? null, organizePrior: opts?.organize?.prior ?? null, organizeRest: opts?.organize?.rest ?? false, artifact: opts?.artifact ?? null, recapFrom: opts?.recapFrom ?? null })).catch((e) => {
+      Promise.resolve(t.loaded ? undefined : t.loading).then(() => claudeApi.send(t.slug, id, text, context, t.thread, t.sessionId, { web: opts?.web, selection: opts?.selection, memory: opts?.memory, question: opts?.question, think: opts?.think, pin: opts?.pin, resumeLocal: t.localSessionId, escalate: opts?.escalate, organize: opts?.organize?.scope, scopeIds: opts?.organize?.ids ?? null, scopeName: opts?.organize?.name ?? null, organizeBackend: opts?.organize?.backend ?? null, organizeInstruction: opts?.organize?.instruction ?? null, organizePrior: opts?.organize?.prior ?? null, organizeRest: opts?.organize?.rest ?? false, artifact: opts?.artifact ?? null, recapFrom: opts?.recapFrom ?? null })).catch((e) => {
         update(key, (ms) => ms.map((m) => (m.id === id ? { ...m, text: String(e), streaming: false, isError: true } : m)), true);
         finishBusy(id);
       });

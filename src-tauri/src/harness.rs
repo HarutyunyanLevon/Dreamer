@@ -259,8 +259,6 @@ fn build_flat_fixture(dir: &Path) -> std::io::Result<usize> {
             }
         }
     }
-    let _ = std::fs::remove_dir_all(dir.join("canvases"));
-    std::fs::write(dir.join("folders.json"), "{\"folders\": []}")?;
     let mut canvas = Canvas::default();
     // A deterministic mess: a loose diagonal scatter with overlaps, the way a brainstorm looks.
     for (i, id) in ids.iter().enumerate() {
@@ -322,7 +320,6 @@ pub struct TurnResult {
 pub struct TurnOpts {
     pub thread: String,
     pub text: String,
-    pub folder: Option<String>,
     pub think: bool,
     pub retry_with_claude: bool,
     pub organize: Option<(String, Option<crate::router::Backend>)>,
@@ -395,7 +392,7 @@ impl Driver {
             text: o.text.clone(),
             context: o.context.clone(),
             thread: o.thread.clone(),
-            folder: o.folder.clone(),
+            scope: Default::default(),
             resume,
             web: false,
             selection: Vec::new(),
@@ -711,18 +708,15 @@ pub struct PlanCheck {
 const CARD_W: f64 = 236.0;
 const CARD_H: f64 = 150.0;
 
-/// A plan for the open folder: every non-pinned card covered, frames, retags, a tidy layout and no
+/// A plan for the project: every non-pinned card covered, frames, retags, a tidy layout and no
 /// folder ops. `positions` (explicit placement) is checked for overlaps when the plan has it.
-pub fn check_plan(state: &AppState, slug: &str, folder: Option<&str>, plan: &Value) -> PlanCheck {
+pub fn check_plan(state: &AppState, slug: &str, plan: &Value) -> PlanCheck {
     let mut c = PlanCheck::default();
     let Ok(p) = state.ws.lock().unwrap().load_project(slug) else {
         c.problems.push("project unreadable".into());
         return c;
     };
-    let canvas = match folder {
-        Some(f) => p.canvases.get(f).cloned().unwrap_or_default(),
-        None => p.canvas.clone(),
-    };
+    let canvas = p.canvas.clone();
     let live: BTreeSet<&str> = p.cards.iter().filter(|x| !x.meta.ghost).map(|x| x.meta.id.as_str()).collect();
     let on: Vec<(&String, &Pos)> = canvas.cards.iter().filter(|(id, _)| live.contains(id.as_str())).collect();
     c.cards = on.len();
@@ -730,13 +724,11 @@ pub fn check_plan(state: &AppState, slug: &str, folder: Option<&str>, plan: &Val
     let ops = plan.get("ops").and_then(Value::as_array).cloned().unwrap_or_default();
     let mut covered: BTreeSet<String> = BTreeSet::new();
     let mut placed: BTreeMap<String, (f64, f64)> = BTreeMap::new();
-    let folder_ids: BTreeSet<&str> = p.folders.iter().map(|f| f.id.as_str()).collect();
     for op in &ops {
         let kind = op.get("op").and_then(Value::as_str).unwrap_or_default();
         match kind {
             "create_folder" => c.folder_ops += 1,
             "move" => c.folder_ops += 1,
-            "rename" if op.get("id").and_then(Value::as_str).is_some_and(|i| folder_ids.contains(i)) => c.folder_ops += 1,
             "create_frame" => c.frames += 1,
             "retag" => c.retags += 1,
             "arrange" => {
@@ -854,12 +846,11 @@ fn s2(d: &mut Driver, run: usize) -> RunRecord {
     rec("S2", run, ok, format!("{:?} card_created={made}", t.end), vec![t])
 }
 
-fn organize_opts(folder: Option<String>) -> TurnOpts {
+fn organize_opts() -> TurnOpts {
     TurnOpts {
         thread: "project".into(),
-        text: "/organize (scope: the whole project): organize it into a clear structure. Call list_tree with scope \"folder\", then propose_organize once with the whole plan.".into(),
-        folder,
-        organize: Some(("folder".into(), None)),
+        text: "/organize (scope: the whole project): organize it into a clear structure. Call list_tree, then propose_organize once with the whole plan.".into(),
+        organize: Some(("project".into(), None)),
         ..Default::default()
     }
 }
@@ -867,8 +858,8 @@ fn organize_opts(folder: Option<String>) -> TurnOpts {
 fn s3(d: &mut Driver, run: usize, slug: &str) -> RunRecord {
     let prev = std::mem::replace(&mut d.slug, slug.to_string());
     d.reset_thread("project");
-    let t = d.turn(&organize_opts(None), |_, _, _| Act::None);
-    let check = t.plan.as_ref().map(|p| check_plan(&d.state(), &d.slug, None, p));
+    let t = d.turn(&organize_opts(), |_, _, _| Act::None);
+    let check = t.plan.as_ref().map(|p| check_plan(&d.state(), &d.slug, p));
     d.slug = prev;
     let ok = t.end == End::Done && check.as_ref().is_some_and(|c| c.ok);
     let note = format!(

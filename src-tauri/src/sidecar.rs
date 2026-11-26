@@ -31,10 +31,8 @@ pub struct ClaudeState {
     active_slug: Mutex<String>,
     /// Card ids selected on the canvas at the last turn (list_cards scope "selection").
     selection: Mutex<Vec<String>>,
-    /// The user's own words in the current turn: a write to another version needs its title there.
-    user_text: Mutex<String>,
-    /// The folder open on the canvas at the last turn: Claude's new cards land there.
-    folder: Mutex<Option<String>>,
+    /// The last turn's organize scope (list_tree / propose_organize).
+    scope: Mutex<crate::organize::Scope>,
     pub setup: crate::claude_setup::SetupState,
     /// The running handoff session (gap check or generation), if any. See handoff.rs.
     pub handoff: Mutex<Option<crate::handoff::Job>>,
@@ -106,10 +104,9 @@ impl Default for ClaudeState {
             sidecar: Mutex::new(None),
             generation: AtomicU64::new(0),
             app: OnceLock::new(),
-            active_slug: Mutex::new("inbox".into()),
+            active_slug: Mutex::new(String::new()),
             selection: Mutex::new(Vec::new()),
-            user_text: Mutex::new(String::new()),
-            folder: Mutex::new(None),
+            scope: Mutex::new(Default::default()),
             setup: Default::default(),
             handoff: Mutex::new(None),
             scan: Mutex::new(None),
@@ -821,105 +818,14 @@ fn active_slug(state: &AppState) -> Result<String> {
     Ok(state.claude.active_slug.lock().map_err(|_| AppError::Invalid("sidecar lock poisoned".into()))?.clone())
 }
 
-/// The project's versions as a Claude tool call sees them.
-struct VerScope {
-    versions: Vec<crate::model::Folder>,
-    /// The version of the folder open on the canvas, else the project's last version.
-    open: Option<crate::model::Folder>,
-    /// Card id -> version id.
-    of: std::collections::HashMap<String, String>,
-}
-
-impl VerScope {
-    fn load(state: &AppState, slug: &str) -> Result<VerScope> {
-        let folder = state.claude.folder.lock().ok().and_then(|f| f.clone());
-        let ws = state.ws.lock().map_err(|_| AppError::Invalid("workspace lock poisoned".into()))?;
-        let folders = ws.folders(slug).unwrap_or_default();
-        let versions: Vec<crate::model::Folder> = crate::storage::versions_of(&folders).into_iter().cloned().collect();
-        let open = folder.as_deref().and_then(|f| crate::storage::top_version(&folders, f)).and_then(|id| versions.iter().find(|v| v.id == id).cloned()).or(ws.open_version(slug).ok().flatten());
-        let of = if versions.is_empty() { Default::default() } else { ws.card_versions(slug).unwrap_or_default() };
-        Ok(VerScope { versions, open, of })
-    }
-    fn find(&self, key: &str) -> Result<&crate::model::Folder> {
-        let k = key.trim();
-        self.versions
-            .iter()
-            .find(|v| v.id == k || v.title.trim().eq_ignore_ascii_case(k))
-            .ok_or_else(|| AppError::NotFound(format!("version {k:?}; the versions are: {}", self.versions.iter().map(|v| v.name()).collect::<Vec<_>>().join(", "))))
-    }
-    /// The version a tool works in: its `version` input, else the open one (None = no versions).
-    fn pick(&self, input: &Value) -> Result<Option<&crate::model::Folder>> {
-        match input.get("version").and_then(Value::as_str).filter(|s| !s.trim().is_empty()) {
-            Some(k) if !self.versions.is_empty() => self.find(k).map(Some),
-            _ => Ok(self.open.as_ref()),
-        }
-    }
-    fn is_open(&self, id: &str) -> bool {
-        self.open.as_ref().is_some_and(|o| o.id == id)
-    }
-    /// A read of card `id`: it must be in `want` (the picked version) when there are versions.
-    fn check_read(&self, id: &str, want: Option<&crate::model::Folder>) -> Result<()> {
-        let (Some(want), Some(have)) = (want, self.of.get(id)) else { return Ok(()) };
-        if *have == want.id {
-            return Ok(());
-        }
-        let name = self.versions.iter().find(|v| &v.id == have).map(|v| v.name()).unwrap_or_default();
-        Err(AppError::Invalid(format!("card {id} is in version {name}, not {}; pass version \"{name}\" to read it", want.name())))
-    }
-    /// A write into version `target`: fine in the open version; another one only when the user's
-    /// own message names it. Returns that version's title for the change log when it isn't the open one.
-    fn check_write(&self, state: &AppState, target: Option<&str>) -> Result<Option<String>> {
-        let Some(t) = target else { return Ok(None) };
-        if self.open.is_none() || self.is_open(t) {
-            return Ok(None);
-        }
-        let v = self.versions.iter().find(|v| v.id == t).ok_or_else(|| AppError::NotFound(format!("version {t}")))?;
-        let said = state.claude.user_text.lock().map(|s| crate::storage::mentions(&s, &v.title)).unwrap_or(false);
-        if said {
-            return Ok(Some(v.name()));
-        }
-        let open = self.open.as_ref().map(|o| o.name()).unwrap_or_default();
-        Err(AppError::Invalid(format!(
-            "refused: that would change version {} but the open version is {open}. Writing to another version needs the user to ask for it by name. Ask the user whether they want this in {} (or work in {open} instead); do not retry without their answer.",
-            v.name(),
-            v.name()
-        )))
-    }
-    /// A write that touches existing cards: each card's own version must pass `check_write`.
-    fn check_cards(&self, state: &AppState, ids: &[&str]) -> Result<Option<String>> {
-        let mut tag = None;
-        for id in ids {
-            if let Some(t) = self.check_write(state, self.of.get(*id).map(String::as_str))? {
-                tag = Some(t);
-            }
-        }
-        Ok(tag)
-    }
-    /// "Version: v2 (others: v1)" for the context header.
-    fn header(&self) -> Option<String> {
-        let open = self.open.as_ref()?;
-        let others: Vec<String> = self.versions.iter().rev().filter(|v| v.id != open.id).map(|v| v.name()).collect();
-        Some(if others.is_empty() { format!("Version: {}", open.name()) } else { format!("Version: {} (others: {})", open.name(), others.join(", ")) })
-    }
-}
-
-fn with_tag(mut v: Value, tag: Option<String>) -> Value {
-    if let (Some(t), Some(o)) = (tag, v.as_object_mut()) {
-        o.insert("version".into(), json!(t));
-    }
-    v
+fn scope_of(state: &AppState) -> crate::organize::Scope {
+    state.claude.scope.lock().map(|s| s.clone()).unwrap_or_default()
 }
 
 fn run_tool(state: &AppState, tool: &str, input: Value) -> Result<Value> {
     match tool {
         "create_card" => {
             let slug = state.claude.active_slug.lock().map_err(|_| AppError::Invalid("sidecar lock poisoned".into()))?.clone();
-            let vs = VerScope::load(state, &slug)?;
-            let target = vs.pick(&input)?.map(|f| f.id.clone());
-            let tag = vs.check_write(state, target.as_deref())?;
-            // In the open version the card lands in the open folder; in another one, on its top canvas.
-            let open_folder = state.claude.folder.lock().ok().and_then(|f| f.clone());
-            let folder = if tag.is_some() { target.clone() } else { open_folder };
             let branch_group = input.get("branch_group").and_then(Value::as_str);
             let branch = branch_group.map(|g| json!({ "group": g, "of": input.get("variant_of").and_then(Value::as_str) }));
             let new_card = NewCard {
@@ -938,21 +844,14 @@ fn run_tool(state: &AppState, tool: &str, input: Value) -> Result<Value> {
                     .and_then(|v| serde_json::from_value::<crate::model::CardKind>(v).ok())
                     .filter(|k| matches!(k, crate::model::CardKind::Card | crate::model::CardKind::Sticky | crate::model::CardKind::Checklist)),
                 items: input.get("items").cloned().and_then(|v| serde_json::from_value(v).ok()),
-                folder,
                 ..Default::default()
             };
-            let card = {
-                let guard = state.ws.lock().map_err(|_| AppError::Invalid("workspace lock poisoned".into()))?;
-                // The folder may be gone since the turn started: then the card lands at the root.
-                let mut new_card = new_card;
-                new_card.folder = new_card.folder.filter(|f| guard.folders(&slug).is_ok_and(|l| l.iter().any(|x| &x.id == f)));
-                guard.create_card(&slug, new_card)?
-            };
+            let card = state.ws.lock().map_err(|_| AppError::Invalid("workspace lock poisoned".into()))?.create_card(&slug, new_card)?;
             // Don't wait for the watcher's debounce: a search right after this should see it.
             if let Ok(mut idx) = state.search.lock() {
                 idx.mark_dirty(Some(&slug));
             }
-            Ok(with_tag(to_json(&card, "create_card result")?, tag))
+            to_json(&card, "create_card result")
         }
         // A merge is only a ghost: the originals are moved to Trash by the UI when the user Keeps it.
         "merge_cards" => {
@@ -969,11 +868,6 @@ fn run_tool(state: &AppState, tool: &str, input: Value) -> Result<Value> {
             if uniq.len() < 2 {
                 return Err(AppError::Invalid("merge_cards needs at least 2 distinct card ids".into()));
             }
-            let vs = VerScope::load(state, &slug)?;
-            let tag = vs.check_cards(state, &uniq.iter().map(String::as_str).collect::<Vec<_>>())?;
-            if uniq.iter().map(|id| vs.of.get(id)).collect::<std::collections::HashSet<_>>().len() > 1 {
-                return Err(AppError::Invalid("these cards are in different project versions; merge cards of one version only".into()));
-            }
             let card = {
                 let guard = state.ws.lock().map_err(|_| AppError::Invalid("workspace lock poisoned".into()))?;
                 let project = guard.load_project(&slug)?;
@@ -988,8 +882,6 @@ fn run_tool(state: &AppState, tool: &str, input: Value) -> Result<Value> {
                 let mut links: Vec<Link> = Vec::new();
                 let mut atts: Vec<&[crate::model::Attachment]> = Vec::new();
                 let (mut sx, mut sy, mut n) = (0.0, 0.0, 0.0);
-                // The merge lands on the canvas of the first original that has a place.
-                let mut folder: Option<Option<String>> = None;
                 for id in &uniq {
                     let c = project.cards.iter().find(|c| &c.meta.id == id).ok_or_else(|| AppError::NotFound(format!("card {id} in the open project")))?;
                     atts.push(&c.meta.attachments);
@@ -1001,16 +893,10 @@ fn run_tool(state: &AppState, tool: &str, input: Value) -> Result<Value> {
                             links.push(l.clone());
                         }
                     }
-                    let on = std::iter::once((None, &project.canvas)).chain(project.canvases.iter().map(|(k, c)| (Some(k.clone()), c))).find_map(|(k, c)| c.cards.get(id).map(|p| (k, *p)));
-                    if let Some((k, p)) = on {
-                        if folder.is_none() {
-                            folder = Some(k.clone());
-                        }
-                        if folder.as_ref() == Some(&k) {
-                            sx += p.x;
-                            sy += p.y;
-                            n += 1.0;
-                        }
+                    if let Some(p) = project.canvas.cards.get(id) {
+                        sx += p.x;
+                        sy += p.y;
+                        n += 1.0;
                     }
                 }
                 let new_card = NewCard {
@@ -1026,7 +912,6 @@ fn run_tool(state: &AppState, tool: &str, input: Value) -> Result<Value> {
                     attachments: Some(crate::model::merge_attachments(atts)),
                     x: (n > 0.0).then(|| sx / n),
                     y: (n > 0.0).then(|| sy / n),
-                    folder: folder.flatten(),
                     ..Default::default()
                 };
                 guard.create_card(&slug, new_card)?
@@ -1034,7 +919,7 @@ fn run_tool(state: &AppState, tool: &str, input: Value) -> Result<Value> {
             if let Ok(mut idx) = state.search.lock() {
                 idx.mark_dirty(Some(&slug));
             }
-            Ok(with_tag(to_json(&card, "merge_cards result")?, tag))
+            to_json(&card, "merge_cards result")
         }
         // ---- read-only retrieval tools: nothing below writes to disk ----
         "search_cards" => {
@@ -1044,32 +929,17 @@ fn run_tool(state: &AppState, tool: &str, input: Value) -> Result<Value> {
                 Some("project") => Some(active_slug(state)?),
                 _ => None,
             };
-            let mut hits = state.with_search(|idx| idx.search(query, project.as_deref(), limit.min(25)))?;
-            // Hits in the open project: only its open (or the asked) version.
-            let slug = active_slug(state)?;
-            let vs = VerScope::load(state, &slug)?;
-            if let Some(v) = vs.pick(&input)? {
-                hits.retain(|h| h.project != slug || vs.of.get(&h.id) == Some(&v.id));
-            }
-            if let Ok(ws) = state.ws.lock() {
-                ws.annotate_hits(&mut hits);
-            }
+            let hits = state.with_search(|idx| idx.search(query, project.as_deref(), limit.min(25)))?;
             to_json(&hits, "search results")
         }
         "read_card" => {
             let id = input.get("id").and_then(Value::as_str).unwrap_or_default();
             crate::storage::check_id(id)?;
             let slug = active_slug(state)?;
-            let vs = VerScope::load(state, &slug)?;
-            vs.check_read(id, vs.pick(&input)?)?;
-            let version = vs.of.get(id).and_then(|v| vs.versions.iter().find(|f| &f.id == v)).map(|f| f.name());
             state.with_search(|idx| {
                 let (project, card) = idx.find(id, Some(&slug)).ok_or_else(|| AppError::NotFound(format!("card {id} (it may have been trashed)")))?;
                 let mut v = to_json(&card, "card")?;
                 v["project"] = json!(project);
-                if let Some(name) = &version {
-                    v["version"] = json!(name);
-                }
                 v["links"] = json!(idx.describe_links(&project, &card.meta.links));
                 v["kind"] = to_json(&card.meta.kind, "kind")?;
                 // A summary only; view_attachment shows an image or a clip's saved text.
@@ -1086,18 +956,13 @@ fn run_tool(state: &AppState, tool: &str, input: Value) -> Result<Value> {
             if only_selection && selection.is_empty() {
                 return Err(AppError::Invalid("nothing is selected on the canvas; use scope \"project\"".into()));
             }
-            let (frames, folder_of) = {
-                let ws = state.ws.lock().map_err(|_| AppError::Invalid("workspace lock poisoned".into()))?;
-                (ws.card_frames(&slug)?, ws.card_folder_paths(&slug).unwrap_or_default())
-            };
+            let frames = state.ws.lock().map_err(|_| AppError::Invalid("workspace lock poisoned".into()))?.card_frames(&slug)?;
             let mut cards = state.with_search(|idx| idx.overview(&slug).map(|(_, c)| c).unwrap_or_default())?;
-            let vs = VerScope::load(state, &slug)?;
-            let want = vs.pick(&input)?.map(|f| f.id.clone());
-            cards.retain(|c| !c.ghost && (!only_selection || selection.contains(&c.id)) && (want.is_none() || vs.of.get(&c.id) == want.as_ref()));
+            cards.retain(|c| !c.ghost && (!only_selection || selection.contains(&c.id)));
             cards.sort_by(|a, b| b.updated.cmp(&a.updated));
             let out: Vec<Value> = cards
                 .iter()
-                .map(|c| json!({ "id": c.id, "kind": c.kind, "title": c.title, "stage": c.stage, "tags": c.tags, "frame": frames.get(&c.id), "folder": folder_of.get(&c.id) }))
+                .map(|c| json!({ "id": c.id, "kind": c.kind, "title": c.title, "stage": c.stage, "tags": c.tags, "frame": frames.get(&c.id) }))
                 .collect();
             Ok(Value::Array(out))
         }
@@ -1109,19 +974,9 @@ fn run_tool(state: &AppState, tool: &str, input: Value) -> Result<Value> {
         }
         // Only *proposes* a link: validated here, then shown in the UI as a dashed ghost link the
         // user must Keep. Nothing is written to any card file.
-        "list_tree" => {
-            let slug = active_slug(state)?;
-            let vs = VerScope::load(state, &slug)?;
-            // Another version: its top canvas. The open one: the open folder, as before.
-            let open = match vs.pick(&input)? {
-                Some(v) if !vs.is_open(&v.id) => Some(v.id.clone()),
-                Some(v) => state.claude.folder.lock().ok().and_then(|f| f.clone()).or(Some(v.id.clone())),
-                None => state.claude.folder.lock().ok().and_then(|f| f.clone()),
-            };
-            crate::organize::list_tree(state, &slug, open, &input)
-        }
+        "list_tree" => crate::organize::list_tree(state, &active_slug(state)?, &scope_of(state), &input),
         // Only *proposes* a reorganization: checked in full here, previewed and applied by the UI.
-        "propose_organize" => crate::organize::propose_organize(state, &active_slug(state)?, state.claude.folder.lock().ok().and_then(|f| f.clone()), &input),
+        "propose_organize" => crate::organize::propose_organize(state, &active_slug(state)?, &scope_of(state), &input),
         "propose_link" => {
             let from = input.get("from").and_then(Value::as_str).unwrap_or_default();
             let to = input.get("to").and_then(Value::as_str).unwrap_or_default();
@@ -1131,13 +986,12 @@ fn run_tool(state: &AppState, tool: &str, input: Value) -> Result<Value> {
                 return Err(AppError::Invalid("a card can't link to itself".into()));
             }
             let slug = active_slug(state)?;
-            let tag = VerScope::load(state, &slug)?.check_cards(state, &[from])?;
             let from_card = state.ws.lock().map_err(|_| AppError::Invalid("workspace lock poisoned".into()))?.read_card(&slug, from)?;
             let to_card = state.ws.lock().map_err(|_| AppError::Invalid("workspace lock poisoned".into()))?.read_card(&slug, to)?;
             if from_card.meta.links.iter().any(|l| l.to == to) {
                 return Err(AppError::Invalid(format!("\"{}\" already links to \"{}\"", from_card.meta.title, to_card.meta.title)));
             }
-            Ok(with_tag(json!({ "slug": slug, "from": from, "to": to, "fromTitle": from_card.meta.title, "toTitle": to_card.meta.title }), tag))
+            Ok(json!({ "slug": slug, "from": from, "to": to, "fromTitle": from_card.meta.title, "toTitle": to_card.meta.title }))
         }
         // Read-only: one attachment for Claude to look at. Images come back downscaled as base64;
         // clips as the page excerpt saved when the clip was made.
@@ -1153,7 +1007,6 @@ fn run_tool(state: &AppState, tool: &str, input: Value) -> Result<Value> {
             let id = input.get("card_id").and_then(Value::as_str).unwrap_or_default();
             crate::storage::check_id(id)?;
             let slug = active_slug(state)?;
-            let tag = VerScope::load(state, &slug)?.check_cards(state, &[id])?;
             let guard = state.ws.lock().map_err(|_| AppError::Invalid("workspace lock poisoned".into()))?;
             let card = guard.read_card(&slug, id)?;
             let mut p = serde_json::Map::new();
@@ -1191,7 +1044,7 @@ fn run_tool(state: &AppState, tool: &str, input: Value) -> Result<Value> {
             if let Ok(mut idx) = state.search.lock() {
                 idx.mark_dirty(Some(&slug));
             }
-            Ok(with_tag(json!({ "slug": slug, "title": card.meta.title }), tag))
+            Ok(json!({ "slug": slug, "title": card.meta.title }))
         }
         // A ghost artifact (deepen / grill): a brief only. Nothing is generated or spent until the
         // user keeps it; keeping it starts the artifact's first turn (UI).
@@ -1199,20 +1052,14 @@ fn run_tool(state: &AppState, tool: &str, input: Value) -> Result<Value> {
             let slug = active_slug(state)?;
             let kind = input.get("type").and_then(Value::as_str).unwrap_or_default().to_string();
             let source = input.get("source_card").and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_string);
-            let vs = VerScope::load(state, &slug)?;
-            let target = vs.pick(&input)?.map(|f| f.id.clone());
-            let tag = vs.check_write(state, target.as_deref())?;
-            let folder = if tag.is_some() { target } else { state.claude.folder.lock().ok().and_then(|f| f.clone()) };
             let guard = state.ws.lock().map_err(|_| AppError::Invalid("workspace lock poisoned".into()))?;
             let source = source.filter(|s| guard.read_card(&slug, s).is_ok());
-            let folder = folder.filter(|f| guard.folders(&slug).is_ok_and(|l| l.iter().any(|x| &x.id == f)));
             let new = crate::artifacts::NewArtifact {
                 kind,
                 title: input.get("title").and_then(Value::as_str).map(str::to_string),
                 brief: input.get("brief").and_then(Value::as_str).unwrap_or_default().to_string(),
                 source_card: source,
                 ghost: true,
-                folder,
                 ..Default::default()
             };
             let card = crate::artifacts::create(&guard, &slug, new)?;
@@ -1220,7 +1067,7 @@ fn run_tool(state: &AppState, tool: &str, input: Value) -> Result<Value> {
             if let Ok(mut idx) = state.search.lock() {
                 idx.mark_dirty(Some(&slug));
             }
-            Ok(with_tag(json!({ "id": card.meta.id, "title": card.meta.title }), tag))
+            Ok(json!({ "id": card.meta.id, "title": card.meta.title }))
         }
         other => Err(AppError::Invalid(format!("unknown tool {other:?}"))),
     }
@@ -1257,56 +1104,6 @@ pub(crate) fn view_attachment(state: &AppState, slug: &str, id: &str, att_id: &s
     }
 }
 
-/// Most chars of the folder block; one card's body inside the open folder.
-const FOLDER_CTX_MAX: usize = 24_000;
-const FOLDER_CARD_MAX: usize = 2_000;
-
-/// The folder tree and where every card lives; inside a folder, that folder's cards in full and
-/// every other card as title + folder path. Returns (block, shape) where `shape` changes only
-/// when the tree, the open folder or a card's folder does (so edits alone don't resend it).
-fn folder_context(folders: &[crate::model::Folder], of_card: &std::collections::HashMap<String, String>, open: Option<&str>, bodies: &[crate::model::Card], cards: &[crate::search::OverviewCard]) -> (String, String) {
-    let paths = crate::storage::Workspace::folder_paths(folders);
-    let path_of = |id: &str| of_card.get(id).and_then(|f| paths.get(f)).cloned().unwrap_or_else(|| "project root".into());
-    let kept: Vec<&crate::search::OverviewCard> = cards.iter().filter(|c| !c.ghost).collect();
-    let mut out = String::from("[Folders]");
-    fn walk(out: &mut String, folders: &[crate::model::Folder], parent: Option<&str>, depth: usize, of_card: &std::collections::HashMap<String, String>) {
-        for f in folders.iter().filter(|f| f.parent.as_deref() == parent) {
-            let n = of_card.values().filter(|x| **x == f.id).count();
-            let title = if f.title.trim().is_empty() { "Untitled folder" } else { f.title.trim() };
-            out.push_str(&format!("\n{}- {title} ({n} card{})", "  ".repeat(depth), if n == 1 { "" } else { "s" }));
-            walk(out, folders, Some(&f.id), depth + 1, of_card);
-        }
-    }
-    walk(&mut out, folders, None, 0, of_card);
-    let mut shape: Vec<String> = folders.iter().map(|f| format!("{}<{}:{}", f.id, f.parent.as_deref().unwrap_or(""), f.title)).collect();
-    let mut placed: Vec<String> = of_card.iter().map(|(c, f)| format!("{c}@{f}")).collect();
-    placed.sort();
-    shape.extend(placed);
-    shape.push(format!("open={}", open.unwrap_or("")));
-    match open.and_then(|o| paths.get(o).map(|p| (o, p))) {
-        Some((open_id, path)) => {
-            out.push_str(&format!("\n\n[Open folder] {path}: the user is working inside this folder. Its cards in full:"));
-            for c in bodies.iter().filter(|c| !c.meta.ghost) {
-                let stage = serde_json::to_value(c.meta.stage).ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
-                let body = if c.body.trim().is_empty() { "(no notes yet)".to_string() } else { crate::ctx::cap_for_claude(&crate::ctx::clean_for_claude(&c.body), FOLDER_CARD_MAX) };
-                let tags = if c.meta.tags.is_empty() { String::new() } else { format!(" · tags: {}", c.meta.tags.join(", ")) };
-                out.push_str(&format!("\n\n- {} · \"{}\" · {stage}{tags}\n{body}", c.meta.id, c.meta.title.trim()));
-            }
-            out.push_str("\n\nOther cards (id · title · folder):");
-            for c in kept.iter().filter(|c| of_card.get(&c.id).map(String::as_str) != Some(open_id)) {
-                out.push_str(&format!("\n- {} · \"{}\" · {}", c.id, c.title.trim(), path_of(&c.id)));
-            }
-        }
-        None => {
-            out.push_str("\n\nCards inside folders (id · title · folder):");
-            for c in kept.iter().filter(|c| of_card.contains_key(&c.id)) {
-                out.push_str(&format!("\n- {} · \"{}\" · {}", c.id, c.title.trim(), path_of(&c.id)));
-            }
-        }
-    }
-    (crate::ctx::cap_for_claude(&out, FOLDER_CTX_MAX), shape.join("\n"))
-}
-
 /// One chat turn from the UI.
 pub struct Turn {
     pub slug: String,
@@ -1316,8 +1113,8 @@ pub struct Turn {
     pub context: Option<String>,
     /// Chat thread: a card id, or "project".
     pub thread: String,
-    /// The folder open on the canvas (None = the project root).
-    pub folder: Option<String>,
+    /// The organize scope (a frame's cards or the selection; project = every card).
+    pub scope: crate::organize::Scope,
     /// Claude session id saved in that thread's file, to resume the conversation.
     pub resume: Option<String>,
     /// This turn may use WebSearch / WebFetch (the chat's globe toggle).
@@ -1336,7 +1133,7 @@ pub struct Turn {
     pub resume_local: Option<String>,
     /// "Retry with Claude" on a failed local turn.
     pub retry_with_claude: bool,
-    /// An organize turn: scope "folder" | "project", and a backend the user forced ("Redo with
+    /// An organize turn: its scope kind, and a backend the user forced ("Redo with
     /// Claude" / "Redo locally"); None = by the number of cards in scope.
     pub organize: Option<(String, Option<crate::router::Backend>)>,
     /// The organize request's own words (the pipeline's instruction), the plan it continues from
@@ -1376,54 +1173,26 @@ pub fn send_message(app: &AppHandle, state: &AppState, turn: Turn) -> Result<()>
     ensure_started(app, state)?;
     *state.claude.active_slug.lock().map_err(|_| AppError::Invalid("sidecar lock poisoned".into()))? = turn.slug.clone();
     *state.claude.selection.lock().map_err(|_| AppError::Invalid("sidecar lock poisoned".into()))? = turn.selection.clone();
-    *state.claude.folder.lock().map_err(|_| AppError::Invalid("sidecar lock poisoned".into()))? = turn.folder.clone();
-    *state.claude.user_text.lock().map_err(|_| AppError::Invalid("sidecar lock poisoned".into()))? = turn.text.clone();
-    // Project versions: Claude sees (and by default works in) the open version only.
-    let vs = VerScope::load(state, &turn.slug)?;
-    let open_v = vs.open.as_ref().map(|v| v.id.clone());
-    let in_open = |id: &str| open_v.is_none() || vs.of.get(id) == open_v.as_ref();
-    let (settings, frames, file, memory, card, folder_info) = {
+    *state.claude.scope.lock().map_err(|_| AppError::Invalid("sidecar lock poisoned".into()))? = turn.scope.clone();
+    let (settings, frames, file, memory, card) = {
         let ws = state.ws.lock().map_err(|_| AppError::Invalid("workspace lock poisoned".into()))?;
         let card = if turn.thread == "project" { None } else { ws.read_card(&turn.slug, &turn.thread).ok() };
-        let folders = ws.folders(&turn.slug).unwrap_or_default();
-        let info = (!folders.is_empty()).then(|| {
-            let mut of_card = ws.card_folders(&turn.slug).unwrap_or_default();
-            of_card.retain(|c, _| in_open(c));
-            let open = turn.folder.as_deref().filter(|f| folders.iter().any(|x| x.id == *f)).map(str::to_string);
-            let bodies: Vec<crate::model::Card> = match &open {
-                Some(f) => of_card.iter().filter(|(_, x)| *x == f).filter_map(|(id, _)| ws.read_card(&turn.slug, id).ok()).collect(),
-                None => Vec::new(),
-            };
-            (folders, of_card, open, bodies)
-        });
-        (ws.get_settings().unwrap_or_default(), ws.card_frames(&turn.slug).unwrap_or_default(), ws.load_chat(&turn.slug, &turn.thread).unwrap_or(Value::Null), ws.read_memory(&turn.slug), card, info)
+        (ws.get_settings().unwrap_or_default(), ws.card_frames(&turn.slug).unwrap_or_default(), ws.load_chat(&turn.slug, &turn.thread).unwrap_or(Value::Null), ws.read_memory(&turn.slug), card)
     };
     let cards = state.with_search(|idx| idx.overview(&turn.slug)).ok().flatten().map(|(name, mut cards)| {
-        cards.retain(|c| in_open(&c.id));
         for c in &mut cards {
             c.frame = frames.get(&c.id).cloned();
         }
         (name, cards)
     });
-    let folder_ctx = folder_info.as_ref().map(|(folders, of_card, open, bodies)| folder_context(folders, of_card, open.as_deref(), bodies, cards.as_ref().map(|c| c.1.as_slice()).unwrap_or(&[])));
 
     // What Claude has seen already (the snapshot saved with the thread) vs. the project now.
     let prev: Option<crate::ctx::Ctx> = file.get("ctx").and_then(|c| serde_json::from_value(c.clone()).ok());
     let mark = card.as_ref().map(|c| crate::ctx::CardMark { id: c.meta.id.clone(), updated: c.meta.updated.clone() });
-    let now = crate::ctx::snapshot(cards.as_ref().map(|c| c.1.as_slice()).unwrap_or(&[]), memory.as_deref(), mark);
+    let mut now = crate::ctx::snapshot(cards.as_ref().map(|c| c.1.as_slice()).unwrap_or(&[]), memory.as_deref(), mark);
     // A thread with no snapshot yet (older files) just sends the user's words: a delta against
     // nothing would call every card new.
-    let mut now = now;
-    now.folders = folder_ctx.as_ref().map(|(_, shape)| crate::ctx::hash(shape)).unwrap_or_default();
     let block = prev.as_ref().and_then(|p| crate::ctx::delta(p, &now, memory.as_deref(), card.as_ref()));
-    // Moving between folders (or reshaping them) re-sends the folder block in a live session.
-    let folder_moved = prev.as_ref().is_some_and(|p| p.folders != now.folders);
-    let block = match (block, folder_moved.then(|| folder_ctx.as_ref().map(|(b, _)| b.clone())).flatten()) {
-        (Some(b), Some(f)) => Some(format!("{b}
-
-{f}")),
-        (b, f) => b.or(f),
-    };
 
     // An artifact turn starts with the artifact block (it changes every turn, so both texts carry it).
     let mut turn = turn;
@@ -1474,7 +1243,7 @@ pub fn send_message(app: &AppHandle, state: &AppState, turn: Turn) -> Result<()>
             crate::organize_pipeline::Request {
                 turn: turn.id.clone(),
                 slug: turn.slug.clone(),
-                folder: turn.folder.clone(),
+                scope: turn.scope.clone(),
                 instruction: turn.organize_instruction.clone().unwrap_or_default(),
                 prior: turn.organize_prior.clone(),
                 rest: turn.organize_rest,
@@ -1504,7 +1273,7 @@ pub fn send_message(app: &AppHandle, state: &AppState, turn: Turn) -> Result<()>
     let seen: std::collections::BTreeMap<String, String> = if compact || route.escalated { Default::default() } else { prev.as_ref().map(|p| p.sent.clone()).unwrap_or_default() };
     let card_id = card.as_ref().map(|c| c.meta.id.clone());
     let retrieved = state.with_search(|idx| idx.retrieve(&turn.slug, card_id.as_deref(), &turn.text)).unwrap_or_default();
-    let fresh: Vec<crate::search::Retrieved> = retrieved.into_iter().filter(|r| seen.get(&r.id) != Some(&r.updated) && in_open(&r.id)).collect();
+    let fresh: Vec<crate::search::Retrieved> = retrieved.into_iter().filter(|r| seen.get(&r.id) != Some(&r.updated)).collect();
     now.sent = seen;
     for r in &fresh {
         now.sent.insert(r.id.clone(), r.updated.clone());
@@ -1520,9 +1289,6 @@ pub fn send_message(app: &AppHandle, state: &AppState, turn: Turn) -> Result<()>
     let digest = cards.as_ref().map(|(name, cs)| crate::search::project_digest(name, cs));
     if let Some(d) = &digest {
         parts.push(d.clone());
-    }
-    if let Some((f, _)) = &folder_ctx {
-        parts.push(f.clone());
     }
     let card_ctx = turn.context.as_deref().filter(|c| !c.trim().is_empty()).map(|c| crate::ctx::cap_for_claude(&crate::ctx::clean_for_claude(c), crate::ctx::MAX_CARD_CHARS));
     if let Some(c) = &card_ctx {
@@ -1587,11 +1353,6 @@ pub fn send_message(app: &AppHandle, state: &AppState, turn: Turn) -> Result<()>
     let delta_block = [answered.clone(), block, related_block.clone()].into_iter().flatten().collect::<Vec<_>>();
     let delta_block = (!delta_block.is_empty()).then(|| delta_block.join("\n\n"));
     let delta_text = if route.escalated { full_text.clone() } else { crate::ctx::with_block(delta_block, &turn.text) };
-    // "Version: v2 (others: v1)" heads every message (it is short, and the open version can change between turns).
-    let (full_text, delta_text) = match vs.header() {
-        Some(h) => (format!("{h}\n\n{full_text}"), format!("{h}\n\n{delta_text}")),
-        None => (full_text, delta_text),
-    };
 
     // Sizes only, never content: what each part of this turn weighs (chars), for diagnosing context bloat.
     let n = |o: Option<&String>| o.map_or(0, |s| s.chars().count());
@@ -1673,8 +1434,7 @@ pub fn send_message(app: &AppHandle, state: &AppState, turn: Turn) -> Result<()>
         let retry = if history.trim().is_empty() {
             full_text.clone()
         } else {
-            let head = vs.header().map(|h| format!("{h}\n\n")).unwrap_or_default();
-            format!("{head}{}\n\n[This thread so far]\n{history}\n\n---\n\n{}", parts.join("\n\n"), turn.text)
+            format!("{}\n\n[This thread so far]\n{history}\n\n---\n\n{}", parts.join("\n\n"), turn.text)
         };
         msg["retryText"] = json!(retry);
     }

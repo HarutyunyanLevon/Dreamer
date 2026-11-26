@@ -163,9 +163,6 @@ pub struct Ctx {
     /// Cards already sent as `[Related cards]` in this session: id -> `updated` when sent.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub sent: BTreeMap<String, String>,
-    /// Hash of the folder tree, card placement and open folder ("" = no folders).
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub folders: String,
 }
 
 /// FNV-1a: stable across Rust versions, unlike `DefaultHasher`.
@@ -193,7 +190,6 @@ pub fn snapshot(cards: &[OverviewCard], memory: Option<&str>, card: Option<CardM
             .collect(),
         card,
         sent: BTreeMap::new(),
-        folders: String::new(),
     }
 }
 

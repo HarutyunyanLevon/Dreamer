@@ -1,5 +1,5 @@
 import { Fragment, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { api, TECH_GAP_ITEM, type Card } from "../api";
+import { api, TECH_GAP_ITEM, type Card, type OrganizePlanData, type ProjectData } from "../api";
 import { openQuestions } from "./kinds";
 import { useClaudeChat, type ChatMessage } from "../state/useClaudeChat";
 import type { Workspace } from "../state/useWorkspace";
@@ -22,20 +22,42 @@ import { ModelChip } from "./chat/ModelChip";
 import { ActionMenu, filterActions, type ChatAction } from "./chat/ActionMenu";
 import { OrganizePlanCard, reviseText } from "./OrganizePlan";
 import type { OrganizeReq } from "../state/useClaudeChat";
-import { folderName } from "../state/useWorkspace";
+import { cardRect } from "./cardGeometry";
+import { centerInside } from "./Frames";
 import { refreshBalance, useBalance } from "../state/artifactRuns";
 import { buildRuns, liveRunOf, useBuildRuns } from "../state/buildRuns";
 import { BuildPanel } from "./BuildPanel";
 
-/** "/organize [project] [instruction]" -> the request (scope: the open folder unless "project"). */
-function parseOrganize(text: string): OrganizeReq | null {
+/**
+ * "/organize [project | selection | frame <id>] [instruction]" -> the request (default: the project).
+ * Frame and selection resolve to their cards here.
+ */
+function parseOrganize(text: string, data: ProjectData | null, selection: string[]): OrganizeReq | { error: string } | null {
   const m = /^\/organize\b\s*(.*)$/is.exec(text.trim());
   if (!m) return null;
   let rest = m[1].trim();
-  const whole = /^(project|all|whole project|the whole project)\b[\s:,-]*/i.exec(rest);
-  if (whole) rest = rest.slice(whole[0].length).trim();
-  return { scope: whole ? "project" : "folder", instruction: rest };
+  const take = (re: RegExp) => {
+    const x = re.exec(rest);
+    if (x) rest = rest.slice(x[0].length).trim();
+    return x;
+  };
+  const frame = take(/^frame\s+(\S+)[\s:,-]*/i);
+  if (frame) {
+    const f = data?.canvas.frames[frame[1]];
+    if (!f || !data) return { error: "That frame is gone." };
+    const ids = Object.entries(data.canvas.cards).filter(([, p]) => centerInside(f, cardRect(p))).map(([id]) => id);
+    return { scope: "frame", ids, name: f.title.trim() || "Untitled frame", instruction: rest };
+  }
+  if (take(/^(selection|selected)\b[\s:,-]*/i)) {
+    if (!selection.length) return { error: "Select some cards on the canvas first." };
+    return { scope: "selection", ids: selection, instruction: rest };
+  }
+  take(/^(project|all|whole project|the whole project)\b[\s:,-]*/i);
+  return { scope: "project", instruction: rest };
 }
+
+const planScope = (p: OrganizePlanData): Pick<OrganizeReq, "scope" | "ids" | "name"> => ({ scope: p.scope, ids: p.scopeIds ?? undefined, name: p.scopeName });
+const scopeWords = (r: OrganizeReq) => (r.scope === "frame" ? `frame "${r.name}"` : r.scope === "selection" ? `the ${r.ids?.length ?? 0} selected cards` : "the whole project");
 
 /** Fixed chip / menu commands: the memory pass skips these turns (an answer to a grill-me question is not one). */
 const NO_MEMORY = /^(\/expand|\/critique|\/describe|\/merge|\/related|\/grill-me|Give me 3 takes|Merge \d+ cards)/;
@@ -220,16 +242,17 @@ export function ChatPanel({ ws, panels }: { ws: Workspace; panels: Pick<ReturnTy
     handledReq.current = req.n;
     ws.clearChatRequest();
     if (req.send && req.artifact) {
-      chat.sendText(req.text, undefined, req.display ?? req.text, { artifact: req.artifact, recapFrom: req.recapFrom, memory: false, folder: ws.folder });
+      chat.sendText(req.text, undefined, req.display ?? req.text, { artifact: req.artifact, recapFrom: req.recapFrom, memory: false });
       return;
     }
     if (req.send) {
-      const org = parseOrganize(req.text);
+      const org = parseOrganize(req.text, ws.data, ws.getCanvasSelection());
       if (chat.busy) ws.setError("Claude is still answering; try again in a moment.");
+      else if (org && "error" in org) ws.setError(org.error);
       else if (org) runOrganize(org);
       else if (ws.active) {
         const x = req.display ? { text: req.text, quiet: !!req.quiet } : expand(req.text, contextCard);
-        chat.sendText(x.text, formatContext(contextCard), req.display ?? req.text, { quiet: x.quiet, folder: ws.folder, memory: !NO_MEMORY.test(req.display ?? req.text) });
+        chat.sendText(x.text, formatContext(contextCard), req.display ?? req.text, { quiet: x.quiet, memory: !NO_MEMORY.test(req.display ?? req.text) });
       }
       return;
     }
@@ -248,19 +271,22 @@ export function ChatPanel({ ws, panels }: { ws: Workspace; panels: Pick<ReturnTy
   /** An organize turn: list_tree, then one reviewable propose_organize plan (local or Claude by scope size). */
   function runOrganize(req: OrganizeReq, display?: string, text?: string) {
     if (!ws.active || chat.busy) return;
-    const here = ws.folder ? `folder "${folderName(ws.data?.folders.find((f) => f.id === ws.folder))}" and its subfolders` : "the whole project";
-    const where = req.scope === "project" ? "the whole project" : here;
+    const where = scopeWords(req);
     const body =
       text ??
-      `/organize (scope: ${where}): ${req.instruction || "organize it into a clear structure"}. Call list_tree with scope "${req.scope}", then propose_organize once with the whole plan.`;
-    const label = display ?? (req.instruction ? `/organize ${req.scope === "project" ? "project " : ""}${req.instruction}` : `Organize ${req.scope === "project" || !ws.folder ? "the project" : "this folder"}`);
-    chat.sendText(body, undefined, label, { folder: ws.folder, selection: ws.getCanvasSelection(), memory: false, organize: req });
+      `/organize (scope: ${where}): ${req.instruction || "organize it into a clear structure"}. Call list_tree, then propose_organize once with the whole plan.`;
+    const label = display && !display.startsWith("/organize frame") ? display : req.instruction ? `/organize ${req.instruction}` : `Organize ${req.scope === "project" ? "the project" : where}`;
+    chat.sendText(body, undefined, label, { selection: ws.getCanvasSelection(), memory: false, organize: req });
   }
 
   const send = (value: string, opts?: { answering?: boolean; question?: string }) => {
     const display = value.trim();
     if (!display || !ws.active || chat.busy) return;
-    const org = parseOrganize(display);
+    const org = parseOrganize(display, ws.data, ws.getCanvasSelection());
+    if (org && "error" in org) {
+      ws.setError(org.error);
+      return;
+    }
     if (org) {
       runOrganize(org, display);
       setText("");
@@ -268,7 +294,7 @@ export function ChatPanel({ ws, panels }: { ws: Workspace; panels: Pick<ReturnTy
     }
     // In an artifact's thread every message is an artifact turn on Claude (feedback, a new part).
     if (contextCard?.kind === "artifact" && !contextCard.ghost) {
-      chat.sendText(display, undefined, display, { artifact: contextCard.id, think, folder: ws.folder, memory: false });
+      chat.sendText(display, undefined, display, { artifact: contextCard.id, think, memory: false });
       setText("");
       setThink(false);
       return;
@@ -277,7 +303,7 @@ export function ChatPanel({ ws, panels }: { ws: Workspace; panels: Pick<ReturnTy
     // Answering a question Claude asked (e.g. /grill-me) keeps the Think of the message that started it.
     const thinkNow = opts?.answering ? think || lastThink.current : think;
     if (!opts?.answering) lastThink.current = think;
-    chat.sendText(x.text, formatContext(contextCard), display, { quiet: x.quiet || !!opts?.answering, web, think: thinkNow, pin: modelPin, selection: ws.getCanvasSelection(), folder: ws.folder, memory: !!opts?.answering || !NO_MEMORY.test(display), question: opts?.question });
+    chat.sendText(x.text, formatContext(contextCard), display, { quiet: x.quiet || !!opts?.answering, web, think: thinkNow, pin: modelPin, selection: ws.getCanvasSelection(), memory: !!opts?.answering || !NO_MEMORY.test(display), question: opts?.question });
     setText("");
     setWeb(false);
     setThink(false);
@@ -346,13 +372,11 @@ export function ChatPanel({ ws, panels }: { ws: Workspace; panels: Pick<ReturnTy
       ? ([{ id: "build-prompt", label: "Make build prompt", desc: "Turn this card into a task for Claude Code", group: "card", run: () => ws.openTask({ kind: "card", id: contextCard.id }) }] satisfies ChatAction[])
       : []),
     { id: "summarize", label: "Summarize", desc: "Turn the project into design docs for Claude Code", group: "project", run: summarize },
-    ...(ws.folder
-      ? ([{ id: "org-folder", label: "Organize this folder", desc: "Claude proposes a tidy-up plan you review", group: "project", command: "/organize", run: () => runOrganize({ scope: "folder", instruction: "" }) }] satisfies ChatAction[])
-      : []),
-    { id: "org-project", label: "Organize the project", desc: "Claude proposes a tidy-up plan you review", group: "project", command: "/organize project", run: () => runOrganize({ scope: "project", instruction: "" }) },
+    { id: "org-project", label: "Organize the project", desc: "Claude proposes a tidy-up plan you review", group: "project", command: "/organize", run: () => runOrganize({ scope: "project", instruction: "" }) },
+    { id: "org-selection", label: "Organize the selection", desc: "Claude proposes a plan for the selected cards", group: "project", command: "/organize selection", run: () => send("/organize selection") },
   ];
   const byId = (id: string) => actions.find((a) => a.id === id)!;
-  const suggestions = (contextCard ? ["grill", "related", "build-prompt"] : ws.folder ? ["org-folder", "summarize", "grill"] : ["summarize", "org-project", "grill"]).map(byId);
+  const suggestions = (contextCard ? ["grill", "related", "build-prompt"] : ["summarize", "org-project", "grill"]).map(byId);
 
   // "/" typed first opens the menu filtered by what follows (until Esc, or no item matches).
   const slashQuery = text.startsWith("/") && !text.includes("\n") && text !== slashDismissed ? text.slice(1) : null;
@@ -523,14 +547,14 @@ export function ChatPanel({ ws, panels }: { ws: Workspace; panels: Pick<ReturnTy
               onChange={(patch) => chat.setOrganize(m.id, patch)}
               onRedo={(backend) => {
                 const user = chat.messages.find((x) => x.id === `${m.id}-u`);
-                const req = m.organizeReq ?? { scope: m.organize!.plan.scope, instruction: user?.text ?? "" };
+                const req: OrganizeReq = m.organizeReq ?? { scope: m.organize!.plan.scope, ids: m.organize!.plan.scopeIds ?? undefined, name: m.organize!.plan.scopeName, instruction: user?.text ?? "" };
                 // Redo makes the whole plan again (not only the rest of a partial one).
-                runOrganize({ scope: req.scope, instruction: req.rest ? "" : req.instruction, backend }, `${req.rest ? "Organize" : user?.text ?? "Organize"} (${backend === "claude" ? "with Claude" : "locally"})`);
+                runOrganize({ ...req, instruction: req.rest ? "" : req.instruction, backend, prior: null, rest: false }, `${req.rest ? "Organize" : user?.text ?? "Organize"} (${backend === "claude" ? "with Claude" : "locally"})`);
               }}
-              onRevise={(ask) => runOrganize({ scope: m.organize!.plan.scope, instruction: ask, backend: m.backend ?? null, prior: m.organize!.plan }, `Revise the plan: ${ask}`, reviseText(m.organize!.plan, ask))}
+              onRevise={(ask) => runOrganize({ ...planScope(m.organize!.plan), instruction: ask, backend: m.backend ?? null, prior: m.organize!.plan }, `Revise the plan: ${ask}`, reviseText(m.organize!.plan, ask))}
               onFinish={(backend) =>
                 runOrganize(
-                  { scope: m.organize!.plan.scope, instruction: "", backend, prior: m.organize!.plan, rest: true },
+                  { ...planScope(m.organize!.plan), instruction: "", backend, prior: m.organize!.plan, rest: true },
                   backend === "claude" ? "Finish the plan with Claude" : "Retry the rest locally",
                   `/organize: place the ${m.organize!.plan.unplaced?.length ?? 0} unplaced cards into the plan's frames.`,
                 )

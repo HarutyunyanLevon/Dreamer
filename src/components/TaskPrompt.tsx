@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, taskReference, type Card, type FlagAnswers, type HandoffEvent, type HandoffScope, type ProjectData, type SavedTask, type TaskFlag, type TaskKind, type TaskRevise } from "../api";
-import { cardVersions, type Workspace } from "../state/useWorkspace";
+import { type Workspace } from "../state/useWorkspace";
 import { STAGES } from "../theme/types";
 import { Modal } from "../ui/Modal";
 import { needsRebuild } from "../util/build";
@@ -18,12 +18,10 @@ export function taskCardIds(data: ProjectData, scope: HandoffScope): string[] {
     .map((c) => c.id);
 }
 
-/** Cards of the open version waiting for Claude Code (`queued`) or built but changed since (`needs rebuild`). */
+/** Cards waiting for Claude Code (`queued`) or built but changed since (`needs rebuild`). */
 export function batchIds(data: ProjectData, which: "queued" | "rebuild"): string[] {
-  const of = cardVersions(data);
-  const open = data.meta.last_version;
   return data.cards
-    .filter((c) => c.kind === "card" && !c.role && !c.ghost && (!open || of.get(c.id) === open))
+    .filter((c) => c.kind === "card" && !c.role && !c.ghost)
     .filter((c) => (which === "queued" ? c.build?.status === "queued" : needsRebuild(c)))
     .map((c) => c.id);
 }

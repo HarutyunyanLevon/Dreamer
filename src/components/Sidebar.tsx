@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState, type HTMLAttributes } from "react";
-import { api, type Folder, type ProjectSummary } from "../api";
-import { cardVersions, folderName, isVersion, type Workspace } from "../state/useWorkspace";
+import { api, type ProjectSummary } from "../api";
+import { type Workspace } from "../state/useWorkspace";
 import { Modal } from "../ui/Modal";
 import { useTheme } from "../theme/ThemeContext";
-import { IconDoc, IconFolder, IconInbox, IconPlus, IconPower, IconTrash } from "./Icons";
+import { IconDoc, IconFolder, IconPlus, IconPower, IconTrash } from "./Icons";
 import { ThemeEditor } from "./ThemeEditor";
 import { openHotkeys, pickBundle } from "./Import";
 import { LinkRepoDialog } from "./LinkRepo";
@@ -24,12 +24,10 @@ interface Props {
   onOpenMemory: () => void;
   /** Pointer handlers of the width drag handle (usePanels().resize.left). */
   resize: HTMLAttributes<HTMLDivElement>;
-  /** For the active project's folder tree. */
   ws: Workspace;
 }
 
 export function Sidebar({ projects, active, onSelect, onCreate, onDelete, designOpen, onOpenDesign, memoryOpen, onOpenMemory, resize, ws }: Props) {
-  const tree = useFolderTree(ws);
   const [deleting, setDeleting] = useState<ProjectSummary | null>(null);
   const { themes, theme, setThemeId } = useTheme();
   const [linking, setLinking] = useState<string | null>(null);
@@ -98,46 +96,23 @@ export function Sidebar({ projects, active, onSelect, onCreate, onDelete, design
         {projects.map((p) => (
           <div key={p.slug} className={"side-row-wrap" + (p.slug === active ? " active" : "")}>
             <button
-              className={"side-row" + (p.slug === active ? " active" : "") + (p.slug === active && tree.over === "root" ? " drop-hover-ext" : "")}
+              className={"side-row" + (p.slug === active ? " active" : "")}
               type="button"
-              aria-current={p.slug === active && !ws.folder ? "true" : undefined}
-              data-drop-folder={p.slug === active ? "root" : undefined}
-              data-drop-project={p.slug}
+              aria-current={p.slug === active ? "true" : undefined}
               onClick={() => {
                 if (p.slug !== active) return onSelect(p.slug);
                 ws.setDesignOpen(false);
-                ws.openFolder(null);
               }}
-              {...(p.slug === active ? tree.dropProps(null) : {})}
             >
-              {p.slug === active && tree.has ? (
-                <span
-                  className={"tree-chev" + (tree.collapsed.has(ROOT_KEY) ? "" : " open")}
-                  role="button"
-                  aria-label={tree.collapsed.has(ROOT_KEY) ? "Show folders" : "Hide folders"}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    tree.toggle(ROOT_KEY);
-                  }}
-                >
-                  ›
-                </span>
-              ) : null}
-              {p.is_inbox ? <IconInbox /> : <IconFolder />}
+              <IconFolder />
               <span>{p.name}</span>
-              {p.is_inbox && p.card_count > 0 && (
-                <span className="badge" aria-label={`${p.card_count} ideas`}>
-                  {p.card_count}
-                </span>
-              )}
             </button>
-            {p.slug === active && tree.has && !tree.collapsed.has(ROOT_KEY) && <FolderRows tree={tree} ws={ws} parent={null} depth={1} />}
-            {!p.is_inbox && (
+            {projects.length > 1 && (
               <button type="button" className="icon-btn side-delete" aria-label={`Delete project ${p.name}`} title="Delete project" onClick={() => setDeleting(p)}>
                 <IconTrash />
               </button>
             )}
-            {p.slug === active && !p.is_inbox && (
+            {p.slug === active && (
               <button
                 type="button"
                 className={"side-row side-sub" + (memoryOpen ? " active" : "")}
@@ -159,11 +134,6 @@ export function Sidebar({ projects, active, onSelect, onCreate, onDelete, design
               >
                 <IconDoc />
                 <span>Design</span>
-                {(p.design_versions ?? 0) > 0 && (
-                  <span className="badge" aria-label={`${p.design_versions} version${p.design_versions === 1 ? "" : "s"}`}>
-                    {p.design_versions}
-                  </span>
-                )}
                 {(p.open_questions ?? 0) > 0 && (
                   <span className="badge badge-alert" title="Unanswered questions from Claude Code" aria-label={`${p.open_questions} unanswered question${p.open_questions === 1 ? "" : "s"} from Claude Code`}>
                     {p.open_questions}?
@@ -177,7 +147,7 @@ export function Sidebar({ projects, active, onSelect, onCreate, onDelete, design
                 <span>Import bundle…</span>
               </button>
             )}
-            {p.slug === active && !p.is_inbox && (
+            {p.slug === active && (
               <button
                 type="button"
                 className="side-row side-sub"
@@ -296,118 +266,6 @@ export function Sidebar({ projects, active, onSelect, onCreate, onDelete, design
   );
 }
 
-const ROOT_KEY = "__project";
-const DRAG_TYPE = "application/x-dreamer-folder";
-
-/** Collapse state (localStorage, per project) and drag-to-re-parent for the folder tree. */
-function useFolderTree(ws: Workspace) {
-  const slug = ws.active ?? "";
-  const key = `dreamer.folderTree.${slug}`;
-  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
-  const [over, setOver] = useState<string | null>(null);
-  useEffect(() => {
-    try {
-      setCollapsed(new Set(JSON.parse(localStorage.getItem(key) ?? "[]") as string[]));
-    } catch {
-      setCollapsed(new Set());
-    }
-  }, [key]);
-  const toggle = (id: string) =>
-    setCollapsed((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      try {
-        localStorage.setItem(key, JSON.stringify([...next]));
-      } catch {
-        /* storage unavailable: the tree just won't remember */
-      }
-      return next;
-    });
-  const d = ws.data;
-  const folders: Folder[] = d?.folders ?? [];
-  /** HTML drag of a folder row onto another folder (or the project row = the root). */
-  const dropProps = (target: string | null) => ({
-    onDragOver: (e: React.DragEvent) => {
-      if (!e.dataTransfer.types.includes(DRAG_TYPE)) return;
-      e.preventDefault();
-      setOver(target ?? "root");
-    },
-    onDragLeave: () => setOver((o) => (o === (target ?? "root") ? null : o)),
-    onDrop: (e: React.DragEvent) => {
-      const id = e.dataTransfer.getData(DRAG_TYPE);
-      setOver(null);
-      if (!id || id === target) return;
-      e.preventDefault();
-      ws.reparentFolder(id, target);
-    },
-  });
-  const inVersion = d ? cardVersions(d) : new Map<string, string>();
-  /** Cards on a folder's canvas; for a version, every card in it. */
-  const count = (id: string) => (isVersion(folders.find((f) => f.id === id)) ? [...inVersion.values()].filter((v) => v === id).length : Object.keys(d?.canvases[id]?.cards ?? {}).length);
-  return { collapsed, toggle, folders, has: folders.length > 0, over, setOver, dropProps, count };
-}
-
-function FolderRows({ tree, ws, parent, depth }: { tree: ReturnType<typeof useFolderTree>; ws: Workspace; parent: string | null; depth: number }) {
-  // Versions newest first, then ordinary folders by name.
-  const kids = tree.folders
-    .filter((f) => f.parent === parent)
-    .sort((a, b) => Number(isVersion(b)) - Number(isVersion(a)) || (isVersion(a) ? b.created.localeCompare(a.created) : folderName(a).localeCompare(folderName(b))));
-  if (!kids.length) return null;
-  return (
-    <div role="group">
-      {kids.map((f) => {
-        const hasKids = tree.folders.some((x) => x.parent === f.id);
-        const open = !tree.collapsed.has(f.id);
-        const n = tree.count(f.id);
-        const ver = isVersion(f);
-        return (
-          <div key={f.id}>
-            <button
-              type="button"
-              className={"side-row side-folder" + (ws.folder === f.id ? " active" : "") + (tree.over === f.id ? " drop-hover-ext" : "")}
-              style={{ paddingLeft: 10 + depth * 12 }}
-              aria-current={ws.folder === f.id ? "true" : undefined}
-              aria-expanded={hasKids ? open : undefined}
-              title={ver ? `Open version ${folderName(f)}` : `Open ${folderName(f)} · drag onto another folder to move it`}
-              data-drop-folder={f.id}
-              data-drop-project={ws.active ?? undefined}
-              draggable={!ver}
-              onDragStart={(e) => {
-                e.dataTransfer.setData(DRAG_TYPE, f.id);
-                e.dataTransfer.effectAllowed = "move";
-              }}
-              onClick={() => {
-                ws.setDesignOpen(false);
-                ws.openFolder(f.id);
-              }}
-              {...tree.dropProps(f.id)}
-            >
-              <span
-                className={"tree-chev" + (open ? " open" : "") + (hasKids ? "" : " none")}
-                role={hasKids ? "button" : undefined}
-                aria-label={hasKids ? (open ? "Collapse" : "Expand") : undefined}
-                onClick={(e) => {
-                  if (!hasKids) return;
-                  e.stopPropagation();
-                  tree.toggle(f.id);
-                }}
-              >
-                ›
-              </span>
-              {ver ? <span className="version-badge" aria-hidden="true">v</span> : <IconFolder />}
-              <span>{folderName(f)}</span>
-              {ver && <span className="sr-only"> (version)</span>}
-              {n > 0 && <span className="badge" aria-label={`${n} card${n === 1 ? "" : "s"}`}>{n}</span>}
-            </button>
-            {hasKids && open && <FolderRows tree={tree} ws={ws} parent={f.id} depth={depth + 1} />}
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
 /** "Are you sure?" for deleting a project. Says plainly that the folder leaves the disk. */
 function DeleteProjectDialog({ project, onCancel, onConfirm }: { project: ProjectSummary; onCancel: () => void; onConfirm: () => void }) {
   const [root, setRoot] = useState<string | null>(null);
@@ -421,7 +279,7 @@ function DeleteProjectDialog({ project, onCancel, onConfirm }: { project: Projec
     <Modal onClose={onCancel} label={`Delete project ${project.name}`} size="sm">
       <h3 className="dialog-title">Delete “{project.name}”?</h3>
       <p>
-        This removes the project&apos;s files from disk: its {n} card{n === 1 ? "" : "s"}, canvas, media, design versions, trash and chats.
+        This removes the project&apos;s files from disk: its {n} card{n === 1 ? "" : "s"}, canvas, media, design docs, trash and chats.
       </p>
       <code className="dialog-path">{folder}</code>
       <p className="chat-sub">The folder is moved to the Recycle Bin, where you can restore it. If that isn&apos;t possible, it is deleted permanently. This can&apos;t be undone from inside Dreamer.</p>

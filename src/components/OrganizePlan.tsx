@@ -1,14 +1,14 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { OrganizeLayout, OrganizeOp, OrganizePlanData, ProjectData } from "../api";
 import type { Backend } from "../api/claude";
 import type { ChatMessage } from "../state/useClaudeChat";
-import { simulateOrganize, folderName, type OrganizeSim, type Workspace } from "../state/useWorkspace";
-import { folderRect, type Rect } from "./cardGeometry";
-import { DuskStrip, useDuskGlass } from "./DuskGlass";
-import { IconFolder, IconSparkle } from "./Icons";
+import { simulateOrganize, type OrganizeSim, type Workspace } from "../state/useWorkspace";
+import { type Rect } from "./cardGeometry";
+import { DuskStrip } from "./DuskGlass";
+import { IconSparkle } from "./Icons";
 
 const LAYOUT_LABEL: Record<OrganizeLayout, string> = { grid: "a grid", "cluster-by-tag": "clusters by tag", "flow-by-links": "a flow by links", "stage-columns": "stage columns" };
-/** Preview ids of the folders and frames a plan would make. */
+/** Preview ids of the frames a plan would make. */
 const TMP = "tmp-";
 const tmpId = (t: string) => `${TMP}${t}`;
 const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? "" : "s"}`;
@@ -16,23 +16,20 @@ const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? "" : "s"}`;
 /** The plan run on the project as it is now, with preview ids for new items. */
 function usePlanSim(data: ProjectData | null, plan: OrganizePlanData | undefined, checked: boolean[] | undefined): OrganizeSim | null {
   return useMemo(
-    () => (data && plan && checked && plan.slug === data.slug ? simulateOrganize({ canvases: data.canvases, folders: data.folders }, data.cards, plan, checked, tmpId) : null),
+    () => (data && plan && checked && plan.slug === data.slug ? simulateOrganize(data.canvas, data.cards, plan, checked, tmpId) : null),
     [data, plan, checked],
   );
 }
 
 /** Ids (existing, or tmp- for new) an op touches: what hovering its row highlights. */
 function opItems(op: OrganizeOp, plan: OrganizePlanData): string[] {
-  const ref = (id: string) => (plan.ops.some((o) => (o.op === "create_folder" || o.op === "create_frame") && o.tempId === id) ? tmpId(id) : id);
+  const ref = (id: string) => (plan.ops.some((o) => o.op === "create_frame" && o.tempId === id) ? tmpId(id) : id);
   switch (op.op) {
-    case "create_folder":
     case "create_frame":
       return [tmpId(op.tempId)];
     case "rename":
     case "retag":
       return [ref(op.id)];
-    case "move":
-      return [...op.ids.map(ref), ...(op.to ? [ref(op.to)] : [])];
     case "arrange":
       return op.ids;
     case "place":
@@ -42,27 +39,15 @@ function opItems(op: OrganizeOp, plan: OrganizePlanData): string[] {
 
 /** A one-line, human description of an op. */
 function describe(op: OrganizePlanData["ops"][number], plan: OrganizePlanData, data: ProjectData | null): { text: string; detail?: string } {
-  const made = (t: string) => plan.ops.find((o): o is Extract<OrganizeOp, { op: "create_folder" | "create_frame" }> => (o.op === "create_folder" || o.op === "create_frame") && o.tempId === t)?.title;
-  const folder = (ref: string | null) => (ref == null ? data?.meta.name ?? "the project" : made(ref) ?? plan.titles[ref] ?? folderName(data?.folders.find((f) => f.id === ref)));
+  const made = (t: string) => plan.ops.find((o): o is Extract<OrganizeOp, { op: "create_frame" }> => o.op === "create_frame" && o.tempId === t)?.title;
   const title = (id: string) => made(id) ?? plan.titles[id] ?? data?.cards.find((c) => c.id === id)?.title ?? id;
-  const isCard = (id: string) => !!data?.cards.some((c) => c.id === id);
   switch (op.op) {
-    case "create_folder": {
-      const n = plan.ops.reduce((s, o) => s + (o.op === "move" && o.to === op.tempId ? o.ids.filter(isCard).length : 0), 0);
-      return { text: `New folder ${op.title}: ${plural(n, "card")}`, detail: op.parent ? `inside ${folder(op.parent)}` : undefined };
-    }
     case "rename":
       return { text: `Rename ${title(op.id)} to ${op.title}` };
-    case "move": {
-      const cards = op.ids.filter(isCard).length;
-      const folders = op.ids.length - cards;
-      const what = [cards && plural(cards, "card"), folders && plural(folders, "folder")].filter(Boolean).join(" and ");
-      return { text: `Move ${what} to ${folder(op.to)}`, detail: op.ids.map(title).join(", ") };
-    }
     case "create_frame":
-      return { text: `New frame ${op.title} in ${folder(op.folder)}` };
+      return { text: `New frame ${op.title}` };
     case "arrange":
-      return { text: `Re-layout ${folder(op.folder)} as ${LAYOUT_LABEL[op.layout]}`, detail: plural(op.ids.length, "card") };
+      return { text: `Re-layout as ${LAYOUT_LABEL[op.layout]}`, detail: plural(op.ids.length, "card") };
     case "place": {
       const ids = Object.keys(op.positions);
       return { text: `Lay out ${plural(ids.length, "card")} in their frames`, detail: ids.map(title).join(", ") };
@@ -158,7 +143,7 @@ export function OrganizePlanCard({
                   onChange={(e) => onChange({ checked: checked.map((c, j) => (j === i ? e.target.checked : c)) })}
                 />
                 <span className="organize-op-text">{d.text}</span>
-                {skipped && <span className="organize-op-note">needs a folder that is off</span>}
+                {skipped && <span className="organize-op-note">nothing to change</span>}
               </label>
             </li>
           );
@@ -222,25 +207,9 @@ export function reviseText(plan: OrganizePlanData, ask: string): string {
   return `/organize revise (scope: ${plan.scope}): ${ask}\n\n[Previous plan]\n${prev.length > 8000 ? `${prev.slice(0, 8000)}…` : prev}`;
 }
 
-function GhostFolder({ id, title, pos, cards, hot, dim }: { id: string; title: string; pos: Rect; cards: number; hot: boolean; dim: boolean }) {
-  const ref = useRef<HTMLDivElement | null>(null);
-  useDuskGlass(ref, "card", id);
-  return (
-    <div ref={ref} className={"organize-ghost-folder" + (hot ? " hot" : "") + (dim ? " dim" : "")} style={{ left: pos.x, top: pos.y, width: pos.w, height: pos.h }}>
-      <span className="dusk-pill">
-        <IconFolder /> New folder
-      </span>
-      <div className="organize-ghost-panel">
-        <strong>{title}</strong>
-        <span>{plural(cards, "card")}</span>
-      </div>
-    </div>
-  );
-}
-
 /**
- * The open plan on the canvas (inside the world transform): ghost folders where they'd be made,
- * a dusk strip on every card that moves or is re-laid out, faint outlines at re-layout targets.
+ * The open plan on the canvas (inside the world transform): ghost frames where they'd be made,
+ * a dusk strip on every card that is re-laid out or retagged, faint outlines at re-layout targets.
  * Hovering an op in chat highlights only its items.
  */
 export function OrganizePreviewLayer({ ws, rectOf }: { ws: Workspace; rectOf: (id: string) => Rect | undefined }) {
@@ -248,21 +217,16 @@ export function OrganizePreviewLayer({ ws, rectOf }: { ws: Workspace; rectOf: (i
   const data = ws.data;
   const sim = usePlanSim(data, p?.plan, p?.checked);
   if (!p || !data || !sim) return null;
-  const key = ws.folder ?? "";
-  const now = data.canvases[key];
-  const next = sim.structure.canvases[key];
-  if (!now || !next) return null;
+  const now = data.canvas;
+  const next = sim.canvas;
   const hot = p.hover != null && p.plan.ops[p.hover] ? new Set(opItems(p.plan.ops[p.hover], p.plan)) : null;
   const cls = (id: string) => (hot ? (hot.has(id) ? " hot" : " dim") : "");
-  const folderTitle = (id: string) => (id === "" ? data.meta.name : folderName(sim.structure.folders.find((f) => f.id === id)));
   const strips: { id: string; r: Rect; text: string }[] = [];
   const outlines: { id: string; r: Rect }[] = [];
-  for (const id of [...Object.keys(now.cards), ...Object.keys(now.folders ?? {})]) {
+  for (const id of Object.keys(now.cards)) {
     const r = rectOf(id);
     if (!r) continue;
-    const to = sim.moved[id];
-    if (to !== undefined && to !== key) strips.push({ id, r, text: `Claude: move to ${folderTitle(to)}` });
-    else if (sim.arranged.has(id) && next.cards[id]) {
+    if (sim.arranged.has(id) && next.cards[id]) {
       strips.push({ id, r, text: "Claude: re-layout" });
       outlines.push({ id, r: { ...r, x: next.cards[id].x, y: next.cards[id].y } });
     } else if (sim.tags.some((t) => t.id === id)) strips.push({ id, r, text: "Claude: retag" });
@@ -281,19 +245,6 @@ export function OrganizePreviewLayer({ ws, rectOf }: { ws: Workspace; rectOf: (i
             </span>
           </div>
         ))}
-      {Object.entries(next.folders ?? {})
-        .filter(([id]) => id.startsWith(TMP))
-        .map(([id, pos]) => (
-          <GhostFolder
-            key={id}
-            id={id}
-            title={folderTitle(id)}
-            pos={folderRect(pos)}
-            cards={Object.keys(sim.structure.canvases[id]?.cards ?? {}).length}
-            hot={!!hot?.has(id)}
-            dim={!!hot && !hot.has(id)}
-          />
-        ))}
       {strips.map((s) => (
         <div key={`s-${s.id}`} className={"organize-strip-at" + cls(s.id)} style={{ left: s.r.x, top: s.r.y - 30, width: s.r.w }}>
           <DuskStrip seed={s.id} className="organize-strip">
@@ -307,17 +258,17 @@ export function OrganizePreviewLayer({ ws, rectOf }: { ws: Workspace; rectOf: (i
   );
 }
 
-/** "Tidy this folder?": a dusk pill at the canvas top. Never runs anything by itself. */
+/** "Tidy this canvas?": a dusk pill at the canvas top. Never runs anything by itself. */
 export function TidyNudge({ onTidy, onClose }: { onTidy: () => void; onClose: () => void }) {
   return (
     <div className="tidy-nudge" data-wheel-boundary="">
       <DuskStrip seed="tidy" className="tidy-nudge-strip">
         <span className="dusk-pill">
-          <IconSparkle /> Tidy this folder?
+          <IconSparkle /> Tidy this canvas?
           <button type="button" className="dusk-pill-cta" onClick={onTidy}>
             Tidy
           </button>
-          <button type="button" className="tidy-x" aria-label="Don't suggest tidying this folder again" title="Don't suggest this again for this folder" onClick={onClose}>
+          <button type="button" className="tidy-x" aria-label="Dismiss" title="Dismiss" onClick={onClose}>
             ×
           </button>
         </span>

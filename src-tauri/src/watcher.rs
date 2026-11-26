@@ -29,24 +29,23 @@ pub fn classify(root: &Path, path: &Path) -> Option<ChangeEvent> {
     }
     // <project>/chats/*.json is written by the chat panel itself on every turn; reloading the
     // canvas (and re-statting the search index) for those writes would be pure churn.
-    let chats_at = if first == "inbox" { 1 } else { 2 };
+    let chats_at = 2;
     // design/ (handoff pack versions) is written only by Dreamer itself, which tells the UI when a
     // version is done; a canvas reload per copied asset would be churn too.
-    if parts.get(chats_at).is_some_and(|p| p == "chats" || p == "design" || p == "builds") && parts.len() > chats_at + 1 {
+    if parts.get(chats_at).is_some_and(|p| p == "chats" || p == "design" || p == "builds" || p == "archive") && parts.len() > chats_at + 1 {
         return None;
     }
     // artifacts/<id>/...: the artifact views reload that artifact; the canvas doesn't need to.
     if parts.get(chats_at).is_some_and(|p| p == "artifacts") && parts.len() > chats_at + 1 {
-        return Some(ChangeEvent { scope: "artifact".into(), project: Some(if first == "inbox" { "inbox".into() } else { parts.get(1)?.clone() }) });
+        return Some(ChangeEvent { scope: "artifact".into(), project: Some(parts.get(1)?.clone()) });
     }
     // memory.md and its log: only the Memory modal cares, not the canvas.
     if parts.len() == chats_at + 1 && parts.last().is_some_and(|f| f == "memory.md" || f == "memory.log.jsonl") {
-        return Some(ChangeEvent { scope: "memory".into(), project: Some(if first == "inbox" { "inbox".into() } else { parts.get(1)?.clone() }) });
+        return Some(ChangeEvent { scope: "memory".into(), project: Some(parts.get(1)?.clone()) });
     }
     match first.as_str() {
         "workspace.json" => Some(ChangeEvent { scope: "settings".into(), project: None }),
         "themes" => Some(ChangeEvent { scope: "themes".into(), project: None }),
-        "inbox" => Some(ChangeEvent { scope: "project".into(), project: Some("inbox".into()) }),
         "projects" => Some(ChangeEvent { scope: "project".into(), project: parts.get(1).cloned() }),
         _ => None,
     }
@@ -101,18 +100,19 @@ mod tests {
         let root = Path::new("/w");
         let ev = |p: &str| classify(root, Path::new(p));
         assert_eq!(ev("/w/projects/fish/cards/01A.md"), Some(ChangeEvent { scope: "project".into(), project: Some("fish".into()) }));
-        assert_eq!(ev("/w/inbox/canvas.json"), Some(ChangeEvent { scope: "project".into(), project: Some("inbox".into()) }));
+        assert_eq!(ev("/w/inbox/canvas.json"), None, "the layout-1 Inbox folder is gone");
         assert_eq!(ev("/w/workspace.json"), Some(ChangeEvent { scope: "settings".into(), project: None }));
         assert_eq!(ev("/w/themes/mine.json").unwrap().scope, "themes");
         assert_eq!(ev("/w/projects/fish/cards/.01A.md.XYZ.tmp"), None);
         assert_eq!(ev("/w/.git/index"), None);
         assert_eq!(ev("/w/projects/fish/.git/HEAD"), None);
         assert_eq!(ev("/elsewhere/x"), None);
-        assert_eq!(ev("/w/inbox/chats/01A.json"), None);
+        assert_eq!(ev("/w/projects/fish/chats/01A.json"), None);
+        assert_eq!(ev("/w/projects/fish/archive/versions/v1/cards/01A.md"), None);
         assert_eq!(ev("/w/projects/fish/memory.md"), Some(ChangeEvent { scope: "memory".into(), project: Some("fish".into()) }));
         assert_eq!(ev("/w/projects/fish/memory.log.jsonl").unwrap().scope, "memory");
         assert_eq!(ev("/w/projects/fish/artifacts/01ABC/v1/hero.png"), Some(ChangeEvent { scope: "artifact".into(), project: Some("fish".into()) }));
-        assert_eq!(ev("/w/inbox/artifacts/01ABC/artifact.json").unwrap().scope, "artifact");
+        assert_eq!(ev("/w/projects/fish/artifacts/01ABC/artifact.json").unwrap().scope, "artifact");
         assert_eq!(ev("/w/projects/fish/chats/project.json"), None);
         assert_eq!(ev("/w/projects/fish/design/v1/01-gdd.md"), None);
         // A project whose slug is "chats" is still a real change.
@@ -136,15 +136,15 @@ mod tests {
         use std::sync::mpsc::channel;
         let dir = tempfile::TempDir::new().unwrap();
         let root = dir.path().canonicalize().unwrap();
-        std::fs::create_dir_all(root.join("inbox/cards")).unwrap();
+        std::fs::create_dir_all(root.join("projects/ideas/cards")).unwrap();
         let (tx, rx) = channel();
         let _w = start(root.clone(), Vec::new(), move |events| {
             let _ = tx.send(events);
         })
         .unwrap();
         std::thread::sleep(Duration::from_millis(300));
-        std::fs::write(root.join("inbox/cards/01X.md"), "---\ntitle: x\n---\n").unwrap();
+        std::fs::write(root.join("projects/ideas/cards/01X.md"), "---\ntitle: x\n---\n").unwrap();
         let got = rx.recv_timeout(Duration::from_secs(5)).expect("no watcher event");
-        assert!(got.contains(&ChangeEvent { scope: "project".into(), project: Some("inbox".into()) }));
+        assert!(got.contains(&ChangeEvent { scope: "project".into(), project: Some("ideas".into()) }));
     }
 }

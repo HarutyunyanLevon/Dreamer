@@ -1,9 +1,8 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
 import { api, type Card, type CardKind, type ClipAttachment, type Frame, type Pos, type ProjectData } from "../api";
 import { renderMarkdown } from "../util/markdown";
-import { CARD_H, CARD_W, FOLDER_H, FOLDER_W, HANDLES, cardRect, displayStack, folderRect, resizeRect, type HandleDir, type Rect } from "./cardGeometry";
-import { folderChain, folderName, isInside, isVersion, ROOT, type GhostLink, type Items, type Structure, type Workspace } from "../state/useWorkspace";
-import { DEFAULT_FOLDER_TITLE, FolderView, previewsOf, type FolderControls } from "./Folders";
+import { CARD_H, CARD_W, HANDLES, cardRect, displayStack, resizeRect, type HandleDir, type Rect } from "./cardGeometry";
+import { type GhostLink, type Workspace } from "../state/useWorkspace";
 import { useTheme } from "../theme/ThemeContext";
 import { STAGES, STAGE_LABEL, type StageId } from "../theme/types";
 import { Layer } from "../ui/Layer";
@@ -17,7 +16,7 @@ import { BuildBoard } from "./BuildBoard";
 import { MistLayer } from "./MistLayer";
 import { DEFAULT_FRAME_TITLE, FRAME_PAD, FrameView, centerInside, type FrameControls } from "./Frames";
 import { ChecklistBody, ClipBody, DECISIONS_TITLE, ImageBody, KIND_LABEL, TECH_TEMPLATE, TECH_TITLE, hasStage, labelSize, openQuestions, swatchOf } from "./kinds";
-import { IconCard, IconCheck, IconChecklist, IconClip, IconFit, IconFolder, IconFrame, IconImage, IconLink, IconMerge, IconMinus, IconPin, IconPlus, IconRedo, IconSparkle, IconTrash as IconTrashCan, IconUndo } from "./Icons";
+import { IconCard, IconCheck, IconChecklist, IconClip, IconFit, IconFrame, IconImage, IconLink, IconMerge, IconMinus, IconPin, IconPlus, IconRedo, IconSparkle, IconTrash as IconTrashCan, IconUndo } from "./Icons";
 import { PromptModal, buildPrompt } from "./PromptModal";
 import { ContextMenu, type MenuSection } from "./ContextMenu";
 import { menuFor, type MenuEnv, type MenuTarget } from "./canvasMenus";
@@ -25,7 +24,6 @@ import { CardAttachments, ClipPopover, Lightbox, droppedUrl, imageFiles, isClip,
 import { asUrl } from "../util/media";
 import { looksLikeBundle, openImport } from "./Import";
 import { TrashView } from "./TrashView";
-import { VersionMenu, openVersion } from "./Versions";
 import { ProposalView } from "./ProposalView";
 import { DuskStrip, useDuskGlass } from "./DuskGlass";
 import { OrganizePreviewLayer, TidyNudge } from "./OrganizePlan";
@@ -35,7 +33,7 @@ import { ArtifactFullView } from "./artifacts/ArtifactView";
 import { ArtifactCardBody, ArtifactHead } from "./artifacts/ArtifactCard";
 import { briefFromCard } from "./artifacts/prompts";
 
-/** Cards loose on one canvas (outside every frame) before "Tidy this folder?" shows. */
+/** Cards loose on the canvas (outside every frame) before "Tidy this canvas?" shows. */
 const TIDY_NUDGE_AT = 25;
 
 const MIN_ZOOM = 0.1;
@@ -60,7 +58,6 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
   /** A chat link asked for another card while the editor has unsaved edits (inline confirm). */
   const [switchAsk, setSwitchAsk] = useState<string | null>(null);
   const editorDirty = useRef(false);
-  // Linking lives in the workspace, so it survives opening another folder (links can cross folders).
   const { linkMode, linkFrom, setLinking } = ws;
   /** Web clip prompt: for the toolbar (centre of view), a point on the canvas, or a card. */
   const [clipPrompt, setClipPrompt] = useState<null | { at?: { x: number; y: number }; cardId?: string }>(null);
@@ -78,7 +75,6 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
   const lastPointer = useRef({ x: 0, y: 0 });
   const [trashOpen, setTrashOpen] = useState(false);
   const [themePicker, setThemePicker] = useState<{ left: number; top: number } | null>(null);
-  const [versionMenu, setVersionMenu] = useState<{ left: number; top: number } | null>(null);
   const { themes } = useTheme();
   const rootRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -95,18 +91,11 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
   const [proposalFor, setProposalFor] = useState<string | null>(null);
   const [selectedFrame, setSelectedFrame] = useState<string | null>(null);
   const [renamingFrame, setRenamingFrame] = useState<string | null>(null);
-  /** Folder nodes selected on this canvas (cards stay in `selection`). */
-  const [folderSel, setFolderSel] = useState<Set<string>>(new Set());
-  const [renamingFolder, setRenamingFolder] = useState<string | null>(null);
-  /** The folder node or crumb under a drag (highlighted). */
-  const [dropTarget, setDropTarget] = useState<string | null>(null);
   useEffect(() => {
     setSelection(new Set());
     setSelectedFrame(null);
     setRenamingFrame(null);
-    setFolderSel(new Set());
-    setRenamingFolder(null);
-  }, [ws.active, ws.folder]);
+  }, [ws.active]);
 
   // Rendered heights of auto-height cards (reported by each CardView), for culling, link
   // endpoints and the "fully hidden" stacking rule. Batched into one re-render per frame.
@@ -128,22 +117,20 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
   const rectOf = useCallback(
     (id: string): Rect | undefined => {
       const p = data?.canvas.cards[id];
-      if (p) return cardRect(autoHeight.has(id) ? { ...p, h: undefined } : p, heights.current.get(id));
-      const f = data?.canvas.folders?.[id];
-      return f ? folderRect(f) : undefined;
+      return p ? cardRect(autoHeight.has(id) ? { ...p, h: undefined } : p, heights.current.get(id)) : undefined;
     },
     // measureTick: heights changed
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [data, measureTick, autoHeight],
   );
 
-  // "Tidy this folder?": checked only when a canvas opens and when cards are added to it.
+  // "Tidy this canvas?": checked only when a project opens and when cards are added to it.
   const [tidyNudge, setTidyNudge] = useState(false);
   const canvasCards = data ? Object.keys(data.canvas.cards).length : 0;
   const lastCheck = useRef<{ key: string; n: number } | null>(null);
   useEffect(() => {
     if (!data) return;
-    const key = `${data.slug}/${ws.folder ?? ""}`;
+    const key = data.slug;
     const prev = lastCheck.current;
     lastCheck.current = { key, n: canvasCards };
     if (prev && prev.key === key && canvasCards <= prev.n) return;
@@ -152,7 +139,7 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
     const loose = Object.entries(data.canvas.cards).filter(([id, p]) => !ghosts.has(id) && !frames.some((f) => centerInside(f, cardRect(p)))).length;
     setTidyNudge(loose >= TIDY_NUDGE_AT);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [data?.slug, ws.folder, canvasCards]);
+  }, [data?.slug, canvasCards]);
 
   const toggle = (s: StageId) =>
     setFilter((prev) => {
@@ -170,20 +157,9 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
   const gridStyle = { backgroundSize: `${30 * vp.zoom}px ${30 * vp.zoom}px`, backgroundPosition: `${vp.x}px ${vp.y}px` } as CSSProperties;
   const title = data?.meta.name ?? "";
 
-  // Only the open canvas's cards. The stage filter applies only to kind "card" (Tech included);
+  // The stage filter applies only to kind "card" (Tech included);
   // stickies, labels, checklists, images and clips always show.
   const visible = useMemo(() => (data?.cards ?? []).filter((c) => data?.canvas.cards[c.id] && (!hasStage(c) || filter.has(c.stage))), [data, filter]);
-  const cardsById = useMemo(() => new Map((data?.cards ?? []).map((c) => [c.id, c])), [data]);
-  /** Folder nodes on this canvas: [id, record, pos]. */
-  const folderNodes = useMemo(
-    () => Object.entries(data?.canvas.folders ?? {}).flatMap(([id, p]) => {
-      const f = data?.folders.find((x) => x.id === id);
-      return f ? [[id, f, p] as const] : [];
-    }),
-    [data],
-  );
-  const chain = useMemo(() => (data ? folderChain(data.folders, ws.folder) : []), [data, ws.folder]);
-
   // Viewport-cull: only render cards whose box intersects the visible area (plus margin), to hold 60fps at ~500 cards.
   const onScreen = useMemo(() => {
     if (!data) return visible;
@@ -218,11 +194,7 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
   // The WebGL Mist edge runs only while a non-ghost Mist card is on screen.
   const hasMist = useMemo(() => onScreen.some((c) => hasStage(c) && c.stage !== "dream" && !c.ghost), [onScreen]);
 
-  // Cards and folder nodes share one stacking order.
-  const stack = useMemo(
-    () => displayStack([...onScreen.map((c) => c.id), ...folderNodes.map(([id]) => id)], rectOf, (id) => data?.canvas.cards[id] ?? data?.canvas.folders?.[id]),
-    [onScreen, folderNodes, rectOf, data],
-  );
+  const stack = useMemo(() => displayStack(onScreen.map((c) => c.id), rectOf, (id) => data?.canvas.cards[id]), [onScreen, rectOf, data]);
 
   // ----- pan / zoom -----
 
@@ -287,7 +259,7 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
 
   const panDrag = useRef<{
     id: number; x: number; y: number; vx: number; vy: number; started: boolean; button: number;
-    cardId: string | null; frameId: string | null; folderId: string | null; link: { from: string; to: string } | null; empty: boolean;
+    cardId: string | null; frameId: string | null; link: { from: string; to: string } | null; empty: boolean;
   } | null>(null);
   const marqueeRef = useRef<{ id: number; x0: number; y0: number; base: Set<string> } | null>(null);
   const [marquee, setMarquee] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
@@ -303,14 +275,12 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
         if (t.closest?.("[data-wheel-boundary]")) return;
         if (e.button === 1) e.preventDefault(); // no autoscroll
         const cardEl = t.closest?.(".card") as HTMLElement | null;
-        const folderEl = cardEl ? null : (t.closest?.("[data-folder-node]") as HTMLElement | null);
         const linkEl = cardEl ? null : (t.closest?.("[data-link-from]") as SVGElement | null);
         panDrag.current = {
           id: e.pointerId, x: e.clientX, y: e.clientY, vx: vpRef.current.x, vy: vpRef.current.y,
           started: e.button === 1, button: e.button, cardId: cardEl?.dataset.id ?? null,
           // A frame's title tab or edge handles (its body ignores the pointer).
-          frameId: cardEl || folderEl ? null : ((t.closest?.("[data-frame]") as HTMLElement | null)?.dataset.frame ?? null),
-          folderId: folderEl?.dataset.folderNode ?? null,
+          frameId: cardEl ? null : ((t.closest?.("[data-frame]") as HTMLElement | null)?.dataset.frame ?? null),
           link: linkEl ? { from: linkEl.dataset.linkFrom!, to: linkEl.dataset.linkTo! } : null,
           empty: t === root || t.classList.contains("grid"),
         };
@@ -325,10 +295,7 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
       }
       setSelectedFrame(null);
       const base = e.shiftKey ? new Set(selection) : new Set<string>();
-      if (!e.shiftKey) {
-        setSelection((s) => (s.size ? new Set() : s));
-        setFolderSel((s) => (s.size ? new Set() : s));
-      }
+      if (!e.shiftKey) setSelection((s) => (s.size ? new Set() : s));
       const sx = e.clientX - originRef.current.x;
       const sy = e.clientY - originRef.current.y;
       marqueeRef.current = { id: e.pointerId, x0: sx, y0: sy, base };
@@ -364,12 +331,6 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
         if (r && r.x <= wr && r.x + r.w >= wl && r.y <= wb && r.y + r.h >= wt) next.add(c.id);
       }
       setSelection(next);
-      const fs = new Set<string>();
-      for (const [id, p] of Object.entries(frameEnv.current.data?.canvas.folders ?? {})) {
-        const r = folderRect(p);
-        if (r.x <= wr && r.x + r.w >= wl && r.y <= wb && r.y + r.h >= wt) fs.add(id);
-      }
-      setFolderSel(fs);
     },
     [queueViewport, rectOf],
   );
@@ -382,7 +343,6 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
       else if (d.button === 2 && e.type === "pointerup") {
         const at = { x: e.clientX, y: e.clientY };
         if (d.cardId) openCardMenuRef.current(d.cardId, at.x, at.y);
-        else if (d.folderId) openFolderMenuRef.current(d.folderId, at.x, at.y);
         else if (d.frameId) {
           setSelectedFrame(d.frameId);
           setCtx({ ...at, target: { kind: "frame", id: d.frameId } });
@@ -424,13 +384,6 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
       if ((e.shiftKey && e.key === "F10") || e.key === "ContextMenu") {
         e.preventDefault();
         keyboardMenuRef.current();
-      } else if (e.key === "Enter" && !e.ctrlKey && !e.metaKey && !e.altKey && folderSelRef.current.length === 1 && !selectionRef.current.length && !target?.closest?.("button, a")) {
-        e.preventDefault();
-        ws.openFolder(folderSelRef.current[0]);
-      } else if ((e.key === "Backspace" && !e.ctrlKey && !e.metaKey && !e.altKey) || (e.altKey && e.key === "ArrowUp")) {
-        if (!ws.folder) return;
-        e.preventDefault();
-        ws.openFolder(dataRef.current?.folders.find((f) => f.id === ws.folder)?.parent ?? null);
       } else if (e.key === "Enter" && !e.ctrlKey && !e.metaKey && !e.altKey && one && !target?.closest?.("button, a")) {
         e.preventDefault();
         openRef.current(one);
@@ -443,19 +396,15 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
       } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "a") {
         e.preventDefault();
         setSelection(new Set(visibleRef.current.map((c) => c.id)));
-        setFolderSel(new Set(Object.keys(dataRef.current?.canvas.folders ?? {})));
       } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "g") {
         e.preventDefault();
         wrapRef.current(selectionRef.current);
       } else if (e.key === "Delete") {
         const ids = selectionRef.current.length ? selectionRef.current : !selectedFrameRef.current && one ? [one.id] : [];
-        const fids = folderSelRef.current;
-        if (ids.length || fids.length) {
+        if (ids.length) {
           e.preventDefault();
           setSelection(new Set());
-          setFolderSel(new Set());
-          if (ids.length) void ws.deleteCards(ids);
-          void (async () => { for (const f of fids) await ws.deleteFolder(f); })();
+          void ws.deleteCards(ids);
         } else if (selectedFrameRef.current) {
           e.preventDefault();
           ws.deleteFrame(selectedFrameRef.current);
@@ -471,7 +420,6 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
       } else if (e.key === "Escape") {
         setLinking(false);
         setSelection((s) => (s.size ? new Set() : s));
-        setFolderSel((s) => (s.size ? new Set() : s));
         setSelectedFrame(null);
       }
     };
@@ -510,11 +458,11 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
 
   const fit = useCallback(() => {
     // Bail out only when nothing passes the filter: "no card on screen" is exactly when Fit is needed.
-    if (!data || (visible.length === 0 && folderNodes.length === 0)) {
+    if (!data || visible.length === 0) {
       if (data) ws.setViewport({ x: sizeRef.current.w / 2, y: sizeRef.current.h / 2, zoom: 1 });
       return;
     }
-    const pts = [...(visible.map((c) => rectOf(c.id)).filter(Boolean) as Rect[]), ...Object.values(data.canvas.frames ?? {}), ...folderNodes.map(([, , p]) => folderRect(p))];
+    const pts = [...(visible.map((c) => rectOf(c.id)).filter(Boolean) as Rect[]), ...Object.values(data.canvas.frames ?? {})];
     if (pts.length === 0) return;
     const minX = Math.min(...pts.map((p) => p.x));
     const minY = Math.min(...pts.map((p) => p.y));
@@ -525,7 +473,7 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
     const zoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, Math.min((w - pad * 2) / (maxX - minX), (h - pad * 2) / (maxY - minY)) || 1));
     ws.setViewport({ x: w / 2 - ((minX + maxX) / 2) * zoom, y: h / 2 - ((minY + maxY) / 2) * zoom, zoom });
     void ws.flushCanvas();
-  }, [data, visible, folderNodes, ws, rectOf]);
+  }, [data, visible, ws, rectOf]);
 
   /** New card (opened in the editor) at `at` (its top-left), or at the centre of the view. */
   const createAt = useCallback(
@@ -554,7 +502,6 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
         return;
       }
       setSelection(new Set());
-      setFolderSel((s) => (s.size ? new Set() : s));
       if (linkMode) {
         if (!linkFrom) setLinking(true, card.id);
         else if (linkFrom !== card.id) {
@@ -583,74 +530,8 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
   const openCardMenuRef = useRef(openCardMenu);
   openCardMenuRef.current = openCardMenu;
   const openMenu = openCardMenu;
-  const openFolderMenu = useCallback((id: string, x: number, y: number) => {
-    setFolderSel((s) => (s.has(id) ? s : new Set([id])));
-    setCtx({ x, y, target: { kind: "folder", id } });
-  }, []);
-  const openFolderMenuRef = useRef(openFolderMenu);
-  openFolderMenuRef.current = openFolderMenu;
-
-  // ----- drag into a folder (a folder node, a breadcrumb crumb, or a sidebar folder) -----
-
-  /** The structure when the current drag started (undo of a drop goes back to it). */
-  const dragBefore = useRef<Structure | null>(null);
   const dataRef = useRef(data);
   dataRef.current = data;
-  /** The folder under (x, y) that `dragged` may go into: an id, ROOT for the project, or null. */
-  const dropFolderAt = useCallback((x: number, y: number, dragged: string): string | null => {
-    const d = dataRef.current;
-    if (!d || x < 0) return null;
-    for (const el of document.elementsFromPoint(x, y)) {
-      const h = el as HTMLElement;
-      if (h.closest?.(`[data-id="${dragged}"], [data-folder-node="${dragged}"], [data-frame="${dragged}"]`)) continue;
-      const t = h.closest?.("[data-drop-folder]") as HTMLElement | null;
-      if (!t) continue;
-      const v = t.dataset.dropFolder ?? "";
-      const id = v === "root" ? ROOT : v;
-      if (t.dataset.dropProject && t.dataset.dropProject !== d.slug) return null;
-      if (id === (ws.folder ?? ROOT)) return null;
-      if (id && !d.canvases[id]) return null;
-      // Never into itself or below itself.
-      if (id && d.canvas.folders?.[dragged] && isInside(d.folders, id, dragged)) return null;
-      return id;
-    }
-    return null;
-  }, [ws.folder]);
-  const dropRef = useRef({ dropFolderAt, ws, selection: [] as string[], folderSel: [] as string[] });
-  /** What moves with a dragged thing: the whole selection when it is part of it. */
-  const dragItems = (kind: "card" | "folder" | "frame", id: string): Items => {
-    const { selection: sel, folderSel: fsel } = dropRef.current;
-    if (kind === "frame") return { frames: [id], cards: frameCtlRef.current.members(id).map((m) => m.id) };
-    const inSel = kind === "card" ? sel.includes(id) : fsel.includes(id);
-    if (inSel) return { cards: sel, folders: fsel };
-    return kind === "card" ? { cards: [id] } : { folders: [id] };
-  };
-  const dragApi = useMemo(
-    () => ({
-      begin: () => void (dragBefore.current = dropRef.current.ws.structure()),
-      over: (x: number, y: number, id: string) => {
-        const t = dropRef.current.dropFolderAt(x, y, id);
-        setDropTarget((cur) => (cur === t ? cur : t));
-        document.querySelectorAll(".drop-hover-ext").forEach((el) => el.classList.remove("drop-hover-ext"));
-        if (t !== null) document.querySelectorAll(`[data-drop-folder="${t || "root"}"]:not([data-folder-node])`).forEach((el) => el.classList.add("drop-hover-ext"));
-      },
-      drop: (x: number, y: number, kind: "card" | "folder" | "frame", id: string): boolean => {
-        const t = dropRef.current.dropFolderAt(x, y, id);
-        setDropTarget(null);
-        document.querySelectorAll(".drop-hover-ext").forEach((el) => el.classList.remove("drop-hover-ext"));
-        if (t === null) return false;
-        const ok = dropRef.current.ws.moveItems(dragItems(kind, id), t || null, { before: dragBefore.current });
-        dragBefore.current = null;
-        if (ok) {
-          setSelection(new Set());
-          setFolderSel(new Set());
-        }
-        return ok;
-      },
-    }),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [],
-  );
 
   // Stable props for CardView, so React.memo skips every card except the one that changed while
   // panning/dragging (the `ws` object itself is new on every render).
@@ -667,15 +548,7 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
     [moveCard, resizeCard, flushCanvas, bringToFront, updateCard, deleteCard, keepGhostCard, deleteChecklistItems, startChecklistGrill, titleOf],
   );
   const onPromptCard = useCallback((id: string) => setPromptFor(id), []);
-  const cardDrag = useMemo(
-    () => ({
-      begin: dragApi.begin,
-      over: dragApi.over,
-      drop: (x: number, y: number, id: string) => dragApi.drop(x, y, "card", id),
-      unpin: (id: string) => frameEnv.current.ws.setPinned("cards", id, false),
-    }),
-    [dragApi],
-  );
+  const cardDrag = useMemo(() => ({ unpin: (id: string) => frameEnv.current.ws.setPinned(id, false) }), []);
   const onProposalCard = useCallback((id: string) => setProposalFor(id), []);
   const runArtifactRef = useRef(ws.runArtifact);
   runArtifactRef.current = ws.runArtifact;
@@ -694,10 +567,6 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
   const liveSelection = useMemo(() => [...selection].filter((id) => data?.cards.some((c) => c.id === id)), [selection, data]);
   const selectionRef = useRef<string[]>([]);
   selectionRef.current = liveSelection;
-  const liveFolderSel = useMemo(() => [...folderSel].filter((id) => data?.canvas.folders?.[id]), [folderSel, data]);
-  const folderSelRef = useRef<string[]>([]);
-  folderSelRef.current = liveFolderSel;
-  dropRef.current = { dropFolderAt, ws, selection: liveSelection, folderSel: liveFolderSel };
   const mergeCards = useCallback((ids: string[]) => {
     const cards = ids.map((id) => data!.cards.find((c) => c.id === id)!).filter(Boolean);
     const list = cards.map((c) => `"${c.title}" (id ${c.id})`).join(", ");
@@ -749,11 +618,6 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
           return r && !p.pinned && centerInside(f, r) ? [{ id: cid, x: p.x, y: p.y }] : [];
         });
       },
-      dragOver: (x, y, id) => {
-        if (!dragBefore.current) dragBefore.current = frameEnv.current.ws.structure();
-        dragApi.over(x, y, id);
-      },
-      drop: (x, y, id) => dragApi.drop(x, y, "frame", id),
       begin: () => frameEnv.current.ws.layoutSnapshot(),
       live: (id, patch, moves) => frameEnv.current.ws.patchFrameLive(id, patch, moves),
       commit: (label, before) => {
@@ -771,68 +635,6 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
   );
   const frameCtlRef = useRef(frameCtl);
   frameCtlRef.current = frameCtl;
-
-  /** Everything inside a frame (centre inside): cards, folder nodes and smaller frames. */
-  const frameContents = useCallback((id: string): Items => {
-    const d = frameEnv.current.data;
-    const f = d?.canvas.frames?.[id];
-    if (!d || !f) return {};
-    return {
-      cards: Object.keys(d.canvas.cards).filter((cid) => {
-        const r = frameEnv.current.rectOf(cid);
-        return r && centerInside(f, r);
-      }),
-      folders: Object.entries(d.canvas.folders ?? {}).filter(([, p]) => centerInside(f, folderRect(p))).map(([fid]) => fid),
-      frames: Object.entries(d.canvas.frames ?? {}).filter(([k, o]) => k !== id && centerInside(f, o) && o.w * o.h < f.w * f.h).map(([k]) => k),
-    };
-  }, []);
-
-  const folderCtl = useMemo<FolderControls>(
-    () => ({
-      zoom: () => vpRef.current.zoom,
-      begin: () => {
-        dragBefore.current = frameEnv.current.ws.structure();
-        return frameEnv.current.ws.layoutSnapshot();
-      },
-      live: (id, patch) => frameEnv.current.ws.patchFolderLive(id, patch),
-      commit: (label, before) => {
-        dragBefore.current = null;
-        if (before) frameEnv.current.ws.commitLayout(label, before as NonNullable<ReturnType<Workspace["layoutSnapshot"]>>);
-      },
-      dragOver: (x, y, id) => dragApi.over(x, y, id),
-      drop: (x, y, id) => dragApi.drop(x, y, "folder", id),
-      click: (id, additive) => {
-        setSelectedFrame(null);
-        if (!additive) setSelection((s) => (s.size ? new Set() : s));
-        setFolderSel((s) => {
-          if (!additive) return new Set([id]);
-          const n = new Set(s);
-          if (n.has(id)) n.delete(id);
-          else n.add(id);
-          return n;
-        });
-      },
-      open: (id) => frameEnv.current.ws.openFolder(id),
-      menu: (id, x, y) => openFolderMenuRef.current(id, x, y),
-      front: (id) => frameEnv.current.ws.setFolderStacking(id, "front"),
-      rename: (id, title) => frameEnv.current.ws.updateFolder(id, { title }, "rename folder"),
-      setRenaming: setRenamingFolder,
-      unpin: (id) => frameEnv.current.ws.setPinned("folders", id, false),
-    }),
-    [dragApi],
-  );
-
-  /** New folder: at a world point, or around the given items (they move inside). Name field focused. */
-  const newFolder = useCallback(
-    (at: { x: number; y: number } | null, group?: Items) => {
-      const id = ws.createFolder(at, DEFAULT_FOLDER_TITLE, group);
-      if (!id) return;
-      setSelection(new Set());
-      setFolderSel(new Set([id]));
-      setRenamingFolder(id);
-    },
-    [ws],
-  );
 
   /** New sticky / label / checklist / Tech card at the centre of the view. */
   const addKind = useCallback(
@@ -1143,7 +945,6 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
     openArtifact: (id) => setArtifactView(id),
     selectAll: () => {
       setSelection(new Set(visibleRef.current.map((c) => c.id)));
-      setFolderSel(new Set(Object.keys(data?.canvas.folders ?? {})));
     },
     select: (ids) => {
       setSelectedFrame(null);
@@ -1179,14 +980,6 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
       setRenamingFrame(id);
     },
     clearFrameSelection: () => setSelectedFrame(null),
-    newFolder: (point) => newFolder({ x: Math.round(point.x - FOLDER_W / 2), y: Math.round(point.y - FOLDER_H / 2) }),
-    groupIntoFolder: (items) => newFolder(null, items),
-    frameContents,
-    renameFolder: (id) => {
-      setFolderSel(new Set([id]));
-      setRenamingFolder(id);
-    },
-    folderSelection: liveFolderSel,
   });
 
   const addMenuSections: MenuSection[] = [
@@ -1237,31 +1030,8 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
           </div>
         )}
         {data && <LinkLayer cards={onScreen} rectOf={rectOf} ghosts={ws.ghostLinks} />}
-        {data && <CrossLinks cards={onScreen} all={cardsById} data={data} rectOf={rectOf} ws={ws} />}
         {/* Cards get their own stacking context, so card z-order never covers ghost-link controls. */}
         <div className="cards-layer">
-          {data &&
-            folderNodes.map(([id, f, p]) => {
-              const inner = data.canvases[id];
-              const kids = Object.keys(inner?.cards ?? {}).map((cid) => cardsById.get(cid)).filter((c): c is Card => !!c && !c.ghost);
-              return (
-                <FolderView
-                  key={id}
-                  id={id}
-                  folder={f}
-                  pos={p}
-                  z={stack.get(id) ?? 0}
-                  selected={folderSel.has(id)}
-                  renaming={renamingFolder === id}
-                  dropHint={dropTarget === id}
-                  cards={kids.length}
-                  folders={Object.keys(inner?.folders ?? {}).length}
-                  previews={previewsOf(kids)}
-                  slug={ws.active}
-                  ctl={folderCtl}
-                />
-              );
-            })}
           {data &&
             onScreen.map((c) => (
               <CardView
@@ -1289,34 +1059,21 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
         {data && <GhostLinkControls cards={onScreen} rectOf={rectOf} ghosts={ws.ghostLinks} ws={ws} />}
         {data && <OrganizePreviewLayer ws={ws} rectOf={rectOf} />}
       </div>
-      {data && tidyNudge && !(ws.folder ? data.folders.find((f) => f.id === ws.folder)?.nudge_off : data.meta.nudge_off) && (
+      {data && tidyNudge && (
         <TidyNudge
           onTidy={() => {
             setTidyNudge(false);
-            ws.requestChat({ text: ws.folder ? "/organize" : "/organize project", send: true });
+            ws.requestChat({ text: "/organize", send: true });
           }}
-          onClose={() => {
-            setTidyNudge(false);
-            void ws.setNudgeOff(ws.folder);
-          }}
+          onClose={() => setTidyNudge(false)}
         />
       )}
       {marquee && <div className="marquee" style={{ left: marquee.x, top: marquee.y, width: marquee.w, height: marquee.h }} />}
 
-      {data && ws.folder && Object.keys(data.canvas.cards).length === 0 && folderNodes.length === 0 && (
+      {data && data.cards.length === 0 && (
         <div className="empty">
-          <div className="empty-title">An empty folder</div>
-          <p>Add a card here, or drag cards onto this folder from the canvas or the sidebar. Backspace goes back up.</p>
-        </div>
-      )}
-      {data && !ws.folder && data.cards.length === 0 && folderNodes.length === 0 && (
-        <div className="empty">
-          <div className="empty-title">{data.is_inbox ? "Your Inbox is empty" : "A blank canvas"}</div>
-          <p>
-            {data.is_inbox
-              ? "Raw ideas land here. Capture one with the Card button, or press the global hotkey from anywhere."
-              : "Add your first card with the Card button below."}
-          </p>
+          <div className="empty-title">A blank canvas</div>
+          <p>Add your first card with the Card button below.</p>
         </div>
       )}
       {data && Object.keys(data.canvas.cards).length > 0 && visible.length === 0 && (
@@ -1327,55 +1084,12 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
       )}
 
       <div className="pill title-pill" data-wheel-boundary="">
-        <nav className="crumbs" aria-label="Folder path">
-          <button
-            type="button"
-            className={"crumb" + (chain.length ? "" : " here") + (dropTarget === ROOT ? " drop-hover" : "")}
-            data-drop-folder="root"
-            aria-current={chain.length ? undefined : "page"}
-            title={chain.length ? "Back to the project (Backspace goes up one level)" : undefined}
-            onClick={() => ws.openFolder(null)}
-          >
+        <nav className="crumbs" aria-label="Project">
+          <span className="crumb here" aria-current="page">
             <span className="proj-title">{title || "…"}</span>
-          </button>
-          {/* Project versions: "· v2 ▾" opens the version menu (switch, new, compare, rename). */}
-          {data && !data.is_inbox && openVersion(data, ws.folder) && (
-            <span className="crumb-wrap">
-              <span className="crumb-sep" aria-hidden="true">·</span>
-              <button
-                type="button"
-                className={"crumb version-crumb" + (chain.length === 1 ? " here" : "") + (chain[0] && dropTarget === chain[0].id ? " drop-hover" : "")}
-                data-drop-folder={chain[0]?.id}
-                aria-haspopup="menu"
-                aria-expanded={!!versionMenu}
-                title="Project version: switch, new, compare, rename"
-                onClick={(e) => {
-                  const r = e.currentTarget.getBoundingClientRect();
-                  setVersionMenu({ left: r.left, top: r.bottom + 6 });
-                }}
-              >
-                {folderName(openVersion(data, ws.folder))} ▾
-              </button>
-              {versionMenu && <VersionMenu ws={ws} at={versionMenu} onClose={() => setVersionMenu(null)} />}
-            </span>
-          )}
-          {chain.filter((f) => !isVersion(f)).map((f, i, rest) => (
-            <span key={f.id} className="crumb-wrap">
-              <span className="crumb-sep" aria-hidden="true">›</span>
-              <button
-                type="button"
-                className={"crumb" + (i === rest.length - 1 ? " here" : "") + (dropTarget === f.id ? " drop-hover" : "")}
-                data-drop-folder={f.id}
-                aria-current={i === rest.length - 1 ? "page" : undefined}
-                onClick={() => ws.openFolder(f.id)}
-              >
-                <IconFolder />
-                {folderName(f)}
-              </button>
-            </span>
-          ))}
+          </span>
         </nav>
-        {data && !data.is_inbox && (
+        {data && (
           <>
             <span className="pill-sep" />
             <div className="seg view-toggle" role="group" aria-label="View">
@@ -1418,7 +1132,7 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
           <IconRedo />
         </button>
         {data && <SuggestionsPill data={data} ws={ws} />}
-        {data && !data.is_inbox && (
+        {data && (
           <div className="theme-picker">
             <button
               type="button"
@@ -1450,7 +1164,7 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
       </div>
 
       {data && data.warnings.length > 0 && <Warnings data={data} />}
-      {data && !data.is_inbox && view === "board" && (
+      {data && view === "board" && (
         <BuildBoard
           ws={ws}
           onOpen={(id) => {
@@ -1497,7 +1211,7 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
           className={"tool" + (linkMode ? " on" : "")}
           aria-label={linkMode ? "Linking: pick two cards" : "Link two cards"}
           aria-pressed={linkMode}
-          title={linkMode ? "Pick two cards… Open another folder (sidebar) or press Ctrl+K to reach a card elsewhere. Esc cancels." : "Link two cards"}
+          title={linkMode ? "Pick two cards… Press Ctrl+K to reach a card elsewhere. Esc cancels." : "Link two cards"}
           disabled={!data}
           onClick={() => setLinking(!linkMode)}
         >
@@ -1548,12 +1262,6 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
           <button type="button" className="tool" aria-label="Wrap the selection in a frame" aria-keyshortcuts="Control+G" title="Wrap in frame (Ctrl+G)" onClick={() => wrapInFrame(liveSelection)}>
             <IconFrame />
             <span>Frame</span>
-          </button>
-        )}
-        {liveSelection.length + liveFolderSel.length >= 1 && (
-          <button type="button" className="tool" aria-label="Group the selection into a folder" title="Group into folder" onClick={() => newFolder(null, { cards: liveSelection, folders: liveFolderSel })}>
-            <IconFolder />
-            <span>Folder</span>
           </button>
         )}
         {liveSelection.length >= 2 && (
@@ -1722,68 +1430,11 @@ function LinkLayer({ cards, rectOf, ghosts }: { cards: Card[]; rectOf: RectOf; g
   );
 }
 
-/** Stub length of a link to a card in another folder. */
-const STUB = 60;
-
-/**
- * Links between a card here and a card in another folder: a short stub from the card ending in a
- * pill "<title> · <folder>". Clicking the pill opens that folder and focuses the card.
- */
-function CrossLinks({ cards, all, data, rectOf, ws }: { cards: Card[]; all: Map<string, Card>; data: ProjectData; rectOf: RectOf; ws: Workspace }) {
-  const here = data.canvas.cards;
-  const where = (id: string) => Object.entries(data.canvases).find(([, c]) => c.cards[id])?.[0];
-  const stubs: { key: string; x1: number; y1: number; x2: number; y2: number; other: Card; folder: string }[] = [];
-  // Links into this canvas from cards elsewhere, by target.
-  const incoming = useMemo(() => {
-    const m = new Map<string, string[]>();
-    for (const o of all.values()) if (!here[o.id]) for (const l of o.links) if (here[l.to]) m.set(l.to, [...(m.get(l.to) ?? []), o.id]);
-    return m;
-  }, [all, here]);
-  for (const c of cards) {
-    const r = rectOf(c.id);
-    if (!r) continue;
-    const others = new Set<string>(incoming.get(c.id) ?? []);
-    for (const l of c.links) if (!here[l.to] && all.has(l.to)) others.add(l.to);
-    [...others].forEach((oid, i) => {
-      const k = where(oid);
-      if (k === undefined) return;
-      const y = r.y + 18 + i * 30;
-      const x1 = r.x + r.w;
-      stubs.push({ key: `${c.id}~${oid}`, x1, y1: y, x2: x1 + STUB, y2: y, other: all.get(oid)!, folder: k === ROOT ? data.meta.name : folderName(data.folders.find((f) => f.id === k)) });
-    });
-  }
-  if (!stubs.length) return null;
-  return (
-    <>
-      <svg className="link-layer" width={1} height={1} style={{ left: 0, top: 0, overflow: "visible" }}>
-        {stubs.map((s) => (
-          <line key={s.key} x1={s.x1} y1={s.y1} x2={s.x2} y2={s.y2} className="link-line link-stub" />
-        ))}
-      </svg>
-      {stubs.map((s) => (
-        <button
-          key={s.key}
-          type="button"
-          className="link-stub-pill"
-          data-wheel-boundary=""
-          style={{ left: s.x2, top: s.y2 }}
-          title={`Linked card in ${s.folder}. Click to go there`}
-          onPointerDown={(e) => e.stopPropagation()}
-          onClick={() => void ws.focusCard(s.other.id)}
-        >
-          <span className="stub-title">{s.other.title || "Untitled"}</span> · {s.folder}
-        </button>
-      ))}
-    </>
-  );
-}
-
 /** What an artifact card can ask the canvas to do. */
 type ArtifactActions = { chip: (id: string, prompt: string, label: string) => void; open: (id: string) => void; settings: () => void };
 
 type CardActions = Pick<Workspace, "moveCard" | "resizeCard" | "flushCanvas" | "bringToFront" | "updateCard" | "deleteCard" | "keepGhostCard" | "deleteChecklistItems" | "startChecklistGrill"> & { titleOf: (id: string) => string | undefined };
-/** Drag into a folder: start, hover (highlight), release (true = moved into a folder). */
-type CardDrag = { begin: () => void; over: (x: number, y: number, id: string) => void; drop: (x: number, y: number, id: string) => boolean; unpin: (id: string) => void };
+type CardDrag = { unpin: (id: string) => void };
 
 const currentZoom = () => Number((document.querySelector(".canvas") as HTMLElement | null)?.dataset.zoom) || 1;
 
@@ -1854,7 +1505,6 @@ const CardView = memo(function CardView({
       e.stopPropagation();
       // The last card you touch comes to the front.
       ws.bringToFront(card.id);
-      if (!pos?.pinned) drag.begin();
       dragState.current = { x: e.clientX, y: e.clientY, ox: pos?.x ?? 0, oy: pos?.y ?? 0, zoom: currentZoom(), moved: false, last: { x: pos?.x ?? 0, y: pos?.y ?? 0 } };
       (e.currentTarget as Element).setPointerCapture(e.pointerId);
     },
@@ -1872,17 +1522,15 @@ const CardView = memo(function CardView({
       if (d.moved) {
         d.last = { x: d.ox + dx, y: d.oy + dy };
         ws.moveCard(card.id, d.last);
-        drag.over(e.clientX, e.clientY, card.id);
       }
     },
-    [card.id, ws, drag, pos?.pinned],
+    [card.id, ws, pos?.pinned],
   );
   // A cancelled press (window lost focus, gesture took over) keeps a move but never opens the card.
   const onPointerCancel = useCallback(() => {
     const d = dragState.current;
     dragState.current = null;
     if (d?.moved) {
-      drag.over(-1, -1, card.id);
       ws.moveCard(card.id, d.last, { undoable: true, from: { x: d.ox, y: d.oy } });
       void ws.flushCanvas();
     }
@@ -1892,8 +1540,6 @@ const CardView = memo(function CardView({
     dragState.current = null;
     if (!d) return;
     if (d.moved) {
-      // Released over a folder (node, crumb or sidebar): it moves in, as one undo step.
-      if (drag.drop(e.clientX, e.clientY, card.id)) return;
       ws.moveCard(card.id, d.last, { undoable: true, from: { x: d.ox, y: d.oy } });
       void ws.flushCanvas();
       return;

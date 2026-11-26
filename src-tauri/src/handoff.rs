@@ -69,29 +69,10 @@ pub enum Scope {
     Frames { ids: Vec<String> },
     /// A card plus the cards linked to it (both directions, up to two steps).
     Card { id: String },
-    /// Every card in a folder and the folders below it.
-    Folder { id: String },
 }
 
-/// Every canvas of the project: the root first, then each folder's.
-fn all_canvases(data: &ProjectData) -> impl Iterator<Item = &crate::model::Canvas> {
-    std::iter::once(&data.canvas).chain(data.canvases.values())
-}
-
-fn find_frame<'a>(data: &'a ProjectData, id: &str) -> Option<(&'a crate::model::Canvas, &'a crate::model::Frame)> {
-    all_canvases(data).find_map(|c| c.frames.get(id).map(|f| (c, f)))
-}
-
-/// The ids of a folder and every folder below it.
-fn folder_subtree(data: &ProjectData, id: &str) -> Vec<String> {
-    let mut out = vec![id.to_string()];
-    let mut i = 0;
-    while i < out.len() {
-        let cur = out[i].clone();
-        out.extend(data.folders.iter().filter(|f| f.parent.as_deref() == Some(cur.as_str())).map(|f| f.id.clone()));
-        i += 1;
-    }
-    out
+fn find_frame<'a>(data: &'a ProjectData, id: &str) -> Option<&'a crate::model::Frame> {
+    data.canvas.frames.get(id)
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -101,41 +82,6 @@ pub struct ScopeSpec {
     pub stages: Vec<Stage>,
     #[serde(default)]
     pub include_stickies: bool,
-    /// The project version the pack is of (folder id). None = the version the scope is in, else
-    /// the open one. Only that version's cards (role cards included) are in scope.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub version: Option<String>,
-}
-
-/// Card id -> version id, from loaded project data.
-pub fn card_versions(data: &ProjectData) -> HashMap<String, String> {
-    let mut out = HashMap::new();
-    for (fid, c) in &data.canvases {
-        if let Some(v) = crate::storage::top_version(&data.folders, fid) {
-            for id in c.cards.keys() {
-                out.entry(id.clone()).or_insert_with(|| v.clone());
-            }
-        }
-    }
-    out
-}
-
-/// The version a pack is of: the spec's, else the one its scope is in, else the open one.
-pub fn job_version(data: &ProjectData, spec: &ScopeSpec) -> Option<crate::model::Folder> {
-    let vs = crate::storage::versions_of(&data.folders);
-    if vs.is_empty() {
-        return None;
-    }
-    let of = card_versions(data);
-    let from_scope = match &spec.scope {
-        Scope::Folder { id } => crate::storage::top_version(&data.folders, id),
-        Scope::Card { id } => of.get(id).cloned(),
-        Scope::Selection { ids } => ids.iter().find_map(|i| of.get(i).cloned()),
-        Scope::Frames { ids } => ids.iter().find_map(|fid| data.canvases.iter().find(|(_, c)| c.frames.contains_key(fid)).and_then(|(k, _)| crate::storage::top_version(&data.folders, k))),
-        Scope::Project => None,
-    };
-    let id = spec.version.clone().or(from_scope).or(data.meta.last_version.clone());
-    id.and_then(|id| vs.iter().find(|f| f.id == id).map(|f| (*f).clone())).or_else(|| vs.last().map(|f| (*f).clone()))
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -162,9 +108,7 @@ const LINK_DEPTH: usize = 2;
 /// The in-scope card ids, in the project's card order. Ghosts are never included; the role cards
 /// (Tech & constraints, Project decisions) always are, since they hold project-wide decisions.
 pub fn resolve_scope(data: &ProjectData, spec: &ScopeSpec) -> Result<Vec<String>> {
-    let version = job_version(data, spec).map(|f| f.id);
-    let of = card_versions(data);
-    let live: Vec<&Card> = data.cards.iter().filter(|c| !c.meta.ghost && (version.is_none() || of.get(&c.meta.id) == version.as_ref())).collect();
+    let live: Vec<&Card> = data.cards.iter().filter(|c| !c.meta.ghost).collect();
     let by_id: HashMap<&str, &Card> = live.iter().map(|c| (c.meta.id.as_str(), *c)).collect();
     let base: HashSet<String> = match &spec.scope {
         Scope::Project => live.iter().map(|c| c.meta.id.clone()).collect(),
@@ -185,8 +129,8 @@ pub fn resolve_scope(data: &ProjectData, spec: &ScopeSpec) -> Result<Vec<String>
             }
             live.iter()
                 .filter(|c| {
-                    frames.iter().any(|(canvas, f)| {
-                        canvas.cards.get(&c.meta.id).is_some_and(|p| {
+                    frames.iter().any(|f| {
+                        data.canvas.cards.get(&c.meta.id).is_some_and(|p| {
                             let (cx, cy) = (p.x + p.w.unwrap_or(CARD_W) / 2.0, p.y + p.h.unwrap_or(CARD_H) / 2.0);
                             cx >= f.x && cx <= f.x + f.w && cy >= f.y && cy <= f.y + f.h
                         })
@@ -194,14 +138,6 @@ pub fn resolve_scope(data: &ProjectData, spec: &ScopeSpec) -> Result<Vec<String>
                 })
                 .map(|c| c.meta.id.clone())
                 .collect()
-        }
-        Scope::Folder { id } => {
-            if !data.folders.iter().any(|f| &f.id == id) {
-                return Err(AppError::NotFound(format!("folder {id}")));
-            }
-            let sub = folder_subtree(data, id);
-            let inside: HashSet<&String> = sub.iter().filter_map(|f| data.canvases.get(f)).flat_map(|c| c.cards.keys()).collect();
-            live.iter().filter(|c| inside.contains(&c.meta.id)).map(|c| c.meta.id.clone()).collect()
         }
         Scope::Card { id } => {
             if !by_id.contains_key(id.as_str()) {
@@ -248,16 +184,12 @@ pub fn scope_label(data: &ProjectData, scope: &Scope) -> String {
         Scope::Project => "Whole project".into(),
         Scope::Selection { ids } => format!("Selection ({} card{})", ids.len(), if ids.len() == 1 { "" } else { "s" }),
         Scope::Frames { ids } => {
-            let names: Vec<String> = ids.iter().filter_map(|id| find_frame(data, id)).map(|(_, f)| if f.title.trim().is_empty() { "Untitled frame".into() } else { f.title.trim().to_string() }).collect();
+            let names: Vec<String> = ids.iter().filter_map(|id| find_frame(data, id)).map(|f| if f.title.trim().is_empty() { "Untitled frame".into() } else { f.title.trim().to_string() }).collect();
             format!("Frame{}: {}", if names.len() == 1 { "" } else { "s" }, names.join(", "))
         }
         Scope::Card { id } => {
             let title = data.cards.iter().find(|c| &c.meta.id == id).map(|c| c.meta.title.clone()).unwrap_or_else(|| id.clone());
             format!("\"{title}\" and its linked cards")
-        }
-        Scope::Folder { id } => {
-            let path = crate::storage::Workspace::folder_paths(&data.folders).remove(id).unwrap_or_else(|| id.clone());
-            format!("Folder: {path}")
         }
     }
 }
@@ -335,6 +267,13 @@ pub fn next_revision(project_dir: &Path, dir: &str) -> u32 {
     from_index.max(from_dirs) + 1
 }
 
+/// Where the next pack goes: where the project's last one went (an older project may have used
+/// `design/<version>/r<N>/`), as (version id, version title, dir); "" = `design/v<N>/`.
+pub fn pack_dir(project_dir: &Path) -> (String, String, String) {
+    let last = read_index(project_dir).versions.into_iter().max_by(|a, b| a.created.cmp(&b.created)).unwrap_or_default();
+    (last.version_id, last.version_title, last.dir)
+}
+
 pub fn revision_dir(project_dir: &Path, dir: &str, rev: u32) -> PathBuf {
     if dir.is_empty() { project_dir.join("design").join(format!("v{rev}")) } else { project_dir.join("design").join(dir).join(format!("r{rev}")) }
 }
@@ -346,66 +285,6 @@ pub fn dir_name(title: &str) -> String {
     if s.is_empty() { "version".into() } else { s }
 }
 
-/// Where a version's revisions go: the folder its earlier revisions used, else its title (made
-/// unique against other versions' folders). A renamed version keeps its folder.
-pub fn dir_for(project_dir: &Path, version_id: &str, title: &str) -> String {
-    let idx = read_index(project_dir);
-    if let Some(e) = idx.versions.iter().rev().find(|e| e.version_id == version_id && !e.dir.is_empty()) {
-        return e.dir.clone();
-    }
-    let base = dir_name(title);
-    let taken = |d: &str| idx.versions.iter().any(|e| e.dir.eq_ignore_ascii_case(d) && e.version_id != version_id) || (project_dir.join("design").join(d).is_dir() && !idx.versions.iter().any(|e| e.dir.eq_ignore_ascii_case(d)));
-    let mut name = base.clone();
-    let mut n = 2;
-    while taken(&name) {
-        name = format!("{base}-{n}");
-        n += 1;
-    }
-    name
-}
-
-/// Migration to project versions: the flat `design/v<N>/` become `design/v1/r<N>/`, tagged with
-/// the version they belong to (index.json entries and each manifest). Repo copies are untouched.
-pub fn migrate_design(project_dir: &Path, version_id: &str, version_title: &str) -> Result<()> {
-    let design = project_dir.join("design");
-    let Ok(rd) = fs::read_dir(&design) else { return Ok(()) };
-    let mut idx = read_index(project_dir);
-    if idx.versions.iter().any(|e| !e.dir.is_empty()) {
-        return Ok(()); // already migrated
-    }
-    let olds: Vec<(u32, PathBuf)> = rd
-        .flatten()
-        .filter(|e| e.path().is_dir())
-        .filter_map(|e| Some((e.file_name().to_string_lossy().strip_prefix('v')?.parse::<u32>().ok()?, e.path())))
-        .filter(|(_, p)| p.join("manifest.json").is_file() || DOC_NAMES.iter().any(|n| p.join(n).is_file()))
-        .collect();
-    if !olds.is_empty() {
-        let tmp = design.join(format!(".migrate-{}", ulid::Ulid::generate()));
-        fs::create_dir_all(&tmp).map_err(|e| AppError::io("prepare the design folder", e))?;
-        for (n, p) in &olds {
-            fs::rename(p, tmp.join(format!("r{n}"))).map_err(|e| AppError::io(format!("move {}", p.display()), e))?;
-        }
-        let target = design.join("v1");
-        fs::rename(&tmp, &target).map_err(|e| AppError::io("move the design revisions into design/v1", e))?;
-        for (n, _) in &olds {
-            let m = target.join(format!("r{n}")).join("manifest.json");
-            if let Some(mut v) = fs::read_to_string(&m).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()).filter(Value::is_object) {
-                v["revision"] = json!(n);
-                v["project_version"] = json!({ "id": version_id, "title": version_title });
-                write_json(&m, &v)?;
-            }
-        }
-    }
-    if idx.versions.is_empty() && olds.is_empty() {
-        return Ok(());
-    }
-    for e in &mut idx.versions {
-        e.dir = "v1".into();
-        e.version_id = version_id.into();
-        e.version_title = version_title.into();
-    }
-    write_json(&design.join("index.json"), &idx)
-}
 
 /// Everything one version holds, ready to write.
 pub struct Pack {
@@ -667,15 +546,10 @@ pub fn start(app: &AppHandle, state: &AppState, slug: &str, mode: Mode, spec: Sc
     if cards.is_empty() {
         return Err(AppError::Invalid("Nothing to summarize: no cards match this scope and these stages.".into()));
     }
-    let ver = job_version(&data, &spec);
-    let (ver_id, ver_title) = ver.as_ref().map(|f| (f.id.clone(), f.name())).unwrap_or_default();
-    let ddir = if ver_id.is_empty() { String::new() } else { dir_for(&dir, &ver_id, &ver_title) };
-    let label = match &ver {
-        Some(_) => format!("Version {ver_title} · {}", scope_label(&data, &spec.scope)),
-        None => scope_label(&data, &spec.scope),
-    };
+    let (ver_id, ver_title, ddir) = pack_dir(&dir);
+    let label = scope_label(&data, &spec.scope);
     let version = next_revision(&dir, &ddir);
-    let prev = previous_in(&dir, &ddir, ver.as_ref().and_then(|f| f.created_from.as_deref()));
+    let prev = previous_in(&dir, &ddir, None);
     let tag = rev_label(&ver_title, version);
     let mut prompt = match mode {
         Mode::Gaps => gap_prompt(&data, &label, &spec, &cards, &frames, memory.as_deref()),
@@ -1150,11 +1024,12 @@ pub fn gen_prompt(data: &ProjectData, label: &str, spec: &ScopeSpec, cards: &[St
 mod tests {
     use super::*;
     use crate::model::{Frame, Link, NewCard, Pos};
-    use crate::storage::{Workspace, INBOX_SLUG};
+    use crate::storage::Workspace;
+    const INBOX_SLUG: &str = "ideas";
     use tempfile::TempDir;
 
     fn spec(scope: Scope) -> ScopeSpec {
-        ScopeSpec { scope, stages: vec![Stage::Mist, Stage::Reverie, Stage::Lucid, Stage::Dream, Stage::Built], include_stickies: false, version: None }
+        ScopeSpec { scope, stages: vec![Stage::Mist, Stage::Reverie, Stage::Lucid, Stage::Dream, Stage::Built], include_stickies: false }
     }
 
     fn pack(version: u32) -> Pack {
@@ -1305,7 +1180,7 @@ mod tests {
         let mut canvas = ws.load_project(INBOX_SLUG).unwrap().canvas;
         canvas.frames.insert("f1".into(), Frame { x: -10.0, y: -10.0, w: 300.0, h: 300.0, title: "Core".into(), ..Default::default() });
         canvas.cards.insert(a.clone(), Pos::at(0.0, 0.0));
-        ws.save_canvas(INBOX_SLUG, None, &canvas).unwrap();
+        ws.save_canvas(INBOX_SLUG, &canvas).unwrap();
         let data = ws.load_project(INBOX_SLUG).unwrap();
 
         let all = resolve_scope(&data, &spec(Scope::Project)).unwrap();

@@ -109,7 +109,7 @@ pub fn run_tool(app: &AppHandle, state: &AppState, tool: &str, input: Value) -> 
             let ws = state.ws.lock().map_err(|_| AppError::Invalid("workspace lock poisoned".into()))?;
             let data = ws.load_project(&slug)?;
             let frames = ws.card_frames(&slug).unwrap_or_default();
-            let spec = ScopeSpec { scope: Scope::Project, stages: vec![Stage::Mist, Stage::Reverie, Stage::Lucid, Stage::Dream, Stage::Built], include_stickies: false, version: None };
+            let spec = ScopeSpec { scope: Scope::Project, stages: vec![Stage::Mist, Stage::Reverie, Stage::Lucid, Stage::Dream, Stage::Built], include_stickies: false };
             let ids = crate::handoff::resolve_scope(&data, &spec)?;
             let cards: Vec<Value> = data.cards.iter().filter(|c| ids.contains(&c.meta.id)).map(|c| json!({ "id": c.meta.id, "title": c.meta.title, "stage": c.meta.stage, "tags": c.meta.tags, "frame": frames.get(&c.meta.id) })).collect();
             let mut tags: Vec<&String> = data.cards.iter().filter(|c| ids.contains(&c.meta.id)).flat_map(|c| &c.meta.tags).collect();

@@ -12,7 +12,6 @@ import { usePanels } from "./state/usePanels";
 import { SearchPalette } from "./components/SearchPalette";
 import { ShaderBackground } from "./components/ShaderBackground";
 import { Sidebar } from "./components/Sidebar";
-import { VersionsHost } from "./components/Versions";
 import { ImportHost } from "./components/Import";
 import { ScanHost } from "./components/Scan";
 import { useEffect, useState } from "react";
@@ -96,7 +95,6 @@ function MainApp() {
       <TaskHost ws={ws} />
       <BuildStartHost ws={ws} />
       <MemoryHost ws={ws} />
-      <VersionsHost ws={ws} />
       <ImportHost ws={ws} />
       <ScanHost ws={ws} />
       <PanelTabs left={panels.left} right={panels.right} onLeft={panels.toggleLeft} onRight={panels.toggleRight} />

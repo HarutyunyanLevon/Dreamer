@@ -71,7 +71,6 @@ export interface NewArtifact {
   ghost?: boolean;
   x?: number;
   y?: number;
-  folder?: string | null;
 }
 /** `themeId: ""` / `artMode: null` clear the override; `approvedVersion: 0` clears the approval. */
 export interface ArtifactPatch {
@@ -268,20 +267,12 @@ export interface Card {
   branch?: unknown;
   /** On a merge ghost: the ids of the cards it replaces when kept. */
   merged_from?: string[];
-  /** The card it was copied from (a new project version, or Compare's "Apply to"); never changes. */
-  origin?: Origin;
   /** The .dreamer.md bundle and ref this card was imported from. */
   import?: { bundle_id: string; ref: string; source: string };
   build?: BuildBlock;
   body: string;
   /** Any other frontmatter keys found in the file are passed through untouched. */
   [extra: string]: unknown;
-}
-
-/** A card's lineage: the card it was copied from and that card's version (folder id). */
-export interface Origin {
-  card: string;
-  version: string;
 }
 
 export interface NewCard {
@@ -302,9 +293,6 @@ export interface NewCard {
   branch?: unknown;
   x?: number;
   y?: number;
-  /** The folder whose canvas it lands on (absent = the open version, or the root without versions). */
-  folder?: string;
-  origin?: Origin;
 }
 
 /** `role: ""` / `color: ""` clear them. */
@@ -342,36 +330,11 @@ export interface Frame {
   z: number;
 }
 export interface Canvas {
-  /** 3 since folders (2 frames); older files load with none of either. */
+  /** 2 added frames; older files load without. */
   version: number;
   viewport: Viewport;
   cards: Record<string, Pos>;
   frames: Record<string, Frame>;
-  /** Child folders shown on this canvas. */
-  folders: Record<string, Pos>;
-}
-
-/** A folder inside a project (folders.json). Its contents live on its own canvas. */
-export interface Folder {
-  id: string;
-  title: string;
-  /** Parent folder id; null = the project root. */
-  parent: string | null;
-  color?: string;
-  created: string;
-  updated: string;
-  nudge_off?: boolean;
-  /** "version" = a project version (always top-level); absent = an ordinary folder. */
-  kind?: "version";
-  /** A version: the version it was copied from. */
-  created_from?: string;
-  [extra: string]: unknown;
-}
-
-/** One saveLayout call: canvases by folder id ("" = the root) and optionally the whole folder list. */
-export interface LayoutWrite {
-  canvases: Record<string, Canvas>;
-  folders?: Folder[];
 }
 
 export interface ProjectMeta {
@@ -382,63 +345,49 @@ export interface ProjectMeta {
   handoff_target?: string;
   /** The target the user confirmed writing into (first use). Copying needs it to equal handoff_target. */
   handoff_target_confirmed?: string;
-  /** The root canvas's "Tidy this folder?" hint was dismissed. */
-  nudge_off?: boolean;
-  /** The project version (folder id) that opens by default. */
-  last_version?: string;
 }
 export interface ProjectSummary {
   slug: string;
   name: string;
   theme: string | null;
   card_count: number;
-  is_inbox: boolean;
-  /** Handoff pack versions under design/. */
-  design_versions?: number;
   /** Unanswered questions in the handoff repo's docs/design/QUESTIONS.md. */
   open_questions?: number;
 }
 export interface ProjectData {
   slug: string;
-  is_inbox: boolean;
   meta: ProjectMeta;
-  /** The root canvas. (In the UI's view, the canvas of the folder that is open.) */
+  /** The project's one canvas. */
   canvas: Canvas;
-  folders: Folder[];
-  /** Each folder's canvas by folder id. */
-  canvases: Record<string, Canvas>;
   cards: Card[];
   /** Pending Claude edit proposals by card id (cards/<id>.proposal.json). */
   proposals?: Record<string, EditProposal>;
   warnings: string[];
-  /** The root has top-level folders and no versions yet: ask which ones are versions (once). */
-  version_migration?: { folders: { id: string; title: string; suggested: boolean }[] };
 }
 
 /** Arrange layouts of an organize plan. */
 export type OrganizeLayout = "grid" | "cluster-by-tag" | "flow-by-links" | "stage-columns";
-/** One op of an organize plan, as validated by Rust. Folder refs: an id, a tempId made earlier, or null (the root). */
+/** One op of an organize plan, as validated by Rust. */
 export type OrganizeOp =
-  | { op: "create_folder"; tempId: string; title: string; parent: string | null; color?: string }
   | { op: "rename"; id: string; title: string }
-  | { op: "move"; ids: string[]; to: string | null; x?: number; y?: number }
-  | { op: "create_frame"; tempId: string; folder: string | null; title: string; rect: { x: number; y: number; w: number; h: number } }
-  | { op: "arrange"; folder: string | null; ids: string[]; layout: OrganizeLayout }
+  | { op: "create_frame"; tempId: string; title: string; color?: string; rect: { x: number; y: number; w: number; h: number } }
+  | { op: "arrange"; ids: string[]; layout: OrganizeLayout }
   /** Explicit positions (the organize pipeline lays cards out itself). */
-  | { op: "place"; folder: string | null; positions: Record<string, { x: number; y: number }> }
+  | { op: "place"; positions: Record<string, { x: number; y: number }> }
   | { op: "retag"; id: string; add: string[]; remove: string[] };
+export type OrganizeScope = "project" | "frame" | "selection";
 /** A propose_organize plan (validated whole; nothing applied until the user does). */
 export interface OrganizePlanData {
   slug: string;
-  scope: "folder" | "project";
-  /** The folder the scope starts at (null = the root). */
-  folder: string | null;
+  scope: OrganizeScope;
+  /** The cards in scope (frame / selection); null = the whole project. */
+  scopeIds?: string[] | null;
   scopeName: string;
   rationale: string;
   ops: OrganizeOp[];
   /** Pinned items the plan leaves where they are. */
   kept: { id: string; title: string }[];
-  /** Titles of the existing cards / folders / frames the ops name. */
+  /** Titles of the existing cards / frames the ops name. */
   titles: Record<string, string>;
   /** A pipeline plan where some cards could not be placed (they are listed in `unplaced`). */
   partial?: boolean;
@@ -449,26 +398,23 @@ export interface OrganizePlanData {
 
 export interface ImportTarget {
   project?: string;
-  version?: string;
   /** "" = no default frame. */
   frame?: string;
   at?: [number, number];
   open_project?: string;
 }
 export interface ImportPlan {
-  header: { bundle_id: string; title: string; project?: string; version?: string; frame?: string; source: string; created: string };
+  header: { bundle_id: string; title: string; project?: string; frame?: string; source: string; created: string };
   project: string;
-  version: string | null;
   frame: string | null;
-  unresolved: ("project" | "version")[];
-  projects: { slug: string; name: string; versions: { id: string; title: string }[]; open_version: string | null }[];
+  unresolved: "project"[];
+  projects: { slug: string; name: string }[];
   frames: string[];
   cards: { ref: string; title: string; stage: StageId; action: "new" | "update" | "replace"; card_id: string | null; frame: string | null; has_build: boolean }[];
   warnings: string[];
 }
 export interface ImportResult {
   project: string;
-  folder: string | null;
   created: string[];
   proposals: string[];
   replaced: string[];
@@ -625,12 +571,6 @@ export interface TrashItem {
   reason: string;
   deleted_at: string;
   pos: { x: number; y: number } | null;
-  /** "folder" for a trashed folder (with its subtree); absent = a card. */
-  kind?: "folder";
-  /** The folder it was in (absent = the root). */
-  folder?: string | null;
-  /** A folder: how many cards went with it. */
-  count?: number;
 }
 
 export interface WorkspaceInfo {
@@ -656,8 +596,6 @@ export interface SearchHit {
   kind?: CardKind;
   snippet: string;
   score: number;
-  /** "Folder / Subfolder" when the card is inside a folder. */
-  folder_path?: string;
 }
 
 export interface DeletedProject {
@@ -685,14 +623,12 @@ export interface ChatThreadFile {
 
 // ----- the project handoff pack (src-tauri/src/handoff.rs) -----
 
-export type HandoffScope = { kind: "project" } | { kind: "selection"; ids: string[] } | { kind: "frames"; ids: string[] } | { kind: "card"; id: string } | { kind: "folder"; id: string };
+export type HandoffScope = { kind: "project" } | { kind: "selection"; ids: string[] } | { kind: "frames"; ids: string[] } | { kind: "card"; id: string };
 export interface HandoffSpec {
   scope: HandoffScope;
   /** Stages of plain cards to include (other kinds have no stage and are always in). */
   stages: StageId[];
   include_stickies: boolean;
-  /** The project version the pack is of (folder id); absent = the one the scope is in, else the open one. */
-  version?: string;
 }
 export type GapStatus = "ok" | "thin" | "missing";
 export interface Gap {
@@ -803,18 +739,11 @@ export interface Api {
   listProjects(): Promise<ProjectSummary[]>;
   createProject(name: string): Promise<ProjectSummary>;
   /** `handoff_target: ""` clears the target (and its confirmation). */
-  updateProject(slug: string, patch: { name?: string; theme?: string; handoff_target?: string; handoff_target_confirmed?: string; nudge_off?: boolean; last_version?: string }): Promise<ProjectSummary>;
+  updateProject(slug: string, patch: { name?: string; theme?: string; handoff_target?: string; handoff_target_confirmed?: string }): Promise<ProjectSummary>;
   loadProject(slug: string): Promise<ProjectData>;
-  /** The one-time "Treat these folders as versions?" answer (ids of the folders that become versions). */
-  migrateVersions(slug: string, versions: string[]): Promise<boolean>;
-  /** "New version from <from>": copies the version whole (new ids, origin set) and makes it the open one. */
-  newVersion(slug: string, from: string, title: string): Promise<{ version: Folder; cards: Record<string, string> }>;
-  /** `folder` omitted/null = the root canvas. */
-  saveCanvas(slug: string, canvas: Canvas, folder?: string | null): Promise<void>;
-  /** Several canvases and the folder list in one write (moves between folders, folder edits). */
-  saveLayout(slug: string, layout: LayoutWrite): Promise<void>;
-  /** A folder and everything below it go to Trash as one item. */
-  deleteFolder(slug: string, id: string): Promise<TrashItem>;
+  saveCanvas(slug: string, canvas: Canvas): Promise<void>;
+  /** Why the workspace opened read-only (a failed layout migration), or null. */
+  migrationStatus(): Promise<string | null>;
   createCard(slug: string, card: NewCard): Promise<Card>;
   readCard(slug: string, id: string): Promise<Card>;
   updateCard(slug: string, id: string, patch: CardPatch): Promise<Card>;
@@ -822,8 +751,7 @@ export interface Api {
   /** Trash with a custom reason, e.g. "lost to <winner title>" when picking a fork's winner. */
   loseCard(slug: string, id: string, reason: string): Promise<TrashItem>;
   listTrash(slug: string): Promise<TrashItem[]>;
-  /** Restores a trashed card, or a trashed folder (then it resolves to `{ folder: id }`). */
-  restoreCard(slug: string, id: string): Promise<Card | { folder: string }>;
+  restoreCard(slug: string, id: string): Promise<Card>;
   emptyTrash(slug: string): Promise<number>;
   /** Saves files under the project's media/ folder; returns their paths in order (e.g. "media/xyz.png"). */
   saveMedia(slug: string, files: MediaUpload[]): Promise<string[]>;
@@ -925,7 +853,7 @@ export interface Api {
   pickFolder(title?: string): Promise<string | null>;
   /** Keyword search; `project` omitted = every project. Read-only, no Claude involved. */
   searchCards(query: string, project?: string, limit?: number): Promise<SearchHit[]>;
-  /** Removes the project folder (Recycle Bin when possible). The Inbox can't be deleted. */
+  /** Removes the project folder (Recycle Bin when possible). The last project can't be deleted. */
   deleteProject(slug: string): Promise<DeletedProject>;
   /** thread = a card id, or "project". */
   loadChat(slug: string, thread: string): Promise<ChatThreadFile>;

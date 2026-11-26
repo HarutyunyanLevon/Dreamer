@@ -231,7 +231,6 @@ pub struct NewArtifact {
     pub ghost: bool,
     pub x: Option<f64>,
     pub y: Option<f64>,
-    pub folder: Option<String>,
 }
 
 pub fn default_title(kind: &str) -> &'static str {
@@ -269,7 +268,6 @@ pub fn create(ws: &Workspace, slug: &str, new: NewArtifact) -> Result<Card> {
             ghost: Some(new.ghost),
             x: new.x,
             y: new.y,
-            folder: new.folder.clone(),
             ..Default::default()
         },
     )?;
@@ -1195,7 +1193,7 @@ pub fn theme_css(spec: Option<&ThemeSpec>, mode: Option<&ArtMode>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::INBOX_SLUG;
+    const INBOX_SLUG: &str = "ideas";
     use tempfile::TempDir;
 
     fn ws() -> (TempDir, Workspace) {

@@ -1,11 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { api, type BuildBlock, type Card, type HandoffEvent, type ProjectData, type TaskFlag, type TaskKind } from "../api";
+import { api, type BuildBlock, type Card, type HandoffEvent, type TaskFlag, type TaskKind } from "../api";
 import { buildRuns } from "../state/buildRuns";
-import { cardVersions, type Workspace } from "../state/useWorkspace";
+import { type Workspace } from "../state/useWorkspace";
 import { Modal } from "../ui/Modal";
 import { needsRebuild } from "../util/build";
 import { renderDoc } from "../util/markdown";
-import { openVersion } from "./Versions";
 
 type Col = "dream" | "queued" | "building" | "built" | "rebuild";
 const COLS: { id: Col; title: string }[] = [
@@ -60,20 +59,14 @@ export function queueGroups(cards: Card[]): string[][] {
   return [...groups.values()];
 }
 
-function boardCards(data: ProjectData, folder: string | null): Card[] {
-  const open = openVersion(data, folder);
-  const of = cardVersions(data);
-  return data.cards.filter((c) => !open || of.get(c.id) === open.id);
-}
-
-/** The Build board of the open version: Dream | Queued | Building | Built | Needs rebuild. */
+/** The Build board: Dream | Queued | Building | Built | Needs rebuild. */
 export function BuildBoard({ ws, onOpen }: { ws: Workspace; onOpen: (id: string) => void }) {
   const data = ws.data!;
   const [lucid, setLucid] = useState(false);
   const [over, setOver] = useState<Col | null>(null);
   const [queue, setQueue] = useState<string[][] | null>(null);
   const drag = useRef<{ id: string; from: Col } | null>(null);
-  const cards = useMemo(() => boardCards(data, ws.folder), [data, ws.folder]);
+  const cards = data.cards;
   const cols = useMemo(() => {
     const m: Record<Col, Card[]> = { dream: [], queued: [], building: [], built: [], rebuild: [] };
     for (const c of cards) {

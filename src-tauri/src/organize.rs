@@ -1,14 +1,14 @@
 //! Organize: the read-only `list_tree` tool, the `propose_organize` validator and the
 //! deterministic layout the organize pipeline (organize_pipeline.rs) uses.
 //!
-//! Folders are project versions: organize never touches them. A plan works inside the open folder
-//! only, with frames, layout and tags. Nothing here writes. A plan is checked against the project as
-//! it is now (ids exist, cards are on the open canvas, pinned positions respected), and either
+//! A plan works on its scope (the project, a frame's cards or the selection) with frames, layout
+//! and tags. Nothing here writes. A plan is checked against the project as it is now (ids exist,
+//! cards are in scope, pinned positions respected), and either
 //! rejected as a whole (every bad op listed, so the model can fix the plan) or handed back
 //! normalized for the UI, which previews it and applies the checked ops as one undo step.
 
 use crate::error::{AppError, Result};
-use crate::model::{Canvas, ProjectData};
+use crate::model::ProjectData;
 use crate::state::AppState;
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -16,47 +16,60 @@ use std::collections::{BTreeMap, BTreeSet};
 const MAX_OPS: usize = 300;
 const MAX_TITLE: usize = 80;
 const LAYOUTS: &[&str] = &["grid", "cluster-by-tag", "flow-by-links", "stage-columns"];
-const FOLDER_OPS_MSG: &str = "folders are project versions: organize never creates, renames or moves folders or moves cards between them; work inside the open folder with frames, layout (arrange / place) and tags";
+const FOLDER_OPS_MSG: &str = "there are no folders: organize with frames, layout (arrange / place) and tags";
 
-/// The project with every canvas keyed by folder id ("" = the root).
-struct World {
-    p: ProjectData,
-    canvases: BTreeMap<String, Canvas>,
+/// What an organize run works on: "project" (every card), "frame" (a frame's cards) or
+/// "selection"; `ids` = the cards in scope (None = all).
+#[derive(Clone, Debug, Default)]
+pub struct Scope {
+    pub kind: String,
+    pub name: String,
+    pub ids: Option<BTreeSet<String>>,
 }
 
-fn load(state: &AppState, slug: &str) -> Result<World> {
+impl Scope {
+    pub fn new(kind: Option<&str>, name: Option<String>, ids: Option<Vec<String>>) -> Scope {
+        let kind = match kind {
+            Some(k @ ("frame" | "selection")) if ids.is_some() => k.to_string(),
+            _ => return Scope { kind: "project".into(), ..Default::default() },
+        };
+        Scope { name: name.filter(|n| !n.trim().is_empty()).unwrap_or_else(|| if kind == "frame" { "the frame".into() } else { "the selection".into() }), kind, ids: ids.map(|v| v.into_iter().collect()) }
+    }
+    pub fn has(&self, id: &str) -> bool {
+        self.ids.as_ref().is_none_or(|s| s.contains(id))
+    }
+}
+
+struct World {
+    p: ProjectData,
+    scope: Scope,
+}
+
+fn load(state: &AppState, slug: &str, scope: &Scope) -> Result<World> {
     let p = state.ws.lock().map_err(|_| AppError::Invalid("workspace lock poisoned".into()))?.load_project(slug)?;
-    let mut canvases = p.canvases.clone();
-    canvases.insert(String::new(), p.canvas.clone());
-    Ok(World { p, canvases })
+    Ok(World { p, scope: scope.clone() })
 }
 
 impl World {
-    fn folder_title(&self, id: &str) -> String {
-        if id.is_empty() {
-            return self.p.meta.name.clone();
-        }
-        self.p.folders.iter().find(|f| f.id == id).map(|f| if f.title.trim().is_empty() { "Untitled folder".to_string() } else { f.title.trim().to_string() }).unwrap_or_else(|| id.to_string())
+    fn scope_name(&self) -> String {
+        if self.scope.kind == "project" { self.p.meta.name.clone() } else { self.scope.name.clone() }
     }
+    /// Live (not ghost) cards in scope.
     fn live_cards(&self) -> BTreeMap<&str, &crate::model::Card> {
-        self.p.cards.iter().filter(|c| !c.meta.ghost).map(|c| (c.meta.id.as_str(), c)).collect()
-    }
-    /// The open canvas key ("" = the root): the only place a plan works in.
-    fn open_key(&self, open: Option<&str>) -> String {
-        open.filter(|o| self.canvases.contains_key(*o)).unwrap_or("").to_string()
+        self.p.cards.iter().filter(|c| !c.meta.ghost && self.scope.has(&c.meta.id)).map(|c| (c.meta.id.as_str(), c)).collect()
     }
 }
 
-/// Compact text: the open folder's frames and cards with ids, titles, tags, stage, place, flags.
-pub fn list_tree(state: &AppState, slug: &str, open: Option<String>, _input: &Value) -> Result<Value> {
-    let w = load(state, slug)?;
-    let key = w.open_key(open.as_deref());
+/// Compact text: the canvas frames and the in-scope cards with ids, titles, tags, stage, place, flags.
+pub fn list_tree(state: &AppState, slug: &str, scope: &Scope, _input: &Value) -> Result<Value> {
+    let w = load(state, slug, scope)?;
     let live = w.live_cards();
-    let c = &w.canvases[&key];
+    let c = &w.p.canvas;
     let n = c.cards.keys().filter(|id| live.contains_key(id.as_str())).count();
     let mut out = format!(
-        "Scope: the open folder \"{}\" · {n} cards. Folders are project versions and are never changed; organize with frames, layout and tags. Pinned cards keep their position.",
-        w.folder_title(&key)
+        "Scope: {} \"{}\" · {n} cards. Organize with frames, layout and tags. Pinned cards keep their position.",
+        w.scope.kind,
+        w.scope_name()
     );
     out.push_str("\n\nFrames (id · title · x,y wxh):");
     for (id, f) in &c.frames {
@@ -102,18 +115,15 @@ fn title_of(op: &Value) -> std::result::Result<String, String> {
 
 /// Checks a whole plan. Err: every problem, for the model to fix. Ok: the normalized plan for the UI.
 /// Extra keys of `input` (the pipeline's "pipeline" / "unplaced") are passed through.
-pub fn propose_organize(state: &AppState, slug: &str, open: Option<String>, input: &Value) -> Result<Value> {
-    let w = load(state, slug)?;
-    let key = w.open_key(open.as_deref());
-    let canvas = &w.canvases[&key];
+pub fn propose_organize(state: &AppState, slug: &str, scope: &Scope, input: &Value) -> Result<Value> {
+    let w = load(state, slug, scope)?;
+    let canvas = &w.p.canvas;
     let live = w.live_cards();
     let rationale = input.get("rationale").and_then(Value::as_str).map(str::trim).unwrap_or_default().chars().take(1200).collect::<String>();
     let ops = input.get("ops").and_then(Value::as_array).cloned().unwrap_or_default();
     let on_canvas = |id: &str| canvas.cards.contains_key(id) && live.contains_key(id);
     let pinned: BTreeSet<String> = canvas.cards.iter().filter(|(_, p)| p.pinned).map(|(id, _)| id.clone()).collect();
     let mut frames: BTreeSet<String> = canvas.frames.keys().cloned().collect();
-    let folder_ids: BTreeSet<&str> = w.p.folders.iter().map(|f| f.id.as_str()).collect();
-    let folder_ref = if key.is_empty() { Value::Null } else { json!(key) };
 
     let mut errors: Vec<String> = Vec::new();
     if ops.is_empty() {
@@ -145,10 +155,6 @@ pub fn propose_organize(state: &AppState, slug: &str, open: Option<String>, inpu
                         continue;
                     }
                 };
-                if folder_ids.contains(id) {
-                    bad(FOLDER_OPS_MSG.into());
-                    continue;
-                }
                 if live.contains_key(id) {
                     bad("cards are never renamed by a plan (that would edit card text); rename frames only".into());
                     continue;
@@ -167,7 +173,7 @@ pub fn propose_organize(state: &AppState, slug: &str, open: Option<String>, inpu
                     bad("needs a tempId (letters, digits, - or _), e.g. \"new-combat\"".into());
                     continue;
                 }
-                if frames.contains(t) || w.p.cards.iter().any(|c| c.meta.id == t) || folder_ids.contains(t) {
+                if frames.contains(t) || w.p.cards.iter().any(|c| c.meta.id == t) {
                     bad(format!("tempId {t:?} is already used"));
                     continue;
                 }
@@ -190,7 +196,6 @@ pub fn propose_organize(state: &AppState, slug: &str, open: Option<String>, inpu
                 }
                 frames.insert(t.to_string());
                 o.insert("tempId".into(), json!(t));
-                o.insert("folder".into(), folder_ref.clone());
                 o.insert("title".into(), json!(title));
                 o.insert("rect".into(), json!({ "x": x.round(), "y": y.round(), "w": fw.round(), "h": fh.round() }));
                 if let Some(c) = op.get("color").and_then(Value::as_str).filter(|c| !c.trim().is_empty()) {
@@ -216,7 +221,7 @@ pub fn propose_organize(state: &AppState, slug: &str, open: Option<String>, inpu
                         continue;
                     }
                     if !on_canvas(&id) {
-                        bad(format!("card {id:?} is not in the open folder"));
+                        bad(format!("card {id:?} is not in scope"));
                         continue;
                     }
                     // A pinned card never changes position.
@@ -229,11 +234,10 @@ pub fn propose_organize(state: &AppState, slug: &str, open: Option<String>, inpu
                 }
                 if take.len() < 2 {
                     if take.is_empty() && kept.is_empty() {
-                        bad("needs the ids of at least 2 cards in the open folder".into());
+                        bad("needs the ids of at least 2 cards in scope".into());
                     }
                     continue;
                 }
-                o.insert("folder".into(), folder_ref.clone());
                 o.insert("ids".into(), json!(take));
                 o.insert("layout".into(), json!(layout));
             }
@@ -245,7 +249,7 @@ pub fn propose_organize(state: &AppState, slug: &str, open: Option<String>, inpu
                 let mut out = Map::new();
                 for (id, p) in pos {
                     if !on_canvas(id) {
-                        bad(format!("card {id:?} is not in the open folder"));
+                        bad(format!("card {id:?} is not in scope"));
                         continue;
                     }
                     if pinned.contains(id) {
@@ -263,7 +267,6 @@ pub fn propose_organize(state: &AppState, slug: &str, open: Option<String>, inpu
                 if out.is_empty() {
                     continue;
                 }
-                o.insert("folder".into(), folder_ref.clone());
                 o.insert("positions".into(), Value::Object(out));
             }
             "retag" => {
@@ -273,7 +276,7 @@ pub fn propose_organize(state: &AppState, slug: &str, open: Option<String>, inpu
                     continue;
                 };
                 if !canvas.cards.contains_key(id) {
-                    bad(format!("card {id:?} is not in the open folder"));
+                    bad(format!("card {id:?} is not in scope"));
                     continue;
                 }
                 let (add, remove) = match (str_list(op.get("add")), str_list(op.get("remove"))) {
@@ -295,7 +298,7 @@ pub fn propose_organize(state: &AppState, slug: &str, open: Option<String>, inpu
                 referenced.insert(id.to_string());
             }
             "" => bad("missing \"op\"".into()),
-            other => bad(format!("unknown op {other:?}; use create_frame, rename (frames), arrange, place or retag (plans never delete, edit card text or touch folders)")),
+            other => bad(format!("unknown op {other:?}; use create_frame, rename (frames), arrange, place or retag (plans never delete, edit card text or move cards out of scope)")),
         }
         if o.len() > 1 {
             out_ops.push(Value::Object(o));
@@ -328,9 +331,9 @@ pub fn propose_organize(state: &AppState, slug: &str, open: Option<String>, inpu
     let kept: Vec<Value> = kept.iter().map(|id| json!({ "id": id, "title": titles.get(id).cloned().unwrap_or(json!(id)) })).collect();
     let mut plan = json!({
         "slug": slug,
-        "scope": "folder",
-        "folder": folder_ref,
-        "scopeName": w.folder_title(&key),
+        "scope": w.scope.kind,
+        "scopeIds": w.scope.ids,
+        "scopeName": w.scope_name(),
         "rationale": rationale,
         "ops": out_ops,
         "kept": kept,

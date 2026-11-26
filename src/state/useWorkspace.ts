@@ -1,150 +1,22 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { proposalPatch } from "../components/ProposalView";
-import { api, type Attachment, type BuildBlock, type Canvas, type Card, type CardKind, type CardPatch, type EditProposal, type Folder, type Frame, type HandoffScope, type Link, type NewCard, type OrganizeLayout, type OrganizePlanData, type Pos, type ProjectData, type ProjectSummary, type SavedTask } from "../api";
-import { CARD_H, CARD_W, FOLDER_H, FOLDER_W } from "../components/cardGeometry";
+import { api, type Attachment, type BuildBlock, type Canvas, type Card, type CardKind, type CardPatch, type EditProposal, type Frame, type HandoffScope, type Link, type NewCard, type OrganizeLayout, type OrganizePlanData, type Pos, type ProjectData, type ProjectSummary, type SavedTask } from "../api";
+import { CARD_H, CARD_W } from "../components/cardGeometry";
 import { DECISIONS_TITLE, TECH_TEMPLATE, TECH_TITLE, parseItem } from "../components/kinds";
 import type { NewArtifact } from "../api";
 import { ARTIFACT_LABEL, artifactType, createPrompt } from "../components/artifacts/prompts";
 
-const INBOX = "inbox";
 const CANVAS_SAVE_DEBOUNCE_MS = 500;
 
 /** Client-side attachment id, so a just-added item can be referenced before the core echoes it back. */
 const newAttId = () => `a${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
 const newFrameId = () => `f${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
 
-/** Card and folder positions + frames: what a frame edit changes (never the viewport). */
-type Layout = Pick<Canvas, "cards" | "frames" | "folders">;
-const layoutOf = (c: Canvas): Layout => ({ cards: c.cards, frames: c.frames ?? {}, folders: c.folders ?? {} });
+/** Card positions + frames: what a frame edit changes (never the viewport). */
+type Layout = Pick<Canvas, "cards" | "frames">;
+const layoutOf = (c: Canvas): Layout => ({ cards: c.cards, frames: c.frames ?? {} });
+const withFrames = (d: ProjectData): ProjectData => ({ ...d, canvas: { ...d.canvas, frames: d.canvas.frames ?? {} } });
 
-/** Key of the root canvas in `ProjectData.canvases` (the UI keeps every canvas there). */
-export const ROOT = "";
-const keyOf = (f: string | null | undefined) => f ?? ROOT;
-const newFolderId = () => `fd${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
-const blankCanvas = (): Canvas => ({ version: 3, viewport: { x: 300, y: 110, zoom: 1 }, cards: {}, frames: {}, folders: {} });
-/** Loaded data with the root canvas also under canvases[ROOT]. */
-function withRoot(d: ProjectData): ProjectData {
-  const canvases: Record<string, Canvas> = {};
-  for (const [k, c] of Object.entries({ ...(d.canvases ?? {}), [ROOT]: d.canvas })) canvases[k] = { ...c, frames: c.frames ?? {}, folders: c.folders ?? {} };
-  return { ...d, folders: d.folders ?? [], canvases };
-}
-/** The UI's view: `canvas` is the open folder's canvas. */
-const viewOf = (d: ProjectData, folder: string | null): ProjectData => ({ ...d, canvas: d.canvases[keyOf(folder)] ?? d.canvases[ROOT] });
-
-/** Folder records + every canvas: what a structural change (folders, moves between canvases) touches. */
-export interface Structure {
-  canvases: Record<string, Canvas>;
-  folders: Folder[];
-}
-/** Things on one canvas that can move together. */
-export interface Items {
-  cards?: string[];
-  frames?: string[];
-  folders?: string[];
-}
-/** `id` is `anc` or below it. */
-export function isInside(folders: Folder[], id: string, anc: string): boolean {
-  let cur: string | null | undefined = id;
-  for (let i = 0; cur && i <= folders.length; i++) {
-    if (cur === anc) return true;
-    cur = folders.find((f) => f.id === cur)?.parent;
-  }
-  return false;
-}
-/** Root-first chain of folders down to `id`. */
-export function folderChain(folders: Folder[], id: string | null): Folder[] {
-  const out: Folder[] = [];
-  let cur = id;
-  for (let i = 0; cur && i <= folders.length; i++) {
-    const f = folders.find((x) => x.id === cur);
-    if (!f) break;
-    out.unshift(f);
-    cur = f.parent;
-  }
-  return out;
-}
-export const folderName = (f: Folder | undefined) => f?.title.trim() || "Untitled folder";
-export const isVersion = (f: Folder | undefined) => f?.kind === "version" && !f.parent;
-/** Project versions, oldest first (same order as Rust's versions_of). */
-export const versionsOf = (folders: Folder[]) => folders.filter(isVersion).sort((a, b) => a.created.localeCompare(b.created) || a.id.localeCompare(b.id));
-/** The version a folder is in (itself when it is one); undefined at the root or without versions. */
-export const versionOf = (folders: Folder[], id: string | null | undefined): Folder | undefined => {
-  const top = folderChain(folders, id ?? null)[0];
-  return isVersion(top) ? top : undefined;
-};
-/** The canvas a project opens on: its last version (the root without versions). */
-const startFolder = (d: ProjectData): string | null => {
-  const vs = versionsOf(d.folders);
-  const v = vs.find((f) => f.id === d.meta.last_version) ?? vs[vs.length - 1];
-  return v && d.canvases[v.id] ? v.id : null;
-};
-/** Card id -> the version it is in (cards outside versions are left out). */
-export function cardVersions(d: Pick<ProjectData, "folders" | "canvases">): Map<string, string> {
-  const out = new Map<string, string>();
-  for (const [k, c] of Object.entries(d.canvases)) {
-    const v = k ? versionOf(d.folders, k) : undefined;
-    if (v) for (const id of Object.keys(c.cards)) if (!out.has(id)) out.set(id, v.id);
-  }
-  return out;
-}
-/** The next free "vN" title. */
-export const nextVersionTitle = (folders: Folder[]) => `v${Math.max(0, ...versionsOf(folders).map((f) => Number(/^v\s*(\d+)$/i.exec(f.title.trim())?.[1] ?? 0))) + 1}`;
-const itemSize = (kind: "cards" | "folders" | "frames", p: { w?: number; h?: number }) =>
-  kind === "frames" ? { w: p.w ?? 0, h: p.h ?? 0 } : kind === "folders" ? { w: p.w ?? FOLDER_W, h: p.h ?? FOLDER_H } : { w: p.w ?? CARD_W, h: p.h ?? CARD_H };
-/** Bounds of everything on a canvas (null when empty). */
-function boundsOf(c: Canvas) {
-  const boxes = [
-    ...Object.values(c.cards).map((p) => ({ x: p.x, y: p.y, ...itemSize("cards", p) })),
-    ...Object.values(c.folders ?? {}).map((p) => ({ x: p.x, y: p.y, ...itemSize("folders", p) })),
-    ...Object.values(c.frames ?? {}),
-  ];
-  if (!boxes.length) return null;
-  const x = Math.min(...boxes.map((b) => b.x));
-  const y = Math.min(...boxes.map((b) => b.y));
-  return { x, y, w: Math.max(...boxes.map((b) => b.x + b.w)) - x, h: Math.max(...boxes.map((b) => b.y + b.h)) - y };
-}
-const maxZ = (c: Canvas) => Math.max(0, ...Object.values(c.cards).map((p) => p.z ?? 0), ...Object.values(c.folders ?? {}).map((p) => p.z ?? 0));
-/**
- * Takes `items` off `src` and puts them on `dst`, keeping their layout, with the group's top-left
- * at `origin`. Returns the new (src, dst); z-order is kept above everything already on `dst`.
- */
-function transfer(src: Canvas, dst: Canvas, items: Items, origin: { x: number; y: number }): [Canvas, Canvas] {
-  const s = { ...src, cards: { ...src.cards }, frames: { ...src.frames }, folders: { ...src.folders } };
-  const d = { ...dst, cards: { ...dst.cards }, frames: { ...dst.frames }, folders: { ...dst.folders } };
-  const picked = {
-    cards: (items.cards ?? []).filter((id) => s.cards[id]),
-    frames: (items.frames ?? []).filter((id) => s.frames[id]),
-    folders: (items.folders ?? []).filter((id) => s.folders[id]),
-  };
-  const xs = [...picked.cards.map((id) => s.cards[id].x), ...picked.frames.map((id) => s.frames[id].x), ...picked.folders.map((id) => s.folders[id].x)];
-  const ys = [...picked.cards.map((id) => s.cards[id].y), ...picked.frames.map((id) => s.frames[id].y), ...picked.folders.map((id) => s.folders[id].y)];
-  if (!xs.length) return [src, dst];
-  const dx = origin.x - Math.min(...xs);
-  const dy = origin.y - Math.min(...ys);
-  let z = maxZ(d) + 1;
-  const byZ = <T extends { z?: number }>(ids: string[], m: Record<string, T>) => [...ids].sort((a, b) => (m[a].z ?? 0) - (m[b].z ?? 0));
-  for (const id of byZ(picked.cards, s.cards)) {
-    d.cards[id] = { ...s.cards[id], x: Math.round(s.cards[id].x + dx), y: Math.round(s.cards[id].y + dy), z: z++ };
-    delete s.cards[id];
-  }
-  for (const id of byZ(picked.folders, s.folders)) {
-    d.folders[id] = { ...s.folders[id], x: Math.round(s.folders[id].x + dx), y: Math.round(s.folders[id].y + dy), z: z++ };
-    delete s.folders[id];
-  }
-  const fz = Math.max(0, ...Object.values(d.frames).map((f) => f.z)) + 1;
-  picked.frames.forEach((id, i) => {
-    d.frames[id] = { ...s.frames[id], x: Math.round(s.frames[id].x + dx), y: Math.round(s.frames[id].y + dy), z: fz + i };
-    delete s.frames[id];
-  });
-  return [s, d];
-}
-/** Where a group lands on a canvas that already has things on it: to the right of them. */
-function freeSpot(c: Canvas): { x: number; y: number } {
-  const b = boundsOf(c);
-  return b ? { x: Math.round(b.x + b.w + 80), y: Math.round(b.y) } : { x: 0, y: 0 };
-}
-
-const stampNow = () => new Date().toISOString().replace(/\.\d+Z$/, "Z");
 const STAGE_ORDER = ["mist", "reverie", "lucid", "dream", "built"];
 
 /** Target positions for an arrange op: groups side by side, each a grid (or one column). */
@@ -204,13 +76,11 @@ function layoutCards(list: string[], c: Canvas, byId: Map<string, Card>, layout:
   return out;
 }
 
-/** What an organize plan does to a structure (pure: the canvas preview and Apply share it). */
+/** What an organize plan does to the canvas (pure: the canvas preview and Apply share it). */
 export interface OrganizeSim {
-  structure: Structure;
-  /** Ops that take effect: checked, and every folder they need is made. */
+  canvas: Canvas;
+  /** Ops that take effect (checked). */
   effective: boolean[];
-  /** Card / folder id -> the canvas key it moves to. */
-  moved: Record<string, string>;
   /** Re-laid-out card ids. */
   arranged: Set<string>;
   /** Cards whose tags change, with their new lists. */
@@ -219,95 +89,35 @@ export interface OrganizeSim {
   ids: Record<string, string>;
 }
 
-/** Runs the checked ops of `plan` on `s0`. An op naming a folder whose create op is off is skipped. */
-export function simulateOrganize(s0: Structure, cards: Card[], plan: OrganizePlanData, checked: boolean[], idFor: (tempId: string, kind: "folder" | "frame") => string): OrganizeSim {
-  let s: Structure = { canvases: { ...s0.canvases }, folders: s0.folders };
+/** Runs the checked ops of `plan` on `c0`. */
+export function simulateOrganize(c0: Canvas, cards: Card[], plan: OrganizePlanData, checked: boolean[], idFor: (tempId: string) => string): OrganizeSim {
+  let c = c0;
   const ids: Record<string, string> = {};
-  const dead = new Set<string>();
-  const byId = new Map(cards.map((c) => [c.id, c]));
+  const byId = new Map(cards.map((x) => [x.id, x]));
   const effective = plan.ops.map(() => false);
-  const moved: Record<string, string> = {};
   const arranged = new Set<string>();
   const tagMap = new Map<string, string[]>();
-  /** A folder ref -> its canvas key, or undefined when it doesn't exist (or its create op is off). */
-  const ref = (r: string | null | undefined): string | undefined => {
-    if (r == null || r === "") return ROOT;
-    if (dead.has(r)) return undefined;
-    const k = ids[r] ?? r;
-    return s.canvases[k] ? k : undefined;
-  };
-  const setCanvas = (k: string, c: Canvas) => (s = { ...s, canvases: { ...s.canvases, [k]: c } });
   plan.ops.forEach((op, i) => {
-    const on = checked[i] !== false;
-    if (op.op === "create_folder") {
-      const parent = ref(op.parent);
-      if (!on || parent === undefined) return void dead.add(op.tempId);
-      const id = idFor(op.tempId, "folder");
-      ids[op.tempId] = id;
-      const pc = s.canvases[parent];
-      const at = freeSpot(pc);
-      const t = stampNow();
-      s = {
-        canvases: { ...s.canvases, [parent]: { ...pc, folders: { ...pc.folders, [id]: { x: at.x, y: at.y, z: maxZ(pc) + 1 } } }, [id]: blankCanvas() },
-        folders: [...s.folders, { id, title: op.title, parent: parent || null, created: t, updated: t, ...(op.color ? { color: op.color } : {}) }],
-      };
-    } else if (op.op === "rename") {
-      if (!on || dead.has(op.id)) return;
+    if (checked[i] === false) return;
+    if (op.op === "rename") {
       const id = ids[op.id] ?? op.id;
-      if (s.folders.some((f) => f.id === id)) s = { ...s, folders: s.folders.map((f) => (f.id === id ? { ...f, title: op.title, updated: stampNow() } : f)) };
-      else {
-        const k = Object.keys(s.canvases).find((x) => s.canvases[x].frames[id]);
-        if (k === undefined) return;
-        const c = s.canvases[k];
-        setCanvas(k, { ...c, frames: { ...c.frames, [id]: { ...c.frames[id], title: op.title } } });
-      }
-    } else if (op.op === "move") {
-      const to = ref(op.to);
-      if (!on || to === undefined) return;
-      const groups = new Map<string, { cards: string[]; folders: string[] }>();
-      const group = (k: string) => groups.get(k) ?? (groups.set(k, { cards: [], folders: [] }), groups.get(k)!);
-      for (const raw of op.ids) {
-        const id = ids[raw] ?? raw;
-        const f = s.folders.find((x) => x.id === id);
-        if (f) {
-          const k = keyOf(f.parent);
-          if (k !== to && !(to && isInside(s.folders, to, id)) && s.canvases[k]?.folders[id]) group(k).folders.push(id);
-        } else {
-          const k = Object.keys(s.canvases).find((x) => s.canvases[x].cards[id]);
-          if (k !== undefined && k !== to) group(k).cards.push(id);
-        }
-      }
-      let origin = op.x != null && op.y != null ? { x: op.x, y: op.y } : null;
-      for (const [k, items] of groups) {
-        const [src, dst] = transfer(s.canvases[k], s.canvases[to], items, origin ?? freeSpot(s.canvases[to]));
-        s = { canvases: { ...s.canvases, [k]: src, [to]: dst }, folders: s.folders.map((f) => (items.folders.includes(f.id) ? { ...f, parent: to || null, updated: stampNow() } : f)) };
-        for (const id of [...items.cards, ...items.folders]) moved[id] = to;
-        origin = null;
-      }
+      if (!c.frames[id]) return;
+      c = { ...c, frames: { ...c.frames, [id]: { ...c.frames[id], title: op.title } } };
     } else if (op.op === "create_frame") {
-      const k = ref(op.folder);
-      if (!on || k === undefined) return void dead.add(op.tempId);
-      const id = idFor(op.tempId, "frame");
+      const id = idFor(op.tempId);
       ids[op.tempId] = id;
-      const c = s.canvases[k];
       const z = Math.max(-1, ...Object.values(c.frames).map((f) => f.z)) + 1;
-      setCanvas(k, { ...c, frames: { ...c.frames, [id]: { ...op.rect, title: op.title, z } } });
+      c = { ...c, frames: { ...c.frames, [id]: { ...op.rect, title: op.title, z, ...(op.color ? { color: op.color } : {}) } } };
     } else if (op.op === "arrange") {
-      const k = ref(op.folder);
-      if (!on || k === undefined) return;
-      const c = s.canvases[k];
       const list = op.ids.filter((id) => c.cards[id] && !c.cards[id].pinned);
       if (!list.length) return;
       const pos = layoutCards(list, c, byId, op.layout);
       const next = { ...c.cards };
       for (const [id, p] of Object.entries(pos)) next[id] = { ...next[id], ...p };
-      setCanvas(k, { ...c, cards: next });
+      c = { ...c, cards: next };
       list.forEach((id) => arranged.add(id));
     } else if (op.op === "place") {
       // Explicit positions (the organize pipeline's own layout); pinned cards never move.
-      const k = ref(op.folder);
-      if (!on || k === undefined) return;
-      const c = s.canvases[k];
       const next = { ...c.cards };
       let n = 0;
       for (const [id, p] of Object.entries(op.positions)) {
@@ -317,17 +127,17 @@ export function simulateOrganize(s0: Structure, cards: Card[], plan: OrganizePla
         n++;
       }
       if (!n) return;
-      setCanvas(k, { ...c, cards: next });
+      c = { ...c, cards: next };
     } else if (op.op === "retag") {
       const card = byId.get(op.id);
-      if (!on || !card) return;
+      if (!card) return;
       const cur = tagMap.get(op.id) ?? card.tags;
       tagMap.set(op.id, [...cur.filter((t) => !op.remove.includes(t)), ...op.add.filter((t) => !cur.includes(t))]);
-    }
+    } else return;
     effective[i] = true;
   });
   const tags = [...tagMap].filter(([id, t]) => t.join("\n") !== (byId.get(id)?.tags ?? []).join("\n")).map(([id, t]) => ({ id, tags: t }));
-  return { structure: s, effective, moved, arranged, tags, ids };
+  return { canvas: c, effective, arranged, tags, ids };
 }
 
 /** The plan card that's open in chat: the canvas previews it (hover = one op's items). */
@@ -385,7 +195,7 @@ export interface HandoffRequest {
   n: number;
 }
 
-/** Opens "Make build prompt" for the cards a scope covers (a card, a selection, a frame, a version). */
+/** Opens "Make build prompt" for the cards a scope covers (a card, a selection, a frame). */
 export interface TaskRequest {
   scope: HandoffScope;
   n: number;
@@ -393,14 +203,10 @@ export interface TaskRequest {
   saved?: SavedTask;
 }
 
-export type VersionDialog = { kind: "new"; from?: string } | { kind: "rename"; id: string } | { kind: "compare"; a?: string; b?: string; card?: string };
-
 interface UndoEntry {
   label: string;
   undo: () => Promise<void>;
   redo: () => Promise<void>;
-  /** The folder that was open when it happened: undo/redo go back there first. */
-  folder?: string | null;
 }
 
 /** Workspace state for the UI: project list, active project, its cards. Reloads when files change on disk. */
@@ -434,23 +240,16 @@ export function useWorkspace() {
   const [taskRequest, setTaskRequest] = useState<TaskRequest | null>(null);
   /** The Design view (handoff pack reader) is open for the active project. */
   const [designOpen, setDesignOpen] = useState(false);
-  /** A project-version dialog (Versions.tsx): new, rename, compare (optionally of one card). */
-  const [versionDialog, setVersionDialog] = useState<VersionDialog | null>(null);
   /** The Memory modal is open for the active project. */
   const [memoryOpen, setMemoryOpen] = useState(false);
   const activeRef = useRef<string | null>(null);
-  /** The folder whose canvas is shown (null = the project root). */
-  const [folder, setFolderState] = useState<string | null>(null);
-  const folderRef = useRef<string | null>(null);
-  /** Linking mode (the Link tool or L): survives moving between folders, so a link can cross them. */
+  /** Linking mode (the Link tool or L). */
   const [linkMode, setLinkModeState] = useState(false);
   const [linkFrom, setLinkFromState] = useState<string | null>(null);
   const setLinking = useCallback((on: boolean, from: string | null = null) => {
     setLinkModeState(on);
     setLinkFromState(on ? from : null);
   }, []);
-  /** Canvases changed since the last save (keys of `canvases`). */
-  const dirty = useRef(new Set<string>());
   const dataRef = useRef<ProjectData | null>(null);
   /** A merge ghost's originals that are still on the canvas. */
   /** The values `patch` overwrites on `before`, for undo. A list that was absent comes back as [] (absent would not clear it). */
@@ -482,40 +281,24 @@ export function useWorkspace() {
       if (!slug) return;
       const seq = ++loadSeq.current;
       try {
-        const d = withRoot(await api.loadProject(slug));
+        const d = withFrames(await api.loadProject(slug));
         if (seq === loadSeq.current && activeRef.current === slug) {
           // The persisted viewport applies only on first load; after that the live camera wins, so
           // a reload (our own save echoing through the watcher, or any edit) never moves the view.
           const live = dataRef.current;
-          if (live && live.slug === slug) {
-            for (const [k, c] of Object.entries(d.canvases)) if (live.canvases[k]) d.canvases[k] = { ...c, viewport: live.canvases[k].viewport };
-          }
-          // The open folder went away (deleted, or by hand): back to the nearest folder that's left.
-          // First load of a project: its last version.
-          let f = live && live.slug === slug ? folderRef.current : startFolder(d);
-          const was = f;
-          while (f && !d.canvases[f]) f = live?.folders.find((x) => x.id === f)?.parent ?? null;
-          if (f === null && was !== null) f = startFolder(d);
-          if (f !== folderRef.current) {
-            folderRef.current = f;
-            setFolderState(f);
-          }
-          const next = viewOf(d, f);
+          const next = live && live.slug === slug ? { ...d, canvas: { ...d.canvas, viewport: live.canvas.viewport } } : d;
           dataRef.current = next;
           setData(next);
         }
       } catch (e) {
-        // The active project vanished (deleted on disk): fall back to the Inbox.
-        if (list.some((p) => p.slug === INBOX) && slug !== INBOX) {
-          activeRef.current = INBOX;
-          setActive(INBOX);
-          const raw = withRoot(await api.loadProject(INBOX));
-          folderRef.current = startFolder(raw);
-          setFolderState(folderRef.current);
-          const d = viewOf(raw, folderRef.current);
-          dataRef.current = d;
-          setData(d);
-        } else throw e;
+        // The active project vanished (deleted on disk): fall back to the first one left.
+        const other = list.find((p) => p.slug !== slug);
+        if (!other) throw e;
+        activeRef.current = other.slug;
+        setActive(other.slug);
+        const d = withFrames(await api.loadProject(other.slug));
+        dataRef.current = d;
+        setData(d);
       }
     } catch (e) {
       setError(message(e));
@@ -526,10 +309,7 @@ export function useWorkspace() {
     async (slug: string) => {
       activeRef.current = slug;
       setActive(slug);
-      folderRef.current = null;
-      setFolderState(null);
       setLinking(false);
-      dirty.current.clear();
       dataRef.current = null;
       setData(null);
       undoStack.current = [];
@@ -549,17 +329,12 @@ export function useWorkspace() {
       try {
         const [settings, list] = await Promise.all([api.getSettings(), api.listProjects()]);
         if (cancelled) return;
-        const start =
-          list.find((p) => p.slug === settings.last_project)?.slug ??
-          list.find((p) => !p.is_inbox)?.slug ??
-          INBOX;
+        const start = list.find((p) => p.slug === settings.last_project)?.slug ?? list[0]?.slug;
+        setProjects(list);
+        if (!start) return;
         activeRef.current = start;
         setActive(start);
-        setProjects(list);
-        const raw = withRoot(await api.loadProject(start));
-        folderRef.current = startFolder(raw);
-        setFolderState(folderRef.current);
-        const d = viewOf(raw, folderRef.current);
+        const d = withFrames(await api.loadProject(start));
         dataRef.current = d;
         setData(d);
       } catch (e) {
@@ -610,27 +385,18 @@ export function useWorkspace() {
     [refresh],
   );
 
-  /** Shows a folder's canvas (null = the root). Pending canvas edits are saved first. */
-  const openFolderRef = useRef<(id: string | null) => void>(() => {});
   const pushUndo = useCallback((entry: UndoEntry) => {
-    if (entry.folder === undefined) entry.folder = folderRef.current;
     undoStack.current.push(entry);
     redoStack.current = [];
     setCanUndo(true);
     setCanRedo(false);
   }, []);
 
-  /** Undo/redo first go back to the canvas the step happened on (when it still exists). */
-  const goTo = (f: string | null | undefined) => {
-    if (f === undefined || f === folderRef.current) return;
-    if (f === null || dataRef.current?.canvases[f]) openFolderRef.current(f);
-  };
   const undo = useCallback(async () => {
     const entry = undoStack.current.pop();
     setCanUndo(undoStack.current.length > 0);
     if (!entry) return;
     try {
-      goTo(entry.folder);
       await entry.undo();
       redoStack.current.push(entry);
       setCanRedo(true);
@@ -645,7 +411,6 @@ export function useWorkspace() {
     setCanRedo(redoStack.current.length > 0);
     if (!entry) return;
     try {
-      goTo(entry.folder);
       await entry.redo();
       undoStack.current.push(entry);
       setCanUndo(true);
@@ -662,48 +427,20 @@ export function useWorkspace() {
   const patchCanvas = useCallback((fn: (c: Canvas) => Canvas) => {
     const prev = dataRef.current;
     if (!prev) return;
-    const key = keyOf(folderRef.current);
-    const canvas = fn(prev.canvas);
-    const next = { ...prev, canvas, canvases: { ...prev.canvases, [key]: canvas } };
-    dirty.current.add(key);
+    const next = { ...prev, canvas: fn(prev.canvas) };
     dataRef.current = next;
     setData(next);
   }, []);
 
-  /** Saves every canvas changed since the last save (the open one when none is marked). */
   const flushCanvas = useCallback(async () => {
     clearTimeout(canvasSaveTimer.current);
     const slug = activeRef.current;
     const d = dataRef.current;
-    if (!slug || !d) return;
-    const keys = dirty.current.size ? [...dirty.current] : [keyOf(folderRef.current)];
-    dirty.current.clear();
+    if (!slug || !d || d.slug !== slug) return;
     selfWriteUntil.current = performance.now() + 800;
-    for (const k of keys) {
-      const c = d.canvases[k];
-      if (c) await api.saveCanvas(slug, c, k || null).catch((e) => setError(message(e)));
-    }
+    await api.saveCanvas(slug, d.canvas).catch((e) => setError(message(e)));
     selfWriteUntil.current = performance.now() + 500;
   }, []);
-
-  const openFolder = useCallback(
-    (id: string | null) => {
-      const d = dataRef.current;
-      if (!d || (id && !d.canvases[id]) || id === folderRef.current) return;
-      void flushCanvas();
-      // Into another version: it becomes the one that opens next time (and the one Claude works in).
-      const v = versionOf(d.folders, id);
-      const switched = v && v.id !== d.meta.last_version;
-      if (switched && activeRef.current) api.updateProject(activeRef.current, { last_version: v.id }).catch(() => {});
-      folderRef.current = id;
-      setFolderState(id);
-      const next = viewOf(switched ? { ...d, meta: { ...d.meta, last_version: v.id } } : d, id);
-      dataRef.current = next;
-      setData(next);
-    },
-    [flushCanvas],
-  );
-  openFolderRef.current = openFolder;
 
   const scheduleCanvasSave = useCallback(() => {
     clearTimeout(canvasSaveTimer.current);
@@ -786,32 +523,25 @@ export function useWorkspace() {
     [patchPos, scheduleCanvasSave, flushCanvas, pushPosUndo],
   );
 
-  /** Bring to front / send to back (cards and folder nodes share one order). No-op (and no undo entry) when nothing would change. */
+  /** Bring to front / send to back. No-op (and no undo entry) when nothing would change. */
   const setStacking = useCallback(
-    (id: string, where: "front" | "back", kind: "cards" | "folders" = "cards") => {
+    (id: string, where: "front" | "back") => {
       const c = dataRef.current?.canvas;
-      const before = c?.[kind]?.[id];
+      const before = c?.cards[id];
       if (!c || !before) return;
-      const others = [...Object.entries(c.cards), ...Object.entries(c.folders ?? {})].filter(([k]) => k !== id).map(([, p]) => p.z ?? 0);
+      const others = Object.entries(c.cards).filter(([k]) => k !== id).map(([, p]) => p.z ?? 0);
       const top = others.length ? Math.max(...others) : 0;
       const bottom = others.length ? Math.min(...others) : 0;
       const after: Pos =
         where === "front" ? { ...before, z: top + 1, back: undefined } : { ...before, z: bottom - 1, back: true };
       if (where === "front" && !before.back && (before.z ?? 0) > top) return;
       if (where === "back" && before.back && (before.z ?? 0) < bottom) return;
-      if (kind === "folders") {
-        const snap = layoutOf(c);
-        patchCanvas((cv) => ({ ...cv, folders: { ...cv.folders, [id]: after } }));
-        commitLayoutRef.current(where === "front" ? "bring to front" : "send to back", snap);
-        return;
-      }
       patchCanvas((cv) => ({ ...cv, cards: { ...cv.cards, [id]: after } }));
       void flushCanvas();
       pushPosUndo(where === "front" ? "bring to front" : "send to back", id, before, after);
     },
     [patchCanvas, flushCanvas, pushPosUndo],
   );
-  const commitLayoutRef = useRef<(label: string, before: Layout) => void>(() => {});
   const bringToFront = useCallback((id: string) => setStacking(id, "front"), [setStacking]);
   // ----- frames: every committed change is one undo step restoring positions + frames -----
 
@@ -853,89 +583,28 @@ export function useWorkspace() {
       const d = dataRef.current;
       if (!d) return;
       const after = layoutOf(d.canvas);
-      if (after.cards === before.cards && after.frames === before.frames && after.folders === before.folders) return;
+      if (after.cards === before.cards && after.frames === before.frames) return;
       void flushCanvas();
       pushLayoutUndo(label, before, after);
     },
     [flushCanvas, pushLayoutUndo],
   );
-  commitLayoutRef.current = commitLayout;
 
-  /** Live folder-node change during a drag or resize (no undo, debounced save). */
-  const patchFolderLive = useCallback(
-    (id: string, patch: Partial<Pos>) => {
-      patchCanvas((c) => (c.folders?.[id] ? { ...c, folders: { ...c.folders, [id]: { ...c.folders[id], ...patch } } } : c));
-      scheduleCanvasSave();
-    },
-    [patchCanvas, scheduleCanvasSave],
-  );
-
-  /** Pin or unpin a card's or folder's position (one undo step). */
+  /** Pin or unpin a card's position (one undo step). */
   const setPinned = useCallback(
-    (kind: "cards" | "folders", id: string, pinned: boolean) => {
+    (id: string, pinned: boolean) => {
       const before = layoutSnapshot();
-      if (!before?.[kind][id]) return;
-      patchCanvas((c) => ({ ...c, [kind]: { ...c[kind], [id]: { ...c[kind][id], pinned: pinned || undefined } } }));
+      if (!before?.cards[id]) return;
+      patchCanvas((c) => ({ ...c, cards: { ...c.cards, [id]: { ...c.cards[id], pinned: pinned || undefined } } }));
       commitLayout(pinned ? "pin position" : "unpin position", before);
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [patchCanvas, commitLayout],
   );
 
-  // ----- folders: every structural change (records + canvases) is one undo step -----
-
-  const structure = useCallback((): Structure | null => {
-    const d = dataRef.current;
-    return d ? { canvases: d.canvases, folders: d.folders } : null;
-  }, []);
-
-  /** Puts a structure in place (keeping each canvas's live camera) and writes what changed in one call. */
-  const applyStructure = useCallback(async (s: Structure) => {
-    const d = dataRef.current;
-    const slug = activeRef.current;
-    if (!d || !slug) return;
-    const canvases: Record<string, Canvas> = {};
-    const changed: Record<string, Canvas> = {};
-    for (const [k, c] of Object.entries(s.canvases)) {
-      canvases[k] = d.canvases[k] ? { ...c, viewport: d.canvases[k].viewport } : c;
-      if (d.canvases[k] !== c || dirty.current.has(k)) changed[k] = canvases[k];
-    }
-    let f = folderRef.current;
-    while (f && !canvases[f]) f = d.folders.find((x) => x.id === f)?.parent ?? null;
-    if (f !== folderRef.current) {
-      folderRef.current = f;
-      setFolderState(f);
-    }
-    clearTimeout(canvasSaveTimer.current);
-    dirty.current.clear();
-    const next = viewOf({ ...d, canvases, folders: s.folders }, f);
-    dataRef.current = next;
-    setData(next);
-    selfWriteUntil.current = performance.now() + 800;
-    await api.saveLayout(slug, { canvases: changed, ...(s.folders !== d.folders ? { folders: s.folders } : {}) }).catch((e) => setError(message(e)));
-    selfWriteUntil.current = performance.now() + 500;
-  }, []);
-
-  /** Applies `fn` to the current structure as one undo step (`before` overrides the undo target, e.g. the state at drag start). */
-  const changeStructure = useCallback(
-    (label: string, fn: (s: Structure) => Structure | null, before?: Structure | null) => {
-      const cur = structure();
-      if (!cur) return false;
-      const after = fn(cur);
-      if (!after) return false;
-      const back = before ?? cur;
-      void applyStructure(after);
-      pushUndo({ label, undo: () => applyStructure(back), redo: () => applyStructure(after) });
-      return true;
-    },
-    [structure, applyStructure, pushUndo],
-  );
-
-  const stamp = stampNow;
-
   const [organizePreview, setOrganizePreview] = useState<OrganizePreview | null>(null);
 
-  /** Applies the checked ops of a plan as ONE undo step (the folder layout in one write, then tags). */
+  /** Applies the checked ops of a plan as ONE undo step (the canvas in one write, then tags). */
   const applyOrganize = useCallback(
     async (plan: OrganizePlanData, checked: boolean[]) => {
       const slug = activeRef.current;
@@ -944,318 +613,36 @@ export function useWorkspace() {
         return false;
       }
       await flushCanvas();
-      const cur = structure();
       const d = dataRef.current;
-      if (!cur || !d) return false;
-      const sim = simulateOrganize(cur, d.cards, plan, checked, (_t, kind) => (kind === "frame" ? newFrameId() : newFolderId()));
+      if (!d) return false;
+      const sim = simulateOrganize(d.canvas, d.cards, plan, checked, newFrameId);
       if (!sim.effective.some(Boolean)) return false;
+      const was = layoutOf(d.canvas);
+      const now = layoutOf(sim.canvas);
       const before = sim.tags.map((e) => ({ id: e.id, tags: d.cards.find((c) => c.id === e.id)?.tags ?? [] }));
       const label = `Claude organized ${plan.scopeName}`;
       const setTags = async (list: { id: string; tags: string[] }[]) => {
         for (const e of list) await api.updateCard(slug, e.id, { tags: e.tags });
         if (list.length) await refresh();
       };
-      const forward = async () => {
-        await applyStructure(sim.structure);
-        await setTags(sim.tags);
+      const put = async (l: Layout, tags: { id: string; tags: string[] }[]) => {
+        patchCanvas((c) => ({ ...c, ...l }));
+        await flushCanvas();
+        await setTags(tags);
       };
       try {
-        await forward();
+        await put(now, sim.tags);
       } catch (e) {
         setError(message(e));
         return false;
       }
-      pushUndo({
-        label,
-        undo: async () => {
-          await applyStructure(cur);
-          await setTags(before);
-        },
-        redo: forward,
-      });
+      pushUndo({ label, undo: () => put(was, before), redo: () => put(now, sim.tags) });
       setNotice(`${label}.`);
       setNoticeUndo(true);
       return true;
     },
-    [flushCanvas, structure, applyStructure, refresh, pushUndo, setNotice],
+    [flushCanvas, patchCanvas, refresh, pushUndo, setNotice],
   );
-
-  /** Hides the "Tidy this folder?" hint for a folder (null = the root) for good. Not an undo step. */
-  const setNudgeOff = useCallback(
-    async (folder: string | null) => {
-      const d = dataRef.current;
-      const slug = activeRef.current;
-      if (!d || !slug) return;
-      if (folder) {
-        const s = structure();
-        if (s) await applyStructure({ ...s, folders: s.folders.map((f) => (f.id === folder ? { ...f, nudge_off: true } : f)) });
-        return;
-      }
-      const next = { ...d, meta: { ...d.meta, nudge_off: true } };
-      dataRef.current = next;
-      setData(next);
-      await api.updateProject(slug, { nudge_off: true }).catch((e) => setError(message(e)));
-    },
-    [structure, applyStructure],
-  );
-
-  /**
-   * New folder on the open canvas. With `group`, those items move into it (their layout kept) and
-   * the folder takes the group's place. Returns the folder id.
-   */
-  const createFolder = useCallback(
-    (at: { x: number; y: number } | null, title = "New folder", group?: Items, extra?: Partial<Folder>): string | null => {
-      const id = newFolderId();
-      const key = keyOf(folderRef.current);
-      // The top level of a versioned project holds only versions: a folder there is a new, empty version.
-      if (!folderRef.current && versionsOf(dataRef.current?.folders ?? []).length) {
-        if (group) {
-          setNotice("Versions can't be grouped. Open a version to make folders inside it.");
-          return null;
-        }
-        extra = { ...extra, kind: "version" };
-        if (title === "New folder") title = nextVersionTitle(dataRef.current!.folders);
-      }
-      const ok = changeStructure(group ? "group into folder" : "new folder", (s) => {
-        const cur = s.canvases[key];
-        let [outer, inner] = [cur, blankCanvas()];
-        let pos = at ?? freeSpot(cur);
-        if (group && (group.cards?.length || group.frames?.length || group.folders?.length)) {
-          const pts = [...(group.cards ?? []).map((g) => cur.cards[g]), ...(group.folders ?? []).map((g) => cur.folders[g]), ...(group.frames ?? []).map((g) => cur.frames[g])].filter(Boolean);
-          if (!at && pts.length) pos = { x: Math.min(...pts.map((p) => p.x)), y: Math.min(...pts.map((p) => p.y)) };
-          [outer, inner] = transfer(cur, inner, group, { x: 0, y: 0 });
-        }
-        const t = stamp();
-        const rec: Folder = { id, title, parent: folderRef.current, created: t, updated: t, ...extra };
-        outer = { ...outer, folders: { ...outer.folders, [id]: { x: Math.round(pos.x), y: Math.round(pos.y), z: maxZ(outer) + 1 } } };
-        const folders = s.folders.map((f) => (group?.folders?.includes(f.id) ? { ...f, parent: id } : f));
-        return { canvases: { ...s.canvases, [key]: outer, [id]: inner }, folders: [...folders, rec] };
-      });
-      return ok ? id : null;
-    },
-    [changeStructure, setNotice],
-  );
-
-  /**
-   * Moves items from the open canvas to folder `to` (null = the root), keeping their layout.
-   * A folder never goes into itself or below itself. `before` = the structure at drag start.
-   */
-  const moveItems = useCallback(
-    (items: Items, to: string | null, opts?: { before?: Structure | null; at?: { x: number; y: number } }) => {
-      const from = keyOf(folderRef.current);
-      const toKey = keyOf(to);
-      const d = dataRef.current;
-      if (!d || from === toKey || (to && !d.canvases[to])) return false;
-      if (!to && versionsOf(d.folders).length) {
-        setNotice("The project's top level holds only versions; drop into a version instead.");
-        return false;
-      }
-      if (to && (items.folders ?? []).some((f) => isInside(d.folders, to, f))) {
-        setNotice("A folder can't go inside itself.");
-        return false;
-      }
-      const n = (items.cards?.length ?? 0) + (items.folders?.length ?? 0) + (items.frames?.length ?? 0);
-      if (!n) return false;
-      const ok = changeStructure(
-        n === 1 ? "move into folder" : `move ${n} items`,
-        (s) => {
-          const [src, dst] = transfer(s.canvases[from], s.canvases[toKey], items, opts?.at ?? freeSpot(s.canvases[toKey]));
-          const folders = s.folders.map((f) => (items.folders?.includes(f.id) ? { ...f, parent: to, updated: stamp() } : f));
-          return { canvases: { ...s.canvases, [from]: src, [toKey]: dst }, folders };
-        },
-        opts?.before,
-      );
-      if (ok) {
-        const name = to ? folderName(d.folders.find((f) => f.id === to)) : d.meta.name;
-        setNotice(`Moved ${n === 1 ? "1 item" : `${n} items`} to ${name}.`);
-        setNoticeUndo(true);
-      }
-      return ok;
-    },
-    [changeStructure, setNotice],
-  );
-
-  /** Re-parents a folder from anywhere (sidebar tree drag): its node moves to the new parent's canvas. */
-  const reparentFolder = useCallback(
-    (id: string, to: string | null) => {
-      const d = dataRef.current;
-      const f = d?.folders.find((x) => x.id === id);
-      if (!d || !f || f.parent === to) return false;
-      if (!to && versionsOf(d.folders).length) {
-        setNotice("The project's top level holds only versions; drop the folder into a version.");
-        return false;
-      }
-      if (to && isInside(d.folders, to, id)) {
-        setNotice("A folder can't go inside itself.");
-        return false;
-      }
-      return changeStructure("move folder", (s) => {
-        const [src, dst] = transfer(s.canvases[keyOf(f.parent)], s.canvases[keyOf(to)], { folders: [id] }, freeSpot(s.canvases[keyOf(to)]));
-        return { canvases: { ...s.canvases, [keyOf(f.parent)]: src, [keyOf(to)]: dst }, folders: s.folders.map((x) => (x.id === id ? { ...x, parent: to, updated: stamp() } : x)) };
-      });
-    },
-    [changeStructure, setNotice],
-  );
-
-  const updateFolder = useCallback(
-    (id: string, patch: Partial<Pick<Folder, "title" | "color" | "nudge_off">>, label = "edit folder") =>
-      changeStructure(label, (s) => (s.folders.some((f) => f.id === id) ? { ...s, folders: s.folders.map((f) => (f.id === id ? { ...f, ...patch, updated: stamp() } : f)) } : null)),
-    [changeStructure],
-  );
-
-  /** Contents move up to the parent canvas where the folder was; the empty folder goes. */
-  const ungroupFolder = useCallback(
-    (id: string) =>
-      changeStructure("ungroup folder", (s) => {
-        const f = s.folders.find((x) => x.id === id);
-        const inner = s.canvases[id];
-        if (!f || !inner) return null;
-        const pk = keyOf(f.parent);
-        const outer = s.canvases[pk];
-        const at = outer.folders[id] ?? freeSpot(outer);
-        const all: Items = { cards: Object.keys(inner.cards), frames: Object.keys(inner.frames), folders: Object.keys(inner.folders) };
-        const [, merged] = transfer(inner, outer, all, { x: at.x, y: at.y });
-        const folders = { ...merged.folders };
-        delete folders[id];
-        const canvases = { ...s.canvases, [pk]: { ...merged, folders } };
-        delete canvases[id];
-        return { canvases, folders: s.folders.filter((x) => x.id !== id).map((x) => (x.parent === id ? { ...x, parent: f.parent } : x)) };
-      }),
-    [changeStructure],
-  );
-
-  /** Frame -> folder: same title, colour and place; its members move inside keeping their layout. */
-  const frameToFolder = useCallback(
-    (frameId: string, members: Items) => {
-      const d = dataRef.current;
-      const fr = d?.canvas.frames[frameId];
-      if (!d || !fr) return null;
-      const id = newFolderId();
-      const key = keyOf(folderRef.current);
-      const ok = changeStructure("turn frame into folder", (s) => {
-        const cur = s.canvases[key];
-        const frames = { ...cur.frames };
-        delete frames[frameId];
-        const pts = [...(members.cards ?? []).map((m) => cur.cards[m]), ...(members.folders ?? []).map((m) => cur.folders[m]), ...(members.frames ?? []).map((m) => cur.frames[m])].filter(Boolean);
-        const minX = pts.length ? Math.min(...pts.map((p) => p.x)) : fr.x;
-        const minY = pts.length ? Math.min(...pts.map((p) => p.y)) : fr.y;
-        // Keep the members where they sat relative to the frame's corner.
-        let [outer, inner] = transfer({ ...cur, frames }, blankCanvas(), members, { x: Math.round(minX - fr.x), y: Math.round(minY - fr.y) });
-        const t = stamp();
-        const rec: Folder = { id, title: fr.title, parent: folderRef.current, created: t, updated: t, ...(fr.color ? { color: fr.color } : {}) };
-        outer = { ...outer, folders: { ...outer.folders, [id]: { x: fr.x, y: fr.y, z: maxZ(outer) + 1 } } };
-        const folders = s.folders.map((f) => (members.folders?.includes(f.id) ? { ...f, parent: id } : f));
-        return { canvases: { ...s.canvases, [key]: outer, [id]: inner }, folders: [...folders, rec] };
-      });
-      return ok ? id : null;
-    },
-    [changeStructure],
-  );
-
-  /** Folder -> frame: contents move up into a frame of the same title where the folder was; nested folders stay folders. */
-  const folderToFrame = useCallback(
-    (id: string) => {
-      const frameId = newFrameId();
-      const ok = changeStructure("lay out as frame", (s) => {
-        const f = s.folders.find((x) => x.id === id);
-        const inner = s.canvases[id];
-        if (!f || !inner) return null;
-        const pk = keyOf(f.parent);
-        const outer = s.canvases[pk];
-        const at = outer.folders[id] ?? freeSpot(outer);
-        const PAD = 40;
-        const b = boundsOf(inner);
-        const all: Items = { cards: Object.keys(inner.cards), frames: Object.keys(inner.frames), folders: Object.keys(inner.folders) };
-        const [, merged] = transfer(inner, outer, all, { x: at.x + PAD, y: at.y + PAD });
-        const folders = { ...merged.folders };
-        delete folders[id];
-        const zs = all.frames!.map((k) => merged.frames[k]?.z).filter((z): z is number => z !== undefined);
-        const topZ = Math.max(0, ...Object.values(outer.frames).map((x) => x.z));
-        // Behind what it holds: below the lowest frame that came up with it.
-        const frame: Frame = { x: at.x, y: at.y, w: Math.max(240, Math.round((b?.w ?? 400) + PAD * 2)), h: Math.max(160, Math.round((b?.h ?? 240) + PAD * 2)), title: f.title || "Untitled frame", z: zs.length ? Math.min(...zs) - 1 : topZ + 1, ...(f.color ? { color: f.color } : {}) };
-        const canvases = { ...s.canvases, [pk]: { ...merged, folders, frames: { ...merged.frames, [frameId]: frame } } };
-        delete canvases[id];
-        return { canvases, folders: s.folders.filter((x) => x.id !== id).map((x) => (x.parent === id ? { ...x, parent: f.parent } : x)) };
-      });
-      return ok ? frameId : null;
-    },
-    [changeStructure],
-  );
-
-  /** A folder and everything below it go to Trash as one item (Undo restores it in place). */
-  const deleteFolder = useCallback(
-    async (id: string) => {
-      const slug = activeRef.current;
-      const d = dataRef.current;
-      const f = d?.folders.find((x) => x.id === id);
-      if (!slug || !d || !f) return;
-      if (folderRef.current && isInside(d.folders, folderRef.current, id)) openFolder(f.parent);
-      await flushCanvas();
-      const item = await run(() => api.deleteFolder(slug, id));
-      if (!item) return;
-      pushUndo({
-        label: "delete folder",
-        folder: f.parent,
-        undo: async () => void (await api.restoreCard(slug, id)),
-        redo: async () => {
-          await flushCanvas();
-          await api.deleteFolder(slug, id);
-        },
-      });
-      const n = item.count ?? 0;
-      setNotice(`Folder${n ? ` and ${n} card${n === 1 ? "" : "s"}` : ""} moved to Trash.`);
-      setNoticeUndo(true);
-    },
-    [openFolder, flushCanvas, run, pushUndo, setNotice],
-  );
-
-  /** "New version from <from>": one copy in Rust, then it opens. Undo = the new version to Trash. */
-  const newVersion = useCallback(
-    async (from: string, title: string): Promise<string | null> => {
-      const slug = activeRef.current;
-      if (!slug) return null;
-      await flushCanvas();
-      try {
-        const out = await api.newVersion(slug, from, title);
-        const id = out.version.id;
-        await refresh();
-        openFolder(id);
-        pushUndo({
-          label: "new version",
-          folder: id,
-          undo: async () => {
-            if (folderRef.current && isInside(dataRef.current?.folders ?? [], folderRef.current, id)) openFolder(from);
-            await api.deleteFolder(slug, id);
-          },
-          redo: async () => void (await api.restoreCard(slug, id)),
-        });
-        setNotice(`${title} created from ${folderName(dataRef.current?.folders.find((f) => f.id === from))} (${Object.keys(out.cards).length} cards).`);
-        return null;
-      } catch (e) {
-        return message(e);
-      }
-    },
-    [flushCanvas, refresh, openFolder, pushUndo, setNotice],
-  );
-
-  /** The one-time "Treat these folders as versions?" answer; then the project opens on its last version. */
-  const migrateVersions = useCallback(
-    async (ids: string[]) => {
-      const slug = activeRef.current;
-      if (!slug) return;
-      await flushCanvas();
-      await run(() => api.migrateVersions(slug, ids));
-      const d = dataRef.current;
-      if (d) openFolder(startFolder(d));
-    },
-    [flushCanvas, run, openFolder],
-  );
-
-  /** The canvas a card is on (ROOT = the root), or undefined. */
-  const folderOfCard = useCallback((id: string): string | undefined => {
-    const d = dataRef.current;
-    return d ? Object.entries(d.canvases).find(([, c]) => c.cards[id])?.[0] : undefined;
-  }, []);
 
   const createFrame = useCallback(
     (rect: { x: number; y: number; w: number; h: number }, title = "Untitled frame", color?: string): string | null => {
@@ -1360,8 +747,7 @@ export function useWorkspace() {
     async (card: NewCard) => {
       const slug = activeRef.current!;
       // New cards land on the open canvas.
-      const into = folderRef.current;
-      const created = await run(() => api.createCard(slug, { ...(into ? { folder: into } : {}), ...card }));
+      const created = await run(() => api.createCard(slug, card));
       if (created) {
         pushUndo({
           label: "create card",
@@ -1507,8 +893,7 @@ export function useWorkspace() {
         role === "tech"
           ? { title: TECH_TITLE, role: "tech", body: TECH_TEMPLATE }
           : { title: DECISIONS_TITLE, role: "decisions", stage: "lucid", body: "Answers that settle open project questions." };
-      const into = folderRef.current;
-      const created = await run(() => api.createCard(slug, { ...(into ? { folder: into } : {}), ...fresh, body: join(fresh.body ?? "") }));
+      const created = await run(() => api.createCard(slug, { ...fresh, body: join(fresh.body ?? "") }));
       if (!created) return;
       const cards = dataRef.current?.cards ?? [];
       const undoEdits = edits.flatMap(({ id, patch }) => {
@@ -1766,8 +1151,7 @@ export function useWorkspace() {
   const createArtifact = useCallback(
     async (a: NewArtifact, o?: { generate?: boolean; recapFrom?: string }) => {
       const slug = activeRef.current!;
-      const into = folderRef.current;
-      const created = await run(() => api.artifactCreate(slug, { ...(into ? { folder: into } : {}), ...a }));
+      const created = await run(() => api.artifactCreate(slug, a));
       if (!created) return null;
       pushUndo({
         label: "create artifact",
@@ -1925,13 +1309,10 @@ export function useWorkspace() {
       const target = slug ?? activeRef.current;
       if (!target) return;
       if (target !== activeRef.current) await select(target);
-      // Inside another folder: open it first.
-      const where = folderOfCard(id);
-      if (where !== undefined) openFolder(where || null);
       setContextCardId(id);
       setFocusRequest({ id, slug: target, n: ++focusSeq.current });
     },
-    [select, folderOfCard, openFolder],
+    [select],
   );
 
   return {
@@ -1978,12 +1359,13 @@ export function useWorkspace() {
     memoryOpen,
     setMemoryOpen,
     /**
-     * Sidebar "Delete project" (after the user confirmed). Moves the selection to the Inbox first,
-     * so neither the reload nor the file watcher ever looks for the vanished folder.
+     * Sidebar "Delete project" (after the user confirmed). Moves the selection to another project
+     * first, so neither the reload nor the file watcher ever looks for the vanished folder.
      */
     deleteProject: async (slug: string) => {
-      if (slug === INBOX) return;
-      if (activeRef.current === slug) await select(INBOX);
+      const other = projects.find((p) => p.slug !== slug);
+      if (!other) return setNotice("This is the only project; a workspace keeps at least one.");
+      if (activeRef.current === slug) await select(other.slug);
       try {
         const out = await api.deleteProject(slug);
         setNotice(out.recycled ? "Project moved to the Recycle Bin." : "Project deleted from disk.");
@@ -2028,29 +1410,10 @@ export function useWorkspace() {
     convertKind,
     setViewport,
     flushCanvas,
-    folder,
-    openFolder,
-    folderOfCard,
-    structure,
     organizePreview,
     setOrganizePreview,
     applyOrganize,
-    setNudgeOff,
-    createFolder,
-    moveItems,
-    reparentFolder,
-    updateFolder,
-    ungroupFolder,
-    frameToFolder,
-    folderToFrame,
-    deleteFolder,
-    newVersion,
-    migrateVersions,
-    versionDialog,
-    setVersionDialog,
-    patchFolderLive,
     setPinned,
-    setFolderStacking: (id: string, where: "front" | "back") => setStacking(id, where, "folders"),
     linkMode,
     linkFrom,
     setLinking,

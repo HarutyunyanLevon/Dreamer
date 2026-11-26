@@ -467,7 +467,7 @@ fn update_prompt(info: &TurnInfo, memory: &str, cap: u64, card: Option<(&str, &s
 
 /// After an answered chat turn: queue a memory pass (the caller already skipped fixed chip commands).
 pub fn after_turn(app: &AppHandle, state: &AppState, info: TurnInfo) {
-    if info.slug == crate::storage::INBOX_SLUG || info.user.trim().is_empty() {
+    if info.user.trim().is_empty() {
         return;
     }
     let (settings, memory, card) = {
@@ -652,9 +652,6 @@ pub fn run_tool(app: &AppHandle, state: &AppState, tool: &str, input: Value) -> 
         let q = state.claude.pending_ctx_of(&turn);
         q.ok_or_else(|| AppError::Invalid("no chat turn is running".into()))?
     };
-    if slug == crate::storage::INBOX_SLUG {
-        return Err(AppError::Invalid("the Inbox has no project memory".into()));
-    }
     let text = input.get("text").and_then(Value::as_str).unwrap_or_default().to_string();
     if clean(&text).is_empty() {
         return Err(AppError::Invalid("text is empty".into()));
@@ -693,9 +690,6 @@ fn clip(s: &str, n: usize) -> String {
 /// The draft arrives as a `memory-event` of type "seed"; nothing is written until the user chooses.
 pub fn seed(app: &AppHandle, state: &AppState, slug: &str) -> Result<()> {
     crate::storage::check_slug(slug)?;
-    if slug == crate::storage::INBOX_SLUG {
-        return Err(AppError::Invalid("the Inbox has no project memory".into()));
-    }
     let (prompt, model) = {
         let ws = state.ws.lock().map_err(|_| AppError::Invalid("workspace lock poisoned".into()))?;
         let dir = ws.existing_project_dir(slug)?;

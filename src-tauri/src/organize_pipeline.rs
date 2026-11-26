@@ -1,7 +1,7 @@
 //! The organize pipeline: /organize as a few small model calls orchestrated here, instead of one
 //! agent turn (list_tree -> propose_organize) that a 9B local model could not finish reliably.
 //!
-//! 1. Digest: a compact list of the open folder's cards (alias, title, tags, a ~120-char snippet,
+//! 1. Digest: a compact list of the in-scope cards (alias, title, tags, a ~120-char snippet,
 //!    links). Pinned cards are listed but stay put.
 //! 2. Groups: one call returns 3-8 frame groups (title + one-line purpose) and a tag plan (reuse
 //!    existing tags, merge near-duplicates, at most 5 new tags).
@@ -39,8 +39,8 @@ const MAX_NEW_TAGS: usize = 5;
 pub struct Request {
     pub turn: String,
     pub slug: String,
-    /// The open folder (None = the project root): the only canvas the plan touches.
-    pub folder: Option<String>,
+    /// The cards the plan works on (project, a frame's cards, or the selection).
+    pub scope: crate::organize::Scope,
     pub instruction: String,
     /// A previous plan: "/organize revise" (its groups guide the new ones) or "Retry rest locally"
     /// / "Finish with Claude" (`rest`: only its unplaced cards are assigned, into its groups).
@@ -160,14 +160,11 @@ fn snippet(body: &str) -> String {
     if one.chars().count() > SNIPPET { format!("{}…", one.chars().take(SNIPPET).collect::<String>()) } else { one }
 }
 
-/// The open folder's cards (live, not ghosts) with their place and size.
-fn digest(state: &AppState, slug: &str, folder: Option<&str>) -> crate::error::Result<(Vec<DCard>, Vec<Rect>, BTreeMap<String, usize>)> {
+/// The in-scope cards (live, not ghosts) with their place and size.
+fn digest(state: &AppState, slug: &str, scope: &crate::organize::Scope) -> crate::error::Result<(Vec<DCard>, Vec<Rect>, BTreeMap<String, usize>)> {
     let p = state.ws.lock().map_err(|_| crate::error::AppError::Invalid("workspace lock poisoned".into()))?.load_project(slug)?;
-    let canvas = match folder {
-        Some(f) => p.canvases.get(f).cloned().unwrap_or_default(),
-        None => p.canvas.clone(),
-    };
-    let by_id: BTreeMap<&str, &crate::model::Card> = p.cards.iter().filter(|c| !c.meta.ghost).map(|c| (c.meta.id.as_str(), c)).collect();
+    let canvas = p.canvas.clone();
+    let by_id: BTreeMap<&str, &crate::model::Card> = p.cards.iter().filter(|c| !c.meta.ghost && scope.has(&c.meta.id)).map(|c| (c.meta.id.as_str(), c)).collect();
     // Reading order of where they sit now: groups keep a familiar order.
     let mut on: Vec<(&String, &crate::model::Pos)> = canvas.cards.iter().filter(|(id, _)| by_id.contains_key(id.as_str())).collect();
     on.sort_by(|a, b| (a.1.y / 100.0).round().total_cmp(&(b.1.y / 100.0).round()).then(a.1.x.total_cmp(&b.1.x)));
@@ -470,7 +467,7 @@ fn run(cx: &mut Ctx) -> Result<(Value, String), LlmError> {
     let state = app.state::<AppState>();
     let req = cx.req.clone();
     cx.step("org-digest", "Reading the cards…", "running");
-    let (cards, frames_now, tags) = digest(&state, &req.slug, req.folder.as_deref()).map_err(|e| LlmError::Failed(e.to_string()))?;
+    let (cards, frames_now, tags) = digest(&state, &req.slug, &req.scope).map_err(|e| LlmError::Failed(e.to_string()))?;
     let movable: Vec<&DCard> = cards.iter().filter(|c| !c.pinned).collect();
     cx.step("org-digest", &format!("Read {} cards ({} pinned)", cards.len(), cards.len() - movable.len()), "done");
     if movable.len() < 2 {
@@ -577,7 +574,7 @@ fn run(cx: &mut Ctx) -> Result<(Value, String), LlmError> {
     let partial = !unplaced.is_empty();
     let rationale = if rationale.trim().is_empty() { format!("{} frames by theme.", used.len()) } else { rationale };
     let input = json!({
-        "scope": "folder",
+        "scope": req.scope.kind,
         "rationale": rationale,
         "ops": ops,
         "partial": partial,
@@ -590,7 +587,7 @@ fn run(cx: &mut Ctx) -> Result<(Value, String), LlmError> {
             "problems": problems,
         },
     });
-    let plan_v = crate::organize::propose_organize(&state, &req.slug, req.folder.clone(), &input).map_err(|e| LlmError::Failed(format!("the plan did not validate: {e}")))?;
+    let plan_v = crate::organize::propose_organize(&state, &req.slug, &req.scope, &input).map_err(|e| LlmError::Failed(format!("the plan did not validate: {e}")))?;
     let text = if partial {
         format!("Placed {} of {} cards in {} frames ({retags} retags); {} could not be placed.", assigned.len(), movable.len(), used.len(), unplaced.len())
     } else {

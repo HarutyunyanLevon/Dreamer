@@ -10,7 +10,7 @@
 //! accent-insensitive, with light suffix stemming (s/es/ing/ed).
 
 use crate::model::{Attachment, Card, CardKind, Link, ProjectMeta, Stage};
-use crate::storage::{check_slug, parse_card, INBOX_SLUG};
+use crate::storage::{check_slug, parse_card};
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -407,11 +407,11 @@ pub struct SearchIndex {
 }
 
 fn project_dir(root: &Path, slug: &str) -> PathBuf {
-    if slug == INBOX_SLUG { root.join(INBOX_SLUG) } else { root.join("projects").join(slug) }
+    root.join("projects").join(slug)
 }
 
 fn list_slugs(root: &Path) -> Vec<String> {
-    let mut out = vec![INBOX_SLUG.to_string()];
+    let mut out = Vec::new();
     if let Ok(rd) = fs::read_dir(root.join("projects")) {
         for e in rd.filter_map(|e| e.ok()) {
             let slug = e.file_name().to_string_lossy().into_owned();
@@ -420,7 +420,7 @@ fn list_slugs(root: &Path) -> Vec<String> {
             }
         }
     }
-    out.sort_by(|a, b| (a != INBOX_SLUG).cmp(&(b != INBOX_SLUG)).then(a.cmp(b)));
+    out.sort();
     out
 }
 
@@ -457,7 +457,7 @@ impl SearchIndex {
             .ok()
             .and_then(|t| serde_json::from_str::<ProjectMeta>(&t).ok())
             .map(|m| m.name)
-            .unwrap_or_else(|| if slug == INBOX_SLUG { "Inbox".into() } else { slug.to_string() });
+            .unwrap_or_else(|| slug.to_string());
         let mut seen = HashSet::new();
         let mut parsed = 0;
         if let Ok(rd) = fs::read_dir(dir.join("cards")) {
@@ -747,7 +747,7 @@ mod tests {
     #[test]
     fn scoring_prefers_title_then_tags_then_fields_then_body() {
         let (_t, ws, mut idx) = setup();
-        let dir = ws.project_dir("inbox").unwrap();
+        let dir = ws.project_dir("ideas").unwrap();
         write(&dir, &card("01BODY", "Something else", &[], "a dragon sleeps here"));
         write(&dir, &card("01TITLE", "Dragon rider", &[], ""));
         write(&dir, &card("01TAG", "Cave level", &["dragons"], ""));
@@ -759,14 +759,14 @@ mod tests {
         let ids: Vec<&str> = hits.iter().map(|h| h.id.as_str()).collect();
         assert_eq!(ids, ["01TITLE", "01TAG", "01FIELD", "01BODY"]);
         assert!(hits.windows(2).all(|w| w[0].score > w[1].score));
-        assert_eq!(hits[0].project, "inbox");
-        assert_eq!(hits[0].project_name, "Inbox");
+        assert_eq!(hits[0].project, "ideas");
+        assert_eq!(hits[0].project_name, "Ideas");
     }
 
     #[test]
     fn accents_coverage_prefix_and_ghosts() {
         let (_t, ws, mut idx) = setup();
-        let dir = ws.project_dir("inbox").unwrap();
+        let dir = ws.project_dir("ideas").unwrap();
         write(&dir, &card("01CAFE", "Café crawl", &[], ""));
         write(&dir, &card("01BOTH", "Neon lake", &[], ""));
         write(&dir, &card("01ONE", "Neon neon neon", &[], "neon neon neon neon"));
@@ -788,7 +788,7 @@ mod tests {
     #[test]
     fn checklist_items_and_attachment_text_are_indexed() {
         let (_t, ws, mut idx) = setup();
-        let dir = ws.project_dir("inbox").unwrap();
+        let dir = ws.project_dir("ideas").unwrap();
         let mut c = card("01LIST", "Todo", &[], "");
         c.meta.kind = CardKind::Checklist;
         c.meta.items = vec![crate::model::ChecklistItem { text: "Pick a harpoon".into(), question: true, answer: Some("barbed".into()), ..Default::default() }];
@@ -819,12 +819,12 @@ mod tests {
     fn trashed_cards_are_skipped_and_scope_is_respected() {
         let (_t, ws, mut idx) = setup();
         let p = ws.create_project("Fish").unwrap();
-        let a = ws.create_card("inbox", NewCard { title: Some("Lake idea".into()), ..Default::default() }).unwrap();
+        let a = ws.create_card("ideas", NewCard { title: Some("Lake idea".into()), ..Default::default() }).unwrap();
         let b = ws.create_card(&p.slug, NewCard { title: Some("Lake boss".into()), ..Default::default() }).unwrap();
         assert_eq!(idx.search("lake", None, 10).len(), 2);
         assert_eq!(idx.search("lake", Some(&p.slug), 10).iter().map(|h| h.id.clone()).collect::<Vec<_>>(), vec![b.meta.id.clone()]);
-        ws.delete_card("inbox", &a.meta.id).unwrap();
-        idx.mark_dirty(Some("inbox"));
+        ws.delete_card("ideas", &a.meta.id).unwrap();
+        idx.mark_dirty(Some("ideas"));
         let hits = idx.search("lake", None, 10);
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].project_name, "Fish");
@@ -833,7 +833,7 @@ mod tests {
     #[test]
     fn index_updates_incrementally_from_dirty_marks() {
         let (_t, ws, mut idx) = setup();
-        let dir = ws.project_dir("inbox").unwrap();
+        let dir = ws.project_dir("ideas").unwrap();
         for i in 0..20 {
             write(&dir, &card(&format!("01C{i:02}"), &format!("Card {i}"), &[], "plain"));
         }
@@ -845,13 +845,13 @@ mod tests {
         assert_eq!(idx.last_parsed, 0);
         assert!(idx.search("volcano", None, 5).is_empty(), "stale until the watcher says so");
         // The watcher marks the project dirty: exactly the one changed file is re-parsed.
-        idx.mark_dirty(Some("inbox"));
+        idx.mark_dirty(Some("ideas"));
         assert_eq!(idx.search("volcano", None, 5)[0].id, "01C05");
         assert_eq!(idx.last_parsed, 1);
         // Added and removed files.
         write(&dir, &card("01NEW", "Volcano two", &[], ""));
         fs::remove_file(dir.join("cards/01C05.md")).unwrap();
-        idx.mark_dirty(Some("inbox"));
+        idx.mark_dirty(Some("ideas"));
         let ids: Vec<String> = idx.search("volcano", None, 5).into_iter().map(|h| h.id).collect();
         assert_eq!(ids, vec!["01NEW"]);
         assert_eq!(idx.last_parsed, 1);
@@ -865,7 +865,7 @@ mod tests {
     #[test]
     fn related_finds_links_both_ways_and_shared_tags() {
         let (_t, ws, mut idx) = setup();
-        let dir = ws.project_dir("inbox").unwrap();
+        let dir = ws.project_dir("ideas").unwrap();
         let mut me = card("01ME", "Me", &["boss", "Water"], "");
         me.meta.links = vec![Link { to: "01OUT".into(), label: None }];
         write(&dir, &me);
@@ -882,7 +882,7 @@ mod tests {
         assert_eq!(r[2].relation, vec!["shares tags: water, boss".to_string()]);
         assert!(idx.related("01MISSING", 10).is_none());
         let (slug, c) = idx.find("01IN", None).unwrap();
-        assert_eq!(slug, "inbox");
+        assert_eq!(slug, "ideas");
         assert_eq!(idx.describe_links(&slug, &c.meta.links)[0]["title"], "Me");
     }
 

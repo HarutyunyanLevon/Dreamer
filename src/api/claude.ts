@@ -1,4 +1,4 @@
-import type { ArtifactType, OrganizePlanData } from "./types";
+import type { ArtifactType, OrganizePlanData, OrganizeScope } from "./types";
 
 export type SetupJob = "install" | "login";
 
@@ -194,9 +194,9 @@ export interface ClaudeApi {
   status(): Promise<ClaudeStatus>;
   /** `context` is pre-formatted text (e.g. the selected card's title/body) prepended server-side. */
   /** `thread` = card id or "project"; `resume` = that thread's saved Claude session id. */
-  /** `web` = this turn may use WebSearch/WebFetch; `selection` = card ids selected on the canvas; `folder` = the folder open on the canvas. */
+  /** `web` = this turn may use WebSearch/WebFetch; `selection` = card ids selected on the canvas. */
   /** `resumeLocal` = the thread's local-model session id; `escalate: "retry"` = Retry with Claude. */
-  send(slug: string, id: string, text: string, context?: string, thread?: string, resume?: string, opts?: { web?: boolean; selection?: string[]; folder?: string | null; memory?: boolean; question?: string; think?: boolean; pin?: ModelTier | null; resumeLocal?: string; escalate?: "retry"; organize?: "folder" | "project"; organizeBackend?: Backend | null; organizeInstruction?: string | null; organizePrior?: OrganizePlanData | null; organizeRest?: boolean; artifact?: string | null; recapFrom?: string | null }): Promise<void>;
+  send(slug: string, id: string, text: string, context?: string, thread?: string, resume?: string, opts?: { web?: boolean; selection?: string[]; memory?: boolean; question?: string; think?: boolean; pin?: ModelTier | null; resumeLocal?: string; escalate?: "retry"; organize?: OrganizeScope; scopeIds?: string[] | null; scopeName?: string | null; organizeBackend?: Backend | null; organizeInstruction?: string | null; organizePrior?: OrganizePlanData | null; organizeRest?: boolean; artifact?: string | null; recapFrom?: string | null }): Promise<void>;
   /** `memory: false` skips the memory pass after this turn (fixed chip commands); `question` = the question this text answers. */
   /** `hard`: also close the thread's Claude session (Retry after a stall); the next message resumes it. */
   interrupt(opts?: { hard?: boolean }): Promise<void>;

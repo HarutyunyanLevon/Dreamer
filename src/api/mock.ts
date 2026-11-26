@@ -1,4 +1,4 @@
-import { DESIGN_DOCS, GAP_CHECKLIST, type Api, type ArtifactView, type Attachment, type Canvas, type Card, type CardRole, type ChangeEvent, type ChatThreadFile, type ChecklistItem, type DesignVersion, type Folder, type HandoffEvent, type HandoffEventBody, type MemoryEvent, type MemoryLogEntry, type MemoryView, type NewCard, type ProjectData, type ProjectSummary, type SavedTask, type SearchHit, type TaskFlag, type Settings, type TrashItem } from "./types";
+import { DESIGN_DOCS, GAP_CHECKLIST, type Api, type ArtifactView, type Attachment, type Canvas, type Card, type CardRole, type ChangeEvent, type ChatThreadFile, type ChecklistItem, type DesignVersion, type HandoffEvent, type HandoffEventBody, type MemoryEvent, type MemoryLogEntry, type MemoryView, type NewCard, type ProjectData, type ProjectSummary, type SavedTask, type SearchHit, type TaskFlag, type Settings, type TrashItem } from "./types";
 
 /** Same rules as the Rust core: media paths stay under media/, clips need a url. */
 const noDesktop = async (): Promise<never> => {
@@ -73,10 +73,6 @@ interface MockProject {
   handoffConfirmed?: string;
   design: { entry: DesignVersion; docs: Record<string, string> }[];
   canvas: Canvas;
-  folders: Folder[];
-  canvases: Record<string, Canvas>;
-  /** Trashed folders: their subtree, canvases and card ids. */
-  trashedFolders: Map<string, { folders: Folder[]; canvases: Record<string, Canvas>; cards: string[] }>;
   cards: Map<string, Card>;
   trash: TrashItem[];
   trashed: Map<string, Card>;
@@ -101,17 +97,10 @@ function mkCard(c: NewCard): Card {
 }
 
 function seedProject(slug: string, name: string): MockProject {
-  return { slug, name, theme: null, design: [], canvas: emptyCanvas(), folders: [], canvases: {}, trashedFolders: new Map(), cards: new Map(), trash: [], trashed: new Map() };
+  return { slug, name, theme: null, design: [], canvas: emptyCanvas(), cards: new Map(), trash: [], trashed: new Map() };
 }
 
-const emptyCanvas = (): Canvas => ({ version: 3, viewport: { x: 300, y: 110, zoom: 1 }, cards: {}, frames: {}, folders: {} });
-const canvasOf = (p: MockProject, folder?: string | null) => (folder ? (p.canvases[folder] ??= emptyCanvas()) : p.canvas);
-const locate = (p: MockProject, id: string): string | null => Object.entries(p.canvases).find(([, c]) => c.cards[id])?.[0] ?? null;
-const subtreeOf = (p: MockProject, id: string) => {
-  const out = [id];
-  for (let i = 0; i < out.length; i++) out.push(...p.folders.filter((f) => f.parent === out[i]).map((f) => f.id));
-  return out;
-}
+const emptyCanvas = (): Canvas => ({ version: 3, viewport: { x: 300, y: 110, zoom: 1 }, cards: {}, frames: {} });
 
 /** "tech" and "decisions"; only one live card per project may hold each. */
 function checkRole(p: MockProject, role: string | undefined, except?: string): CardRole | undefined {
@@ -189,11 +178,11 @@ export function createMockApi(): Api {
     p.canvas.cards[card.id] = { x, y };
     return card;
   };
-  const inbox = seedProject("inbox", "Inbox");
+  const inbox = seedProject("inbox-ideas", "Inbox");
   add(inbox, { title: "Pirate-radio fishing tips", body: "Chatty DJ narrates every catch." }, 0, 0);
   add(inbox, { title: "What if the lake bites first?" }, 264, 0);
   add(inbox, { title: "Neon bait", body: "Glows brighter the angrier the fish." }, 528, 0);
-  projects.set("inbox", inbox);
+  projects.set("inbox-ideas", inbox);
   const fish = seedProject("fish-punk-fishing", "Fish-punk fishing");
   const fight = add(fish, { title: "Fish that fight back", body: "What if the lake bites first?" }, 0, 10);
   add(fish, { title: "Chill loop", body: "Cast, wait, let the combo breathe.", stage: "reverie" }, 290, -10);
@@ -240,10 +229,10 @@ export function createMockApi(): Api {
     emit(slug);
     return structuredClone(c);
   };
-  const summary = (p: MockProject): ProjectSummary => ({ slug: p.slug, name: p.name, theme: p.theme, card_count: p.cards.size, is_inbox: p.slug === "inbox", design_versions: p.design.length });
+  const summary = (p: MockProject): ProjectSummary => ({ slug: p.slug, name: p.name, theme: p.theme, card_count: p.cards.size });
   const data = (p: MockProject): ProjectData => ({
-    slug: p.slug, is_inbox: p.slug === "inbox", meta: { name: p.name, theme: p.theme ?? undefined, created: "", handoff_target: p.handoffTarget, handoff_target_confirmed: p.handoffConfirmed },
-    canvas: structuredClone(p.canvas), folders: structuredClone(p.folders), canvases: structuredClone(p.canvases), cards: [...p.cards.values()].map((c) => structuredClone(c)), proposals: {}, warnings: [],
+    slug: p.slug, meta: { name: p.name, theme: p.theme ?? undefined, created: "", handoff_target: p.handoffTarget, handoff_target_confirmed: p.handoffConfirmed },
+    canvas: structuredClone(p.canvas), cards: [...p.cards.values()].map((c) => structuredClone(c)), proposals: {}, warnings: [],
   });
 
   return {
@@ -282,14 +271,14 @@ export function createMockApi(): Api {
       const taken = [...projects.values()].find((p) => p.name.trim().toLowerCase() === name.trim().toLowerCase());
       if (taken) throw new Error(`A project named “${taken.name}” already exists.`);
       let slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "project";
-      while (projects.has(slug) || slug === "inbox") slug += "-2";
+      while (projects.has(slug)) slug += "-2";
       const p = seedProject(slug, name.trim());
       projects.set(slug, p);
       return summary(p);
     },
     updateProject: async (slug, patch) => {
       const p = need(slug);
-      if (patch.name && slug !== "inbox") p.name = patch.name;
+      if (patch.name) p.name = patch.name;
       if (patch.theme !== undefined) p.theme = patch.theme || null;
       if (patch.handoff_target !== undefined) {
         const t = patch.handoff_target.trim();
@@ -303,66 +292,15 @@ export function createMockApi(): Api {
       return summary(p);
     },
     loadProject: async (slug) => data(need(slug)),
-    // shortcut: the in-memory demo has no project versions; the UI behaves as a flat project.
-    migrateVersions: async () => false,
-    newVersion: async () => {
-      throw new Error("Project versions need the desktop app.");
+    saveCanvas: async (slug, canvas) => {
+      need(slug).canvas = { ...structuredClone(canvas), frames: structuredClone(canvas.frames ?? {}), version: 3 };
     },
-    saveCanvas: async (slug, canvas, folder) => {
-      const p = need(slug);
-      const c = { ...structuredClone(canvas), frames: structuredClone(canvas.frames ?? {}), folders: structuredClone(canvas.folders ?? {}), version: 3 };
-      if (folder) p.canvases[folder] = c;
-      else p.canvas = c;
-    },
-    saveLayout: async (slug, layout) => {
-      const p = need(slug);
-      if (layout.folders) {
-        const keep = new Set(layout.folders.map((f) => f.id));
-        p.folders = structuredClone(layout.folders);
-        for (const k of Object.keys(p.canvases)) if (!keep.has(k)) delete p.canvases[k];
-      }
-      for (const [k, c] of Object.entries(layout.canvases)) {
-        const v = { ...structuredClone(c), folders: structuredClone(c.folders ?? {}), version: 3 };
-        if (k) p.canvases[k] = v;
-        else p.canvas = v;
-      }
-      emit(slug);
-    },
-    deleteFolder: async (slug, id) => {
-      const p = need(slug);
-      const f = p.folders.find((x) => x.id === id);
-      if (!f) throw new Error(`not found: folder ${id}`);
-      const ids = subtreeOf(p, id);
-      const canvases: Record<string, Canvas> = {};
-      const cards: string[] = [];
-      for (const k of ids) {
-        canvases[k] = structuredClone(canvasOf(p, k));
-        cards.push(...Object.keys(canvases[k].cards));
-        delete p.canvases[k];
-      }
-      for (const c of cards) {
-        const card = p.cards.get(c);
-        if (card) p.trashed.set(c, card);
-        p.cards.delete(c);
-      }
-      const parent = canvasOf(p, f.parent);
-      const item: TrashItem = { id, title: f.title || "Untitled folder", stage: "mist", reason: "deleted", deleted_at: stamp(), pos: parent.folders[id] ?? null, kind: "folder", folder: f.parent, count: cards.length };
-      delete parent.folders[id];
-      p.trashedFolders.set(id, { folders: p.folders.filter((x) => ids.includes(x.id)), canvases, cards });
-      p.folders = p.folders.filter((x) => !ids.includes(x.id));
-      p.trash.push(item);
-      emit(slug);
-      return item;
-    },
+    migrationStatus: async () => null,
     createCard: async (slug, c) => {
       const p = need(slug);
       c = { ...c, role: checkRole(p, c.role) };
       const n = p.cards.size;
       const card = add(p, c, c.x ?? (n % 4) * 264, c.y ?? Math.floor(n / 4) * 196);
-      if (c.folder) {
-        canvasOf(p, c.folder).cards[card.id] = p.canvas.cards[card.id];
-        delete p.canvas.cards[card.id];
-      }
       emit(slug);
       return card;
     },
@@ -434,11 +372,10 @@ export function createMockApi(): Api {
       const p = need(slug);
       const c = p.cards.get(id);
       if (!c) throw new Error(`not found: card ${id}`);
-      const folder = locate(p, id);
-      const item: TrashItem = { id, title: c.title, stage: c.stage, reason: "deleted", deleted_at: stamp(), pos: canvasOf(p, folder).cards[id] ?? null, folder };
+      const item: TrashItem = { id, title: c.title, stage: c.stage, reason: "deleted", deleted_at: stamp(), pos: p.canvas.cards[id] ?? null };
       p.trash.push(item);
       p.cards.delete(id);
-      delete canvasOf(p, folder).cards[id];
+      delete p.canvas.cards[id];
       p.trashed.set(id, c);
       emit(slug);
       return item;
@@ -447,11 +384,10 @@ export function createMockApi(): Api {
       const p = need(slug);
       const c = p.cards.get(id);
       if (!c) throw new Error(`not found: card ${id}`);
-      const folder = locate(p, id);
-      const item: TrashItem = { id, title: c.title, stage: c.stage, reason, deleted_at: stamp(), pos: canvasOf(p, folder).cards[id] ?? null, folder };
+      const item: TrashItem = { id, title: c.title, stage: c.stage, reason, deleted_at: stamp(), pos: p.canvas.cards[id] ?? null };
       p.trash.push(item);
       p.cards.delete(id);
-      delete canvasOf(p, folder).cards[id];
+      delete p.canvas.cards[id];
       p.trashed.set(id, c);
       emit(slug);
       return item;
@@ -459,31 +395,13 @@ export function createMockApi(): Api {
     listTrash: async (slug) => [...need(slug).trash],
     restoreCard: async (slug, id) => {
       const p = need(slug);
-      const bundle = p.trashedFolders.get(id);
-      const fitem = p.trash.find((t) => t.id === id && t.kind === "folder");
-      if (bundle && fitem) {
-        const parent = fitem.folder && p.folders.some((f) => f.id === fitem.folder) ? fitem.folder : null;
-        p.folders.push(...bundle.folders.map((f) => (f.id === id ? { ...f, parent } : f)));
-        Object.assign(p.canvases, bundle.canvases);
-        for (const c of bundle.cards) {
-          const card = p.trashed.get(c);
-          if (card) p.cards.set(c, card);
-          p.trashed.delete(c);
-        }
-        canvasOf(p, parent).folders[id] = fitem.pos ?? { x: 0, y: 0 };
-        p.trashedFolders.delete(id);
-        p.trash = p.trash.filter((t) => t.id !== id);
-        emit(slug);
-        return { folder: id };
-      }
       const c = p.trashed.get(id);
       const item = p.trash.find((t) => t.id === id);
       if (!c || !item) throw new Error(`not found: trash item ${id}`);
       // A restored Tech card yields its role if another card took it meanwhile.
       if (c.role === "tech" && [...p.cards.values()].some((o) => o.role === "tech")) delete c.role;
       p.cards.set(id, c);
-      const into = item.folder && p.folders.some((f) => f.id === item.folder) ? item.folder : null;
-      canvasOf(p, into).cards[id] = item.pos ?? { x: 0, y: 0 };
+      p.canvas.cards[id] = item.pos ?? { x: 0, y: 0 };
       p.trash = p.trash.filter((t) => t.id !== id);
       p.trashed.delete(id);
       emit(slug);
@@ -662,8 +580,8 @@ export function createMockApi(): Api {
       return hits.sort((a, b) => b.score - a.score).slice(0, limit);
     },
     deleteProject: async (slug) => {
-      if (slug === "inbox") throw new Error("The Inbox can't be deleted.");
       need(slug);
+      if (projects.size <= 1) throw new Error("This is the only project; a workspace keeps at least one.");
       projects.delete(slug);
       if (settings.last_project === slug) settings.last_project = null;
       listeners.forEach((l) => l([{ scope: "project", project: slug }]));

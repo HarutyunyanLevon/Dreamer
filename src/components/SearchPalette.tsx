@@ -53,7 +53,7 @@ export function SearchPalette({ ws, onClose }: { ws: Workspace; onClose: () => v
     if (linking && h.project === ws.active && h.id !== linking) {
       ws.addLink(linking, h.id);
       ws.setLinking(false);
-      ws.toast(`Linked to “${h.title || "Untitled"}”${h.folder_path ? ` in ${h.folder_path}` : ""}.`);
+      ws.toast(`Linked to “${h.title || "Untitled"}”.`);
       return;
     }
     void ws.focusCard(h.id, h.project);
@@ -112,7 +112,7 @@ export function SearchPalette({ ws, onClose }: { ws: Workspace; onClose: () => v
                   {!h.kind || h.kind === "card" ? <span className={`dot dot-${h.stage}`} aria-hidden="true" /> : <span className="palette-kind">{KIND_LABEL[h.kind]}</span>}
                   <span className="palette-hit-title">{h.title || "Untitled"}</span>
                   {h.ghost && <span className="palette-badge">suggestion</span>}
-                  <span className="palette-hit-proj">{h.folder_path ? `${h.project_name} › ${h.folder_path.split(" / ").join(" › ")}` : h.project_name}</span>
+                  <span className="palette-hit-proj">{h.project_name}</span>
                 </div>
                 {h.snippet && <div className="palette-snippet">{h.snippet}</div>}
                 {h.tags.length > 0 && <div className="palette-tags">{h.tags.map((t) => `#${t}`).join(" ")}</div>}

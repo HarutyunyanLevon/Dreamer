@@ -43,10 +43,6 @@ export interface FrameControls {
   rename: (id: string, title: string) => void;
   select: (id: string | null) => void;
   setRenaming: (id: string | null) => void;
-  /** Dragging over (x, y): highlight a folder drop target there. */
-  dragOver: (x: number, y: number, id: string) => void;
-  /** Released at (x, y): true when the frame (and its cards) were dropped into a folder. */
-  drop: (x: number, y: number, id: string) => boolean;
 }
 
 export const FrameView = memo(function FrameView({
@@ -81,14 +77,11 @@ export const FrameView = memo(function FrameView({
     const moves: Record<string, { x: number; y: number }> = {};
     for (const m of d.members) moves[m.id] = { x: Math.round(m.x + dx), y: Math.round(m.y + dy) };
     ctl.live(id, { x: Math.round(d.fx + dx), y: Math.round(d.fy + dy) }, moves);
-    ctl.dragOver(e.clientX, e.clientY, id);
   };
-  const onTabUp = (e: ReactPointerEvent) => {
+  const onTabUp = () => {
     const d = drag.current;
     drag.current = null;
     if (!d?.moved) return;
-    if (e.type === "pointerup" && ctl.drop(e.clientX, e.clientY, id)) return;
-    ctl.dragOver(-1, -1, id);
     ctl.commit("move frame", d.before);
   };
 

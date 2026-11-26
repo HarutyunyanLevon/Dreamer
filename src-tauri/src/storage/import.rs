@@ -8,17 +8,9 @@ use serde::Deserialize;
 use serde_json::json;
 
 #[derive(Serialize)]
-pub struct VersionOpt {
-    pub id: String,
-    pub title: String,
-}
-
-#[derive(Serialize)]
 pub struct ProjectOpt {
     pub slug: String,
     pub name: String,
-    pub versions: Vec<VersionOpt>,
-    pub open_version: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -38,12 +30,11 @@ pub struct PlanCard {
 pub struct ImportPlan {
     pub header: bundle::Header,
     pub project: String,
-    pub version: Option<String>,
     pub frame: Option<String>,
-    /// "project" / "version" when the bundle names one that doesn't exist (the pickers decide).
+    /// "project" when the bundle names one that doesn't exist (the picker decides).
     pub unresolved: Vec<String>,
     pub projects: Vec<ProjectOpt>,
-    /// Frame titles on the target version's canvas.
+    /// Frame titles on the target project's canvas.
     pub frames: Vec<String>,
     pub cards: Vec<PlanCard>,
     pub warnings: Vec<String>,
@@ -53,7 +44,6 @@ pub struct ImportPlan {
 #[derive(Deserialize, Default, Debug)]
 pub struct Target {
     pub project: Option<String>,
-    pub version: Option<String>,
     /// Some("") = no default frame.
     pub frame: Option<String>,
     /// Drop / paste point in canvas coordinates (top-left of the first card).
@@ -65,7 +55,6 @@ pub struct Target {
 #[derive(Serialize, Deserialize, Clone, Default, Debug)]
 pub struct ImportResult {
     pub project: String,
-    pub folder: Option<String>,
     pub created: Vec<String>,
     pub proposals: Vec<String>,
     /// Ghosts of an earlier send that were replaced (moved to Trash).
@@ -81,7 +70,6 @@ fn norm(s: &str) -> String {
 
 struct Resolved {
     slug: String,
-    folder: Option<String>,
     frame: Option<String>,
     unresolved: Vec<String>,
 }
@@ -99,28 +87,13 @@ impl Workspace {
             if named.is_none() && b.header.project.is_some() {
                 unresolved.push("project".to_string());
             }
-            named.or(open).or_else(|| projects.iter().find(|p| !p.is_inbox).map(|p| p.slug.clone())).or_else(|| projects.first().map(|p| p.slug.clone())).ok_or_else(|| AppError::NotFound("a project".into()))?
-        };
-        let dir = self.existing_project_dir(&slug)?;
-        let folders = Self::read_folders(&dir)?;
-        let versions = versions_of(&folders);
-        let by = |key: &str| versions.iter().find(|f| f.id == key || norm(&f.title) == norm(key)).map(|f| f.id.clone());
-        let folder = if versions.is_empty() {
-            None
-        } else if let Some(v) = t.version.as_deref().and_then(by) {
-            Some(v)
-        } else {
-            let named = b.header.version.as_deref().and_then(by);
-            if named.is_none() && b.header.version.is_some() && !unresolved.contains(&"project".to_string()) {
-                unresolved.push("version".into());
-            }
-            named.or_else(|| Self::open_version_in(&dir, &folders).map(|f| f.id))
+            named.or(open).or_else(|| projects.first().map(|p| p.slug.clone())).ok_or_else(|| AppError::NotFound("a project".into()))?
         };
         let frame = match &t.frame {
             Some(f) => Some(f.trim().to_string()).filter(|f| !f.is_empty()),
             None => b.header.frame.clone(),
         };
-        Ok(Resolved { slug, folder, frame, unresolved })
+        Ok(Resolved { slug, frame, unresolved })
     }
 
     /// What importing `text` would do: the resolved target, and per card New / Update / Replace ghost.
@@ -129,24 +102,8 @@ impl Workspace {
         let r = self.resolve_target(&b, t)?;
         let dir = self.existing_project_dir(&r.slug)?;
         let (cards, _) = Self::list_cards_in(&dir);
-        let canvas = Self::read_canvas_at(&dir, r.folder.as_deref())?;
-        let folders = Self::read_folders(&dir)?;
-        let open = Self::open_version_in(&dir, &folders).map(|f| f.id);
-        let projects = self
-            .list_projects()?
-            .into_iter()
-            .map(|p| {
-                let d = self.existing_project_dir(&p.slug).ok();
-                let fs = d.as_ref().and_then(|d| Self::read_folders(d).ok()).unwrap_or_default();
-                ProjectOpt {
-                    open_version: d.as_ref().and_then(|d| Self::open_version_in(d, &fs)).map(|f| f.id),
-                    versions: versions_of(&fs).into_iter().map(|f| VersionOpt { id: f.id.clone(), title: f.title.clone() }).collect(),
-                    slug: p.slug,
-                    name: p.name,
-                }
-            })
-            .collect();
-        let _ = open;
+        let canvas = Self::read_canvas(&dir)?;
+        let projects = self.list_projects()?.into_iter().map(|p| ProjectOpt { slug: p.slug, name: p.name }).collect();
         let plan_cards = b
             .cards
             .iter()
@@ -169,7 +126,6 @@ impl Workspace {
             .collect();
         Ok(ImportPlan {
             project: r.slug,
-            version: r.folder,
             frame: r.frame,
             unresolved: r.unresolved,
             projects,
@@ -199,8 +155,8 @@ impl Workspace {
         let slug = r.slug.clone();
         let dir = self.existing_project_dir(&slug)?;
         let (existing, _) = Self::list_cards_in(&dir);
-        let mut res = ImportResult { project: slug.clone(), folder: r.folder.clone(), warnings: b.warnings.clone(), ..Default::default() };
-        let mut canvas = Self::read_canvas_at(&dir, r.folder.as_deref())?;
+        let mut res = ImportResult { project: slug.clone(), warnings: b.warnings.clone(), ..Default::default() };
+        let mut canvas = Self::read_canvas(&dir)?;
 
         // 1. What each card becomes.
         enum Act {
@@ -298,7 +254,7 @@ impl Workspace {
             }
         }
         if !new_frames.is_empty() {
-            Self::write_canvas(&dir, r.folder.as_deref(), &canvas)?;
+            Self::write_canvas(&dir, &canvas)?;
             res.frames = new_frames;
         }
 
@@ -338,7 +294,6 @@ impl Workspace {
                             fields: Some(c.fields.clone()),
                             source: Some(Source::Claude),
                             ghost: Some(true),
-                            folder: r.folder.clone(),
                             x: Some(x),
                             y: Some(y),
                             import: Some(ImportRef { bundle_id: b.header.bundle_id.clone(), r#ref: c.r#ref.clone(), source: source.clone() }),
@@ -382,9 +337,9 @@ impl Workspace {
             let _ = self.restore_card(&res.project, id);
         }
         if !res.frames.is_empty() {
-            let mut c = Self::read_canvas_at(&dir, res.folder.as_deref())?;
+            let mut c = Self::read_canvas(&dir)?;
             c.frames.retain(|id, _| !res.frames.contains(id));
-            Self::write_canvas(&dir, res.folder.as_deref(), &c)?;
+            Self::write_canvas(&dir, &c)?;
         }
         Ok(())
     }
@@ -482,7 +437,7 @@ mod tests {
         assert!(ws.read_card(&slug, &res.created[1]).unwrap().meta.extra.contains_key("build"));
         // No two cards overlap, each sits inside its frame.
         let d = ws.load_project(&slug).unwrap();
-        let cv = &d.canvases[res.folder.as_ref().unwrap()];
+        let cv = &d.canvas;
         let (pa, pb) = (&cv.cards[&res.created[0]], &cv.cards[&res.created[1]]);
         assert!(pa.x + CARD_W <= pb.x || pb.x + CARD_W <= pa.x || pa.y != pb.y);
         let fa = cv.frames.values().find(|f| f.title == "Ideas").unwrap();

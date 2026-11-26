@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, type Card, type Gap, type HandoffEvent, type HandoffRepoResult, type HandoffScope, type HandoffSpec, type ProjectData } from "../api";
-import { cardVersions, folderChain, folderName, versionOf, versionsOf, type Workspace } from "../state/useWorkspace";
+import { type Workspace } from "../state/useWorkspace";
 import { STAGES, STAGE_LABEL, type StageId } from "../theme/types";
 import { LinkRepoWrites } from "./LinkRepo";
 import { Modal } from "../ui/Modal";
@@ -111,8 +111,7 @@ const LINK_DEPTH = 2;
 
 /** The cards a spec covers. The core resolves the scope again when it runs; this is the preview. */
 export function cardsInScope(data: ProjectData, spec: HandoffSpec): Card[] {
-  const of = spec.version ? cardVersions(data) : null;
-  const live = data.cards.filter((c) => !c.ghost && (!of || of.get(c.id) === spec.version));
+  const live = data.cards.filter((c) => !c.ghost);
   const byId = new Map(live.map((c) => [c.id, c]));
   let base = new Set<string>();
   const s = spec.scope;
@@ -127,11 +126,6 @@ export function cardsInScope(data: ProjectData, spec: HandoffSpec): Card[] {
       const cy = p.y + (p.h ?? CARD_H) / 2;
       if (frames.some((f) => cx >= f.x && cx <= f.x + f.w && cy >= f.y && cy <= f.y + f.h)) base.add(c.id);
     }
-  } else if (s.kind === "folder") {
-    // The folder and every folder below it.
-    const sub = [s.id];
-    for (let i = 0; i < sub.length; i++) sub.push(...data.folders.filter((f) => f.parent === sub[i]).map((f) => f.id));
-    for (const f of sub) for (const id of Object.keys(data.canvases[f]?.cards ?? {})) if (byId.has(id)) base.add(id);
   } else if (byId.has(s.id)) {
     base.add(s.id);
     let frontier = [s.id];
@@ -187,9 +181,6 @@ function HandoffDialog({
   const fromCard = initial.kind === "card" ? data.cards.find((c) => c.id === initial.id) : undefined;
   const frames = useMemo(() => Object.entries(data.canvas.frames ?? {}).sort((a, b) => a[1].y - b[1].y || a[1].x - b[1].x), [data.canvas.frames]);
   const [kind, setKind] = useState<HandoffScope["kind"]>(initial.kind);
-  // The folder scope: the one asked for, else the folder open on the canvas.
-  const scopeFolder = initial.kind === "folder" ? initial.id : ws.folder;
-  const folderTitle = folderChain(data.folders, scopeFolder).map(folderName).join(" / ");
   const [frameIds, setFrameIds] = useState<Set<string>>(() => new Set(initial.kind === "frames" ? initial.ids : []));
   const [stages, setStages] = useState<Set<StageId>>(() => new Set(ALL_STAGES));
   const [stickies, setStickies] = useState(false);
@@ -206,11 +197,8 @@ function HandoffDialog({
   }, []);
 
   const scope: HandoffScope =
-    kind === "project" ? { kind } : kind === "selection" ? { kind, ids: selection } : kind === "frames" ? { kind, ids: [...frameIds] } : kind === "folder" ? { kind, id: scopeFolder ?? "" } : { kind: "card", id: fromCard?.id ?? "" };
-  // Project versions: the pack is of one version, the open one by default.
-  const versions = versionsOf(data.folders);
-  const [version, setVersion] = useState<string | undefined>(() => versionOf(data.folders, initial.kind === "folder" ? initial.id : ws.folder)?.id ?? data.meta.last_version ?? versions[versions.length - 1]?.id);
-  const spec: HandoffSpec = { scope, stages: ALL_STAGES.filter((s) => stages.has(s)), include_stickies: stickies, ...(versions.length && version ? { version } : {}) };
+    kind === "project" ? { kind } : kind === "selection" ? { kind, ids: selection } : kind === "frames" ? { kind, ids: [...frameIds] } : { kind: "card", id: fromCard?.id ?? "" };
+  const spec: HandoffSpec = { scope, stages: ALL_STAGES.filter((s) => stages.has(s)), include_stickies: stickies };
   const inScope = cardsInScope(data, spec);
   const target = data.meta.handoff_target ?? null;
 
@@ -328,31 +316,16 @@ function HandoffDialog({
   const locked = running || starting || busy;
   const scopeEmpty = (kind === "frames" && frameIds.size === 0) || inScope.length === 0;
   const scopeOptions: { kind: HandoffScope["kind"]; label: string; disabled?: string }[] = [
-    { kind: "project", label: versions.length ? "Whole version" : "Whole project" },
+    { kind: "project", label: "Whole project" },
     { kind: "selection", label: selection.length ? `Selection (${selection.length})` : "Selection", disabled: selection.length ? undefined : "Select cards on the canvas first" },
     { kind: "frames", label: "Frames", disabled: frames.length ? undefined : "This project has no frames" },
   ];
-  if (scopeFolder && folderTitle) scopeOptions.push({ kind: "folder", label: `Folder “${folderTitle}”` });
   if (fromCard) scopeOptions.push({ kind: "card", label: `From “${fromCard.title}”` });
 
   return (
     <Modal onClose={close} label="Summarize: handoff pack" size="md" className="handoff-dialog">
       <h3 className="dialog-title">Summarize into a handoff pack</h3>
       <p className="chat-sub handoff-lede">Claude turns the cards into design docs, a roadmap and a CLAUDE.md that Claude Code can build from. Each run is saved as a new version.</p>
-
-      {versions.length > 1 && (
-        <fieldset className="handoff-group" disabled={locked}>
-          <legend>Version</legend>
-          <div className="seg" role="radiogroup" aria-label="Project version">
-            {versions.map((v) => (
-              <button key={v.id} type="button" role="radio" aria-checked={version === v.id} className={"chip" + (version === v.id ? " on" : "")} onClick={() => setVersion(v.id)}>
-                {folderName(v)}
-              </button>
-            ))}
-          </div>
-          <p className="chat-sub">Saved as the next revision of {folderName(versions.find((v) => v.id === version))} (design/&lt;version&gt;/r&lt;N&gt;/).</p>
-        </fieldset>
-      )}
 
       <fieldset className="handoff-group" disabled={locked}>
         <legend>Scope</legend>

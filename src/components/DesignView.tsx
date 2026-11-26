@@ -27,7 +27,6 @@ const TAB_LABEL: Record<string, string> = {
  */
 export function DesignView({ ws, onClose, onNewVersion }: { ws: Workspace; onClose: () => void; onNewVersion: () => void }) {
   const slug = ws.active!;
-  const count = ws.projects.find((p) => p.slug === slug)?.design_versions ?? 0;
   const [versions, setVersions] = useState<DesignVersion[] | null>(null);
   const [version, setVersion] = useState<number | null>(null);
   /** The project version's folder under design/ ("" = the flat design/v<N>/ layout). */
@@ -41,7 +40,7 @@ export function DesignView({ ws, onClose, onNewVersion }: { ws: Workspace; onClo
   const pendingHash = useRef<string | null>(null);
   const images = useRef(new Map<string, string>());
 
-  // (Re)load the version list for this project; a new version (count changed) is shown at once.
+  // (Re)load the version list for this project; a new version (the project list refreshed) is shown at once.
   useEffect(() => {
     let live = true;
     api
@@ -49,9 +48,8 @@ export function DesignView({ ws, onClose, onNewVersion }: { ws: Workspace; onClo
       .then((v) => {
         if (!live) return;
         setVersions(v);
-        // The open project version's newest revision, else the newest of all.
-        const open = ws.data?.meta.last_version;
-        const pick = [...v].reverse().find((e) => open && e.version_id === open) ?? v[v.length - 1];
+        // The newest revision.
+        const pick = [...v].sort((a, b) => a.created.localeCompare(b.created)).pop();
         setDir(pick?.dir ?? "");
         setVersion(pick ? pick.version : null);
       })
@@ -59,7 +57,7 @@ export function DesignView({ ws, onClose, onNewVersion }: { ws: Workspace; onClo
     return () => {
       live = false;
     };
-  }, [slug, count]);
+  }, [slug, ws.projects]);
 
   const entry = versions?.find((v) => v.version === version && (v.dir ?? "") === dir) ?? null;
   const groups = [...new Map((versions ?? []).map((v) => [v.dir ?? "", v.version_title || v.dir || ""])).entries()];

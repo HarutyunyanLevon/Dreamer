@@ -133,7 +133,13 @@ async fn add_from_clipboard(app: &AppHandle) -> Result<String> {
         let mut cb = arboard::Clipboard::new().map_err(io)?;
         (cb.get_text().ok(), cb.get_image().ok().map(|i| (i.width, i.height, i.bytes.into_owned())), cb.get().file_list().ok())
     };
-    let inbox = crate::storage::INBOX_SLUG;
+    // shortcut: lands in the last opened project, until the capture utility is removed.
+    let inbox_slug = {
+        let ws = st.ws.lock().map_err(|_| AppError::Invalid("workspace lock poisoned".into()))?;
+        let last = ws.get_settings()?.last_project.filter(|s| ws.existing_project_dir(s).is_ok());
+        last.or_else(|| ws.list_projects().ok()?.first().map(|p| p.slug.clone())).ok_or_else(|| AppError::NotFound("a project".into()))?
+    };
+    let inbox = inbox_slug.as_str();
     let with = |f: &dyn Fn(&crate::storage::Workspace) -> Result<String>| -> Result<String> { f(&*st.ws.lock().map_err(|_| AppError::Invalid("workspace lock poisoned".into()))?) };
     let fetched_cell: std::cell::RefCell<Option<crate::clip::Fetched>> = Default::default();
     let is_bundle = |t: &str| crate::bundle::detect(t);

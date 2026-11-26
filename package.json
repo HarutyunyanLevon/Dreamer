@@ -14,7 +14,6 @@
     "check:themes": "tsx scripts/check-themes.ts",
     "reliability": "node scripts/reliability/run.mjs",
     "test:reliability": "tsx scripts/reliability/last-resort.test.ts",
-    "test:versions": "tsx scripts/versions-compare.test.ts",
     "test:checklist": "tsx scripts/checklist-items.test.ts"
   },
   "dependencies": {

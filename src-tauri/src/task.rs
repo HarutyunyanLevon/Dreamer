@@ -190,10 +190,8 @@ pub fn start(app: &AppHandle, state: &AppState, slug: &str, ids: Vec<String>, mo
     let texts = if revise.is_some() { BTreeMap::new() } else { texts };
     let diffs: BTreeMap<String, String> = texts.into_iter().filter(|(id, _)| to_build.contains(id)).map(|(id, (snap, now))| (id, line_diff(snap.as_deref().unwrap_or(""), &now))).collect();
 
-    let spec = ScopeSpec { scope: Scope::Selection { ids: to_build.clone() }, stages: vec![Stage::Mist, Stage::Reverie, Stage::Lucid, Stage::Dream, Stage::Built], include_stickies: true, version: None };
-    let ver = handoff::job_version(&data, &spec);
-    let (ver_id, ver_title) = ver.as_ref().map(|f| (f.id.clone(), f.name())).unwrap_or_default();
-    let ddir = if ver_id.is_empty() { String::new() } else { handoff::dir_for(&dir, &ver_id, &ver_title) };
+    let spec = ScopeSpec { scope: Scope::Selection { ids: to_build.clone() }, stages: vec![Stage::Mist, Stage::Reverie, Stage::Lucid, Stage::Dream, Stage::Built], include_stickies: true };
+    let (ver_id, ver_title, ddir) = handoff::pack_dir(&dir);
     let latest = handoff::next_revision(&dir, &ddir) - 1;
     let design = (latest > 0 && handoff::revision_dir(&dir, &ddir, latest).is_dir()).then(|| (ddir.clone(), latest));
     let repo = data.meta.handoff_target.clone().filter(|t| !t.trim().is_empty());

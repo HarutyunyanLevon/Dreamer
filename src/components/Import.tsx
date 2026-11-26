@@ -88,7 +88,6 @@ export function ImportHost({ ws }: { ws: Workspace }) {
       if (archive) await api.archiveImport(archive).catch(() => {});
       const w = wsRef.current;
       if (res.project !== w.active) await w.select(res.project);
-      if (res.folder && w.folder !== res.folder) w.openFolder(res.folder);
       await w.refresh();
       setLast({ res, title: plan.header.title, bundle: plan.header.bundle_id });
       setHidden(false);
@@ -182,7 +181,7 @@ function ImportDialog({ ws, open, onClose, onDone }: { ws: Workspace; open: Open
     if (!plan) return;
     setBusy(true);
     try {
-      const res = await api.applyBundle(open.text, target({ project: plan.project, version: plan.version ?? undefined, frame: plan.frame ?? "" }));
+      const res = await api.applyBundle(open.text, target({ project: plan.project, frame: plan.frame ?? "" }));
       await onDone(res, plan, open.archive);
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
@@ -191,7 +190,6 @@ function ImportDialog({ ws, open, onClose, onDone }: { ws: Workspace; open: Open
     }
   };
 
-  const proj = plan?.projects.find((p) => p.slug === plan.project);
   return (
     <Modal onClose={onClose} label="Import cards" size="md" className="import-modal">
       <div className="modal-head">
@@ -211,17 +209,9 @@ function ImportDialog({ ws, open, onClose, onDone }: { ws: Workspace; open: Open
                 {plan.projects.map((p) => <option key={p.slug} value={p.slug}>{p.name}</option>)}
               </select>
             </label>
-            {proj && proj.versions.length > 0 && (
-              <label>
-                Version
-                <select value={plan.version ?? ""} onChange={(e) => setPick({ project: plan.project, version: e.target.value, frame: "" })}>
-                  {proj.versions.map((v) => <option key={v.id} value={v.id}>{v.title}</option>)}
-                </select>
-              </label>
-            )}
             <label>
               Default frame
-              <input list="import-frames" value={plan.frame ?? ""} placeholder="(none)" onChange={(e) => setPick({ project: plan.project, version: plan.version ?? undefined, frame: e.target.value })} />
+              <input list="import-frames" value={plan.frame ?? ""} placeholder="(none)" onChange={(e) => setPick({ project: plan.project, frame: e.target.value })} />
               <datalist id="import-frames">{plan.frames.map((f) => <option key={f} value={f} />)}</datalist>
             </label>
           </div>

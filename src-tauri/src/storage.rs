@@ -1,4 +1,4 @@
-//! Plain-file storage: workspace, projects, Inbox, cards, canvas, trash.
+//! Plain-file storage: workspace, projects, cards, canvas, trash. One canvas per project.
 //! Everything is human-readable and git-friendly; all writes are atomic (temp file + rename).
 
 use crate::error::{AppError, Result};
@@ -13,9 +13,8 @@ use std::time::Duration;
 
 pub mod build;
 mod import;
-mod versions;
+mod migrate;
 pub use import::{ImportOffer, ImportPlan, ImportResult, Target};
-pub use versions::{mentions, top_version, versions_of};
 
 /// Waits between retries of a file operation that hit "in use" (about 1.5s in total).
 const RETRY_DELAYS_MS: [u64; 6] = [50, 100, 200, 300, 400, 500];
@@ -60,7 +59,13 @@ fn clear_readonly(dir: &Path) {
     }
 }
 
-pub const INBOX_SLUG: &str = "inbox";
+/// Workspace roots that open read-only (a failed migration), with the banner text.
+static READ_ONLY: std::sync::Mutex<Vec<(PathBuf, String)>> = std::sync::Mutex::new(Vec::new());
+
+fn read_only_reason(path: &Path) -> Option<String> {
+    READ_ONLY.lock().ok()?.iter().find(|(r, _)| path.starts_with(r)).map(|(_, m)| m.clone())
+}
+
 const GRID_DX: f64 = 264.0;
 const GRID_DY: f64 = 196.0;
 
@@ -73,6 +78,9 @@ pub fn now() -> String {
 /// Write `bytes` to `path` atomically: temp file in the same directory, fsync, rename over the target.
 pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     use std::io::Write;
+    if let Some(why) = read_only_reason(path) {
+        return Err(AppError::Invalid(format!("Dreamer is read-only right now. {why}")));
+    }
     let dir = path.parent().ok_or_else(|| AppError::Invalid(format!("no parent dir for {}", path.display())))?;
     fs::create_dir_all(dir).map_err(|e| AppError::io(format!("create {}", dir.display()), e))?;
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
@@ -210,27 +218,44 @@ pub struct Workspace {
 }
 
 impl Workspace {
-    /// Open (and, if needed, create) a workspace folder.
+    /// Open (and, if needed, create) a workspace folder. An older layout is migrated first; if that
+    /// fails the workspace opens read-only (see `read_only`).
     pub fn open(root: impl Into<PathBuf>) -> Result<Self> {
         let ws = Workspace { root: root.into() };
         for d in [ws.root.clone(), ws.root.join("projects"), ws.root.join("themes")] {
             fs::create_dir_all(&d).map_err(|e| AppError::io(format!("create {}", d.display()), e))?;
         }
-        if !ws.root.join("workspace.json").exists() {
-            write_json(&ws.root.join("workspace.json"), &Settings::default())?;
+        if let Ok(mut ro) = READ_ONLY.lock() {
+            ro.retain(|(r, _)| r != &ws.root);
         }
-        ws.ensure_inbox()?;
+        if !ws.root.join("workspace.json").exists() && !ws.root.join("inbox").exists() {
+            let mut s = Settings::default();
+            s.extra.insert("layout".into(), Value::from(migrate::LAYOUT));
+            write_json(&ws.root.join("workspace.json"), &s)?;
+        } else if let Err(why) = migrate::run(&ws.root) {
+            eprintln!("[dreamer] {why}");
+            if let Ok(mut ro) = READ_ONLY.lock() {
+                ro.push((ws.root.clone(), why));
+            }
+            return Ok(ws);
+        }
+        // A workspace always has a project to open.
+        if ws.list_projects()?.is_empty() {
+            ws.create_project("Ideas")?;
+        }
         Ok(ws)
     }
 
-    fn ensure_inbox(&self) -> Result<()> {
-        let dir = self.root.join(INBOX_SLUG);
-        if !dir.join("project.json").exists() {
-            self.init_project_dir(&dir, "Inbox")?;
-        } else {
-            Self::ensure_subdirs(&dir)?;
+    /// Why the workspace is read-only (a failed migration), or None.
+    pub fn read_only(&self) -> Option<String> {
+        read_only_reason(&self.root.join("workspace.json"))
+    }
+
+    fn writable(&self) -> Result<()> {
+        match self.read_only() {
+            Some(why) => Err(AppError::Invalid(format!("Dreamer is read-only right now. {why}"))),
+            None => Ok(()),
         }
-        Ok(())
     }
 
     fn ensure_subdirs(dir: &Path) -> Result<()> {
@@ -253,7 +278,7 @@ impl Workspace {
 
     pub fn project_dir(&self, slug: &str) -> Result<PathBuf> {
         check_slug(slug)?;
-        Ok(if slug == INBOX_SLUG { self.root.join(INBOX_SLUG) } else { self.root.join("projects").join(slug) })
+        Ok(self.root.join("projects").join(slug))
     }
 
     pub(crate) fn existing_project_dir(&self, slug: &str) -> Result<PathBuf> {
@@ -400,17 +425,14 @@ impl Workspace {
                 name: meta.name,
                 theme: meta.theme,
                 card_count: Self::card_count(dir),
-                is_inbox: slug == INBOX_SLUG,
-                design_versions: crate::handoff::read_index(dir).versions.len(),
                 open_questions: meta.handoff_target.as_deref().map(|t| crate::questions::open_count(Path::new(t))).unwrap_or(0),
             },
             created,
         ))
     }
 
-    /// Inbox first, then projects by creation time.
+    /// Projects by creation time.
     pub fn list_projects(&self) -> Result<Vec<ProjectSummary>> {
-        let mut out = vec![self.summary(INBOX_SLUG, &self.root.join(INBOX_SLUG))?.0];
         let mut rest = Vec::new();
         let rd = fs::read_dir(self.root.join("projects"))
             .map_err(|e| AppError::io("list projects", e))?;
@@ -423,11 +445,11 @@ impl Workspace {
             rest.push(self.summary(&slug, &path)?);
         }
         rest.sort_by(|a, b| a.1.cmp(&b.1).then(a.0.slug.cmp(&b.0.slug)));
-        out.extend(rest.into_iter().map(|(s, _)| s));
-        Ok(out)
+        Ok(rest.into_iter().map(|(s, _)| s).collect())
     }
 
     pub fn create_project(&self, name: &str) -> Result<ProjectSummary> {
+        self.writable()?;
         let name = name.trim();
         if name.is_empty() {
             return Err(AppError::Invalid("project name cannot be empty".into()));
@@ -445,7 +467,6 @@ impl Workspace {
         let base = slugify(name);
         for n in 1..1000 {
             let slug = match (n, base.as_str()) {
-                (1, INBOX_SLUG) => continue, // reserved
                 (1, b) => b.to_string(),
                 (n, b) => format!("{b}-{n}"),
             };
@@ -453,7 +474,6 @@ impl Workspace {
             match fs::create_dir(&dir) {
                 Ok(()) => {
                     self.init_project_dir(&dir, name)?;
-                    Self::first_version(&dir)?;
                     return Ok(self.summary(&slug, &dir)?.0);
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
@@ -465,12 +485,13 @@ impl Workspace {
 
     /// Removes a project folder from disk (a user action: Claude has no tool for this). With
     /// `recycle`, the folder goes to the OS Recycle Bin / Trash; if that isn't possible it is
-    /// deleted outright. The Inbox can't be deleted. Returns whether it was recycled.
+    /// deleted outright. The last project can't be deleted. Returns whether it was recycled.
     pub fn delete_project(&self, slug: &str, recycle: bool) -> Result<DeletedProject> {
-        if slug == INBOX_SLUG {
-            return Err(AppError::Invalid("The Inbox can't be deleted.".into()));
-        }
+        self.writable()?;
         let dir = self.existing_project_dir(slug)?;
+        if self.list_projects()?.len() <= 1 {
+            return Err(AppError::Invalid("This is the only project; a workspace keeps at least one.".into()));
+        }
         // Belt and braces: never remove anything that isn't exactly <root>/projects/<slug>.
         if dir.parent() != Some(self.root.join("projects").as_path()) {
             return Err(AppError::Invalid(format!("refusing to delete {}", dir.display())));
@@ -615,9 +636,7 @@ impl Workspace {
             if n.is_empty() {
                 return Err(AppError::Invalid("project name cannot be empty".into()));
             }
-            if slug != INBOX_SLUG {
-                meta.name = n.to_string();
-            }
+            meta.name = n.to_string();
         }
         if let Some(t) = patch.theme {
             meta.theme = if t.is_empty() { None } else { Some(t) };
@@ -644,167 +663,39 @@ impl Workspace {
             }
             meta.handoff_target_confirmed = Some(c.trim().to_string());
         }
-        if let Some(v) = patch.last_version {
-            if !Self::read_folders(&dir)?.iter().any(|f| f.id == v && f.is_version()) {
-                return Err(AppError::NotFound(format!("version {v}")));
-            }
-            meta.last_version = Some(v);
-        }
-        // The root canvas's "Tidy this folder?" hint, dismissed for good.
-        if let Some(off) = patch.nudge_off {
-            if off {
-                meta.extra.insert("nudge_off".into(), Value::Bool(true));
-            } else {
-                meta.extra.remove("nudge_off");
-            }
-        }
         write_json(&dir.join("project.json"), &meta)?;
         Ok(self.summary(slug, &dir)?.0)
     }
 
-    // ----- canvas (canvas.json = the root; canvases/<folder>.json = a folder's) -----
+    // ----- canvas (canvas.json, one per project) -----
 
-    fn canvas_path(dir: &Path, folder: Option<&str>) -> Result<PathBuf> {
-        match folder {
-            None => Ok(dir.join("canvas.json")),
-            Some(f) => {
-                check_id(f)?;
-                Ok(dir.join("canvases").join(format!("{f}.json")))
-            }
-        }
-    }
-
-    fn read_canvas_at(dir: &Path, folder: Option<&str>) -> Result<Canvas> {
-        let mut c: Canvas = read_json_or_default(&Self::canvas_path(dir, folder)?)?;
+    fn read_canvas(dir: &Path) -> Result<Canvas> {
+        let mut c: Canvas = read_json_or_default(&dir.join("canvas.json"))?;
         c.sanitize();
         Ok(c)
     }
 
-    fn read_canvas(dir: &Path) -> Result<Canvas> {
-        Self::read_canvas_at(dir, None)
+    fn write_canvas(dir: &Path, canvas: &Canvas) -> Result<()> {
+        write_json(&dir.join("canvas.json"), canvas)
     }
 
-    fn write_canvas(dir: &Path, folder: Option<&str>, canvas: &Canvas) -> Result<()> {
-        write_json(&Self::canvas_path(dir, folder)?, canvas)
-    }
-
-    fn read_folders(dir: &Path) -> Result<Vec<Folder>> {
-        Ok(read_json_or_default::<FolderIndex>(&dir.join("folders.json"))?.folders)
-    }
-
-    fn write_folders(dir: &Path, folders: &[Folder]) -> Result<()> {
-        write_json(&dir.join("folders.json"), &FolderIndex { folders: folders.to_vec() })
-    }
-
-    /// The canvas a card sits on: `Some(None)` = the root, `Some(Some(f))` = folder f, `None` = nowhere.
-    fn locate_card(dir: &Path, id: &str) -> Result<Option<Option<String>>> {
-        if Self::read_canvas(dir)?.cards.contains_key(id) {
-            return Ok(Some(None));
-        }
-        for f in Self::read_folders(dir)? {
-            if Self::read_canvas_at(dir, Some(&f.id)).is_ok_and(|c| c.cards.contains_key(id)) {
-                return Ok(Some(Some(f.id)));
-            }
-        }
-        Ok(None)
-    }
-
-    pub fn save_canvas(&self, slug: &str, folder: Option<&str>, canvas: &Canvas) -> Result<()> {
+    pub fn save_canvas(&self, slug: &str, canvas: &Canvas) -> Result<()> {
         let dir = self.existing_project_dir(slug)?;
-        if let Some(f) = folder {
-            if !Self::read_folders(&dir)?.iter().any(|x| x.id == f) {
-                return Err(AppError::NotFound(format!("folder {f}")));
-            }
-        }
         let mut canvas = canvas.clone();
         canvas.sanitize();
-        Self::write_canvas(&dir, folder, &canvas)
-    }
-
-    /// Several canvases (key "" = the root) and optionally the whole folder list in one call, so a
-    /// move between canvases is one write. Folders that left the list lose their canvas file.
-    pub fn save_layout(&self, slug: &str, layout: LayoutWrite) -> Result<()> {
-        let dir = self.existing_project_dir(slug)?;
-        if let Some(list) = &layout.folders {
-            for f in list {
-                check_id(&f.id)?;
-            }
-        }
-        let known: std::collections::HashSet<String> = match &layout.folders {
-            Some(list) => list.iter().map(|f| f.id.clone()).collect(),
-            None => Self::read_folders(&dir)?.into_iter().map(|f| f.id).collect(),
-        };
-        for k in layout.canvases.keys() {
-            if !k.is_empty() && !known.contains(k) {
-                return Err(AppError::NotFound(format!("folder {k}")));
-            }
-        }
-        for (k, c) in &layout.canvases {
-            let mut c = c.clone();
-            c.sanitize();
-            Self::write_canvas(&dir, (!k.is_empty()).then_some(k.as_str()), &c)?;
-        }
-        if let Some(list) = &layout.folders {
-            let gone: Vec<String> = Self::read_folders(&dir)?.into_iter().map(|f| f.id).filter(|id| !known.contains(id)).collect();
-            Self::write_folders(&dir, list)?;
-            for id in gone {
-                let _ = fs::remove_file(Self::canvas_path(&dir, Some(&id))?);
-            }
-        }
-        Ok(())
+        Self::write_canvas(&dir, &canvas)
     }
 
     /// First free grid slot, so new cards never stack exactly on top of each other.
     fn next_free_pos(canvas: &Canvas) -> Pos {
         for k in 0usize.. {
             let p = Pos::at((k % 4) as f64 * GRID_DX, (k / 4) as f64 * GRID_DY);
-            let taken = canvas.cards.values().chain(canvas.folders.values()).any(|q| (q.x - p.x).abs() < GRID_DX * 0.5 && (q.y - p.y).abs() < GRID_DY * 0.5);
+            let taken = canvas.cards.values().any(|q| (q.x - p.x).abs() < GRID_DX * 0.5 && (q.y - p.y).abs() < GRID_DY * 0.5);
             if !taken {
                 return p;
             }
         }
         unreachable!()
-    }
-
-    /// Folders with their parents repaired: a duplicate or invalid id is dropped; a missing parent,
-    /// or a parent chain that loops, puts the folder at the root.
-    fn clean_folders(mut folders: Vec<Folder>) -> (Vec<Folder>, bool) {
-        let mut changed = false;
-        let mut seen = std::collections::HashSet::new();
-        let before = folders.len();
-        folders.retain(|f| check_id(&f.id).is_ok() && seen.insert(f.id.clone()));
-        changed |= folders.len() != before;
-        let parents: BTreeMap<String, Option<String>> = folders.iter().map(|f| (f.id.clone(), f.parent.clone())).collect();
-        for f in &mut folders {
-            let mut cur = f.parent.clone();
-            let mut steps = 0;
-            let mut ok = true;
-            while let Some(c) = cur {
-                if c == f.id || steps > parents.len() || !parents.contains_key(&c) {
-                    ok = false;
-                    break;
-                }
-                cur = parents[&c].clone();
-                steps += 1;
-            }
-            if !ok {
-                f.parent = None;
-                changed = true;
-            }
-        }
-        (folders, changed)
-    }
-
-    /// The ids of `id` and every folder below it.
-    fn subtree(folders: &[Folder], id: &str) -> Vec<String> {
-        let mut out = vec![id.to_string()];
-        let mut i = 0;
-        while i < out.len() {
-            let cur = out[i].clone();
-            out.extend(folders.iter().filter(|f| f.parent.as_deref() == Some(cur.as_str())).map(|f| f.id.clone()));
-            i += 1;
-        }
-        out
     }
 
     // ----- cards -----
@@ -851,132 +742,26 @@ impl Workspace {
         (cards, warnings)
     }
 
-    /// Load everything the canvas needs. Cards created outside the app get a position on the root
-    /// canvas; a card on two canvases keeps the first (root, then folders in order).
+    /// Load everything the canvas needs. Cards created outside the app get a position.
     pub fn load_project(&self, slug: &str) -> Result<ProjectData> {
         let dir = self.existing_project_dir(slug)?;
-        // The one-time move to versions: silent for a flat root; with top-level folders the UI asks.
-        let version_migration = Self::pending_migration(slug, &Self::read_folders(&dir)?);
-        if version_migration.is_none() {
-            self.migrate_versions(slug, None)?;
-        }
         let meta = read_json_or_default_meta(&dir.join("project.json"), slug)?;
-        let (folders, folders_changed) = Self::clean_folders(Self::read_folders(&dir)?);
-        // Cards with no place go into the open version (the root only without versions).
-        let home = Self::open_version_in(&dir, &folders).map(|f| f.id);
         let mut canvas = Self::read_canvas(&dir)?;
-        let mut canvases: BTreeMap<String, Canvas> = BTreeMap::new();
-        for f in &folders {
-            canvases.insert(f.id.clone(), Self::read_canvas_at(&dir, Some(&f.id))?);
-        }
         let (cards, warnings) = Self::list_cards_in(&dir);
-        let before_root = canvas.clone();
-        let before: BTreeMap<String, Canvas> = canvases.clone();
-
-        // Child folders appear exactly on their parent's canvas.
-        let parent_of: BTreeMap<String, Option<String>> = folders.iter().map(|f| (f.id.clone(), f.parent.clone())).collect();
-        canvas.folders.retain(|id, _| parent_of.get(id) == Some(&None));
-        for (key, c) in canvases.iter_mut() {
-            c.folders.retain(|id, _| parent_of.get(id).is_some_and(|p| p.as_deref() == Some(key.as_str())));
-        }
-        for f in &folders {
-            let target = match &f.parent {
-                None => &mut canvas,
-                Some(p) => canvases.get_mut(p).expect("clean_folders keeps parents real"),
-            };
-            if !target.folders.contains_key(&f.id) {
-                let p = Self::next_free_pos(target);
-                target.folders.insert(f.id.clone(), p);
-            }
-        }
-
+        let before = canvas.clone();
         let live: std::collections::HashSet<&str> = cards.iter().map(|c| c.meta.id.as_str()).collect();
-        let mut placed: std::collections::HashSet<String> = std::collections::HashSet::new();
-        canvas.cards.retain(|id, _| live.contains(id.as_str()) && placed.insert(id.clone()));
-        for f in &folders {
-            if let Some(c) = canvases.get_mut(&f.id) {
-                c.cards.retain(|id, _| live.contains(id.as_str()) && placed.insert(id.clone()));
-            }
-        }
+        canvas.cards.retain(|id, _| live.contains(id.as_str()));
         for c in &cards {
-            if !placed.contains(&c.meta.id) {
-                let target = match home.as_ref().and_then(|h| canvases.get_mut(h)) {
-                    Some(t) => t,
-                    None => &mut canvas,
-                };
-                let p = Self::next_free_pos(target);
-                target.cards.insert(c.meta.id.clone(), p);
+            if !canvas.cards.contains_key(&c.meta.id) {
+                let p = Self::next_free_pos(&canvas);
+                canvas.cards.insert(c.meta.id.clone(), p);
             }
         }
-        if canvas != before_root {
-            Self::write_canvas(&dir, None, &canvas)?;
-        }
-        for (k, c) in &canvases {
-            if before.get(k) != Some(c) {
-                Self::write_canvas(&dir, Some(k), c)?;
-            }
-        }
-        if folders_changed {
-            Self::write_folders(&dir, &folders)?;
+        if canvas != before && self.read_only().is_none() {
+            Self::write_canvas(&dir, &canvas)?;
         }
         let proposals = Self::read_proposals(&dir, &live);
-        Ok(ProjectData { slug: slug.into(), is_inbox: slug == INBOX_SLUG, meta, canvas, folders, canvases, cards, proposals, warnings, version_migration })
-    }
-
-    /// "Parent / Child" path of every folder by id.
-    pub fn folder_paths(folders: &[Folder]) -> BTreeMap<String, String> {
-        let by_id: BTreeMap<&str, &Folder> = folders.iter().map(|f| (f.id.as_str(), f)).collect();
-        let name = |f: &Folder| if f.title.trim().is_empty() { "Untitled folder".to_string() } else { f.title.trim().to_string() };
-        folders
-            .iter()
-            .map(|f| {
-                let mut parts = vec![name(f)];
-                let mut cur = f.parent.as_deref();
-                let mut guard = 0;
-                while let Some(p) = cur.and_then(|p| by_id.get(p)) {
-                    parts.push(name(p));
-                    cur = p.parent.as_deref();
-                    guard += 1;
-                    if guard > folders.len() {
-                        break;
-                    }
-                }
-                parts.reverse();
-                (f.id.clone(), parts.join(" / "))
-            })
-            .collect()
-    }
-
-    /// Card id -> id of the folder it sits in (cards on the root canvas are left out).
-    pub fn card_folders(&self, slug: &str) -> Result<std::collections::HashMap<String, String>> {
-        let dir = self.existing_project_dir(slug)?;
-        let mut out = std::collections::HashMap::new();
-        for f in Self::read_folders(&dir)? {
-            for id in Self::read_canvas_at(&dir, Some(&f.id))?.cards.into_keys() {
-                out.entry(id).or_insert_with(|| f.id.clone());
-            }
-        }
-        Ok(out)
-    }
-
-    /// Card id -> "Folder / Subfolder" for every card inside a folder.
-    pub fn card_folder_paths(&self, slug: &str) -> Result<std::collections::HashMap<String, String>> {
-        let paths = Self::folder_paths(&self.folders(slug)?);
-        Ok(self.card_folders(slug)?.into_iter().filter_map(|(c, f)| paths.get(&f).map(|p| (c, p.clone()))).collect())
-    }
-
-    /// Fills `folder_path` on search hits.
-    pub fn annotate_hits(&self, hits: &mut [crate::search::SearchHit]) {
-        let mut cache: std::collections::HashMap<String, std::collections::HashMap<String, String>> = std::collections::HashMap::new();
-        for h in hits {
-            let m = cache.entry(h.project.clone()).or_insert_with(|| self.card_folder_paths(&h.project).unwrap_or_default());
-            h.folder_path = m.get(&h.id).cloned();
-        }
-    }
-
-    /// The project's folders (as stored).
-    pub fn folders(&self, slug: &str) -> Result<Vec<Folder>> {
-        Self::read_folders(&self.existing_project_dir(slug)?)
+        Ok(ProjectData { slug: slug.into(), meta, canvas, cards, proposals, warnings })
     }
 
     // ----- Claude edit proposals (cards/<id>.proposal.json, never inside the card file) -----
@@ -1030,22 +815,16 @@ impl Workspace {
     /// The title of the frame each card is in (its centre inside the frame; topmost frame wins).
     /// Cards with no position or no frame are left out.
     pub fn card_frames(&self, slug: &str) -> Result<std::collections::HashMap<String, String>> {
-        let dir = self.existing_project_dir(slug)?;
-        let mut all = vec![Self::read_canvas(&dir)?];
-        for f in Self::read_folders(&dir)? {
-            all.push(Self::read_canvas_at(&dir, Some(&f.id))?);
-        }
+        let canvas = Self::read_canvas(&self.existing_project_dir(slug)?)?;
         let mut out = std::collections::HashMap::new();
-        for canvas in &all {
-            let mut frames: Vec<&crate::model::Frame> = canvas.frames.values().collect();
-            frames.sort_by(|a, b| b.z.cmp(&a.z));
-            for (id, p) in &canvas.cards {
-                // Defaults mirror CARD_W / CARD_H in src/components/cardGeometry.ts.
-                let (cx, cy) = (p.x + p.w.unwrap_or(236.0) / 2.0, p.y + p.h.unwrap_or(150.0) / 2.0);
-                if let Some(f) = frames.iter().find(|f| cx >= f.x && cx <= f.x + f.w && cy >= f.y && cy <= f.y + f.h) {
-                    let title = if f.title.trim().is_empty() { "Untitled frame".to_string() } else { f.title.trim().to_string() };
-                    out.insert(id.clone(), title);
-                }
+        let mut frames: Vec<&crate::model::Frame> = canvas.frames.values().collect();
+        frames.sort_by(|a, b| b.z.cmp(&a.z));
+        for (id, p) in &canvas.cards {
+            // Defaults mirror CARD_W / CARD_H in src/components/cardGeometry.ts.
+            let (cx, cy) = (p.x + p.w.unwrap_or(236.0) / 2.0, p.y + p.h.unwrap_or(150.0) / 2.0);
+            if let Some(f) = frames.iter().find(|f| cx >= f.x && cx <= f.x + f.w && cy >= f.y && cy <= f.y + f.h) {
+                let title = if f.title.trim().is_empty() { "Untitled frame".to_string() } else { f.title.trim().to_string() };
+                out.insert(id.clone(), title);
             }
         }
         Ok(out)
@@ -1053,13 +832,12 @@ impl Workspace {
 
     /// `None`/empty = no role. Known roles are "tech" and "decisions"; only one live card per
     /// project may hold each.
-    /// `version`: the version the card is (or will be) in; roles are unique per version.
-    fn check_role(dir: &Path, role: Option<String>, except: Option<&str>, version: Option<&str>) -> Result<Option<String>> {
+    fn check_role(dir: &Path, role: Option<String>, except: Option<&str>) -> Result<Option<String>> {
         let Some(role) = role.map(|r| r.trim().to_lowercase()).filter(|r| !r.is_empty()) else { return Ok(None) };
         if !ROLES.contains(&role.as_str()) {
             return Err(AppError::Invalid(format!("unknown card role {role:?}")));
         }
-        if let Some(other) = Self::role_card(dir, &role, except, version) {
+        if let Some(other) = Self::role_card(dir, &role, except) {
             let what = if role == ROLE_TECH { "a Tech & constraints card" } else if role == ROLE_DECISIONS { "a Project decisions card" } else { "a From Claude Code card" };
             return Err(AppError::Invalid(format!("this project already has {what} ({other})")));
         }
@@ -1067,19 +845,8 @@ impl Workspace {
     }
 
     /// The id of the live card holding `role`, other than `except`.
-    /// `version`: only that version's cards count (anywhere when None).
-    fn role_card(dir: &Path, role: &str, except: Option<&str>, version: Option<&str>) -> Option<String> {
-        let of = Self::card_versions_in(dir).unwrap_or_default();
-        Self::list_cards_in(dir)
-            .0
-            .into_iter()
-            .find(|c| c.meta.role.as_deref() == Some(role) && Some(c.meta.id.as_str()) != except && (version.is_none() || of.get(&c.meta.id).map(String::as_str) == version))
-            .map(|c| c.meta.id)
-    }
-
-    /// The version a card is in (None outside versions).
-    fn version_of_card(dir: &Path, id: &str) -> Option<String> {
-        Self::card_versions_in(dir).ok()?.remove(id)
+    fn role_card(dir: &Path, role: &str, except: Option<&str>) -> Option<String> {
+        Self::list_cards_in(dir).0.into_iter().find(|c| c.meta.role.as_deref() == Some(role) && Some(c.meta.id.as_str()) != except).map(|c| c.meta.id)
     }
 
     fn check_attachments(list: Vec<Attachment>) -> Result<Vec<Attachment>> {
@@ -1107,11 +874,7 @@ impl Workspace {
 
     pub fn create_card(&self, slug: &str, new: NewCard) -> Result<Card> {
         let dir = self.existing_project_dir(slug)?;
-        let all_folders = Self::read_folders(&dir)?;
-        // No folder = the open version (the root only in a project without versions).
-        let folder = new.folder.clone().filter(|f| !f.is_empty()).or_else(|| Self::open_version_in(&dir, &all_folders).map(|f| f.id));
-        let in_version = folder.as_deref().and_then(|f| top_version(&all_folders, f));
-        let role = Self::check_role(&dir, new.role, None, in_version.as_deref())?;
+        let role = Self::check_role(&dir, new.role, None)?;
         let attachments = Self::check_attachments(new.attachments.unwrap_or_default())?;
         let id = ulid::Ulid::generate().to_string();
         let stamp = now();
@@ -1137,18 +900,12 @@ impl Workspace {
                 links: new.links.unwrap_or_default(),
                 branch: new.branch,
                 extra: new.merged_from.map(|ids| ("merged_from".to_string(), serde_json::json!(ids))).into_iter().chain(new.build.map(|b| ("build".to_string(), b))).collect(),
-                origin: new.origin.filter(|o| check_id(&o.card).is_ok()),
                 import: new.import,
             },
             body: norm_body(&new.body.unwrap_or_default()),
         };
-        if let Some(f) = &folder {
-            if !all_folders.iter().any(|x| &x.id == f) {
-                return Err(AppError::NotFound(format!("folder {f}")));
-            }
-        }
         Self::write_card_file(&Self::card_path(&dir, &id)?, &card)?;
-        let mut canvas = Self::read_canvas_at(&dir, folder.as_deref())?;
+        let mut canvas = Self::read_canvas(&dir)?;
         let mut pos = match (new.x, new.y) {
             (Some(x), Some(y)) => Pos::at(x, y),
             _ => Self::next_free_pos(&canvas),
@@ -1156,7 +913,7 @@ impl Workspace {
         // New cards (including Claude's ghosts) land on top of the stack.
         pos.z = Some(canvas.max_z() + 1);
         canvas.cards.insert(id, pos);
-        Self::write_canvas(&dir, folder.as_deref(), &canvas)?;
+        Self::write_canvas(&dir, &canvas)?;
         Ok(card)
     }
 
@@ -1196,7 +953,7 @@ impl Workspace {
             card.meta.kind = k;
         }
         if let Some(r) = patch.role {
-            card.meta.role = Self::check_role(&dir, Some(r), Some(id), Self::version_of_card(&dir, id).as_deref())?;
+            card.meta.role = Self::check_role(&dir, Some(r), Some(id))?;
         }
         if let Some(c) = patch.color {
             card.meta.color = Self::clean_color(Some(c));
@@ -1445,11 +1202,11 @@ impl Workspace {
     }
 
     pub fn trash_card(&self, slug: &str, id: &str, reason: &str) -> Result<TrashItem> {
+        self.writable()?;
         let dir = self.existing_project_dir(slug)?;
         let src = Self::card_path(&dir, id)?;
         let card = Self::read_card_file(&src, id)?;
-        let folder = Self::locate_card(&dir, id)?.flatten();
-        let mut canvas = Self::read_canvas_at(&dir, folder.as_deref())?;
+        let mut canvas = Self::read_canvas(&dir)?;
         let item = TrashItem {
             id: id.to_string(),
             title: card.meta.title.clone(),
@@ -1457,9 +1214,6 @@ impl Workspace {
             reason: reason.to_string(),
             deleted_at: now(),
             pos: canvas.cards.get(id).copied(),
-            kind: None,
-            folder: folder.clone(),
-            count: None,
         };
         let tdir = Self::trash_dir(&dir);
         fs::create_dir_all(&tdir).map_err(|e| AppError::io("create trash", e))?;
@@ -1474,125 +1228,9 @@ impl Workspace {
         idx.items.push(item.clone());
         Self::write_trash(&dir, &idx)?;
         if canvas.cards.remove(id).is_some() {
-            Self::write_canvas(&dir, folder.as_deref(), &canvas)?;
+            Self::write_canvas(&dir, &canvas)?;
         }
         Ok(item)
-    }
-
-    fn folder_bundle_path(dir: &Path, id: &str) -> Result<PathBuf> {
-        check_id(id)?;
-        Ok(Self::trash_dir(dir).join(format!("{id}.folder.json")))
-    }
-
-    /// A folder and its whole subtree (sub-folders, their canvases, every card on them) go to the
-    /// Trash as one item. Restoring puts it all back where it was.
-    pub fn trash_folder(&self, slug: &str, id: &str) -> Result<TrashItem> {
-        let dir = self.existing_project_dir(slug)?;
-        let mut folders = Self::read_folders(&dir)?;
-        let folder = folders.iter().find(|f| f.id == id).cloned().ok_or_else(|| AppError::NotFound(format!("folder {id}")))?;
-        if folder.is_version() && folders.iter().filter(|f| f.is_version()).count() == 1 {
-            return Err(AppError::Invalid("This is the project's only version; it can't be deleted.".into()));
-        }
-        let ids = Self::subtree(&folders, id);
-        let mut canvases = BTreeMap::new();
-        let mut cards: Vec<String> = Vec::new();
-        for f in &ids {
-            let c = Self::read_canvas_at(&dir, Some(f))?;
-            cards.extend(c.cards.keys().cloned());
-            canvases.insert(f.clone(), c);
-        }
-        let parent = folder.parent.clone();
-        let mut parent_canvas = Self::read_canvas_at(&dir, parent.as_deref())?;
-        let pos = parent_canvas.folders.get(id).copied();
-        let tdir = Self::trash_dir(&dir);
-        fs::create_dir_all(&tdir).map_err(|e| AppError::io("create trash", e))?;
-        let subtree: Vec<Folder> = folders.iter().filter(|f| ids.contains(&f.id)).cloned().collect();
-        write_json(&Self::folder_bundle_path(&dir, id)?, &serde_json::json!({ "folders": subtree, "canvases": canvases, "cards": cards }))?;
-        let mut moved = 0;
-        for c in &cards {
-            let src = Self::card_path(&dir, c)?;
-            if !src.is_file() {
-                continue;
-            }
-            fs::rename(&src, tdir.join(format!("{c}.md"))).map_err(|e| AppError::io(format!("move card {c} to trash"), e))?;
-            let variants = dir.join("cards").join(format!("{c}.variants"));
-            if variants.is_dir() {
-                let _ = fs::rename(&variants, tdir.join(format!("{c}.variants")));
-            }
-            let _ = fs::remove_file(Self::proposal_path(&dir, c)?);
-            moved += 1;
-        }
-        let item = TrashItem {
-            id: id.to_string(),
-            title: if folder.title.trim().is_empty() { "Untitled folder".into() } else { folder.title.clone() },
-            stage: Stage::default(),
-            reason: "deleted".into(),
-            deleted_at: now(),
-            pos,
-            kind: Some("folder".into()),
-            folder: parent.clone(),
-            count: Some(moved),
-        };
-        let mut idx = Self::read_trash(&dir)?;
-        idx.items.retain(|i| i.id != id);
-        idx.items.push(item.clone());
-        Self::write_trash(&dir, &idx)?;
-        parent_canvas.folders.remove(id);
-        Self::write_canvas(&dir, parent.as_deref(), &parent_canvas)?;
-        folders.retain(|f| !ids.contains(&f.id));
-        Self::write_folders(&dir, &folders)?;
-        for f in &ids {
-            let _ = fs::remove_file(Self::canvas_path(&dir, Some(f))?);
-        }
-        // The open version went: the newest one left opens.
-        let mut meta = read_json_or_default_meta(&dir.join("project.json"), slug)?;
-        if meta.last_version.as_deref() == Some(id) {
-            meta.last_version = versions_of(&folders).last().map(|f| f.id.clone());
-            write_json(&dir.join("project.json"), &meta)?;
-        }
-        Ok(item)
-    }
-
-    fn restore_folder(&self, dir: &Path, idx: &mut TrashIndex, at: usize) -> Result<()> {
-        let item = idx.items[at].clone();
-        let text = fs::read_to_string(Self::folder_bundle_path(dir, &item.id)?).map_err(|e| AppError::io("read the trashed folder", e))?;
-        let bundle: Value = serde_json::from_str(&text).map_err(|e| AppError::Parse { context: "trashed folder".into(), message: e.to_string() })?;
-        let mut subtree: Vec<Folder> = serde_json::from_value(bundle["folders"].clone()).unwrap_or_default();
-        let canvases: BTreeMap<String, Canvas> = serde_json::from_value(bundle["canvases"].clone()).unwrap_or_default();
-        let cards: Vec<String> = serde_json::from_value(bundle["cards"].clone()).unwrap_or_default();
-        let mut folders = Self::read_folders(dir)?;
-        if folders.iter().any(|f| subtree.iter().any(|s| s.id == f.id)) {
-            return Err(AppError::Invalid(format!("folder {} already exists", item.id)));
-        }
-        // Its old parent may be gone meanwhile: then it comes back at the root.
-        let parent = item.folder.clone().filter(|p| folders.iter().any(|f| &f.id == p));
-        if let Some(top) = subtree.iter_mut().find(|f| f.id == item.id) {
-            top.parent = parent.clone();
-        }
-        let tdir = Self::trash_dir(dir);
-        for c in &cards {
-            let src = tdir.join(format!("{c}.md"));
-            let dest = Self::card_path(dir, c)?;
-            if src.is_file() && !dest.exists() {
-                fs::rename(&src, &dest).map_err(|e| AppError::io(format!("restore card {c}"), e))?;
-                let tv = tdir.join(format!("{c}.variants"));
-                if tv.is_dir() {
-                    let _ = fs::rename(&tv, dir.join("cards").join(format!("{c}.variants")));
-                }
-            }
-        }
-        for (k, c) in &canvases {
-            Self::write_canvas(dir, Some(k), c)?;
-        }
-        folders.extend(subtree);
-        Self::write_folders(dir, &folders)?;
-        let mut pc = Self::read_canvas_at(dir, parent.as_deref())?;
-        let pos = if parent == item.folder { item.pos } else { None }.unwrap_or_else(|| Self::next_free_pos(&pc));
-        pc.folders.insert(item.id.clone(), pos);
-        Self::write_canvas(dir, parent.as_deref(), &pc)?;
-        let _ = fs::remove_file(Self::folder_bundle_path(dir, &item.id)?);
-        idx.items.remove(at);
-        Self::write_trash(dir, idx)
     }
 
     pub fn list_trash(&self, slug: &str) -> Result<Vec<TrashItem>> {
@@ -1600,23 +1238,13 @@ impl Workspace {
         Ok(Self::read_trash(&dir)?.items)
     }
 
-    /// Restore an ordinary deleted card to its old position.
-    /// Restores a trashed card or folder; returns the card, or `{"folder": id}`.
+    /// Restores a trashed card; returns it.
     pub fn restore_item(&self, slug: &str, id: &str) -> Result<Value> {
-        let dir = self.existing_project_dir(slug)?;
-        check_id(id)?;
-        let mut idx = Self::read_trash(&dir)?;
-        let Some(at) = idx.items.iter().position(|i| i.id == id) else {
-            return Err(AppError::NotFound(format!("trash item {id}")));
-        };
-        if idx.items[at].kind.as_deref() == Some("folder") {
-            self.restore_folder(&dir, &mut idx, at)?;
-            return Ok(serde_json::json!({ "folder": id }));
-        }
         serde_json::to_value(self.restore_card(slug, id)?).map_err(|e| AppError::Parse { context: "card".into(), message: e.to_string() })
     }
 
     pub fn restore_card(&self, slug: &str, id: &str) -> Result<Card> {
+        self.writable()?;
         let dir = self.existing_project_dir(slug)?;
         check_id(id)?;
         let mut idx = Self::read_trash(&dir)?;
@@ -1624,9 +1252,6 @@ impl Workspace {
             return Err(AppError::NotFound(format!("trash item {id}")));
         };
         let item = idx.items[pos_in_idx].clone();
-        if item.kind.as_deref() == Some("folder") {
-            return Err(AppError::Invalid(format!("{id} is a folder")));
-        }
         let tdir = Self::trash_dir(&dir);
         let dest = Self::card_path(&dir, id)?;
         if dest.exists() {
@@ -1637,18 +1262,15 @@ impl Workspace {
         if tv.is_dir() {
             fs::rename(&tv, dir.join("cards").join(format!("{id}.variants"))).map_err(|e| AppError::io("restore variants", e))?;
         }
-        // Back onto the canvas it was on (the root when that folder is gone).
-        let all = Self::read_folders(&dir)?;
-        let folder = item.folder.clone().filter(|f| all.iter().any(|x| &x.id == f)).or_else(|| Self::open_version_in(&dir, &all).map(|f| f.id));
-        let mut canvas = Self::read_canvas_at(&dir, folder.as_deref())?;
-        let pos = if folder == item.folder { item.pos } else { None }.unwrap_or_else(|| Self::next_free_pos(&canvas));
+        let mut canvas = Self::read_canvas(&dir)?;
+        let pos = item.pos.unwrap_or_else(|| Self::next_free_pos(&canvas));
         canvas.cards.insert(id.to_string(), pos);
-        Self::write_canvas(&dir, folder.as_deref(), &canvas)?;
+        Self::write_canvas(&dir, &canvas)?;
         idx.items.remove(pos_in_idx);
         Self::write_trash(&dir, &idx)?;
         let mut card = Self::read_card_file(&dest, id)?;
         // A restored role card yields its role if another card took it meanwhile.
-        if card.meta.role.as_deref().is_some_and(|r| Self::role_card(&dir, r, Some(id), Self::version_of_card(&dir, id).as_deref()).is_some()) {
+        if card.meta.role.as_deref().is_some_and(|r| Self::role_card(&dir, r, Some(id)).is_some()) {
             card.meta.role = None;
             Self::write_card_file(&dest, &card)?;
         }
@@ -1657,6 +1279,7 @@ impl Workspace {
 
     /// Permanently remove everything in the Trash. Callers must have confirmed with the user.
     pub fn empty_trash(&self, slug: &str) -> Result<usize> {
+        self.writable()?;
         let dir = self.existing_project_dir(slug)?;
         let tdir = Self::trash_dir(&dir);
         let mut n = 0;
@@ -1723,6 +1346,9 @@ mod tests {
     use serde_json::json;
     use tempfile::TempDir;
 
+    /// The project a fresh workspace starts with.
+    const P: &str = "ideas";
+
     fn ws() -> (TempDir, Workspace) {
         let dir = TempDir::new().unwrap();
         let ws = Workspace::open(dir.path().join("Dreamer")).unwrap();
@@ -1734,22 +1360,23 @@ mod tests {
     }
 
     #[test]
-    fn open_creates_layout_and_inbox() {
+    fn open_creates_layout_and_a_first_project() {
         let (_d, ws) = ws();
         assert!(ws.root.join("workspace.json").is_file());
-        assert!(ws.root.join("projects").is_dir());
         assert!(ws.root.join("themes").is_dir());
+        assert!(!ws.root.join("inbox").exists());
+        let dir = ws.root.join("projects").join(P);
         for sub in ["cards", "media", "trash"] {
-            assert!(ws.root.join("inbox").join(sub).is_dir(), "{sub}");
+            assert!(dir.join(sub).is_dir(), "{sub}");
         }
-        assert!(ws.root.join("inbox/project.json").is_file());
-        assert!(ws.root.join("inbox/canvas.json").is_file());
+        assert!(dir.join("project.json").is_file() && dir.join("canvas.json").is_file());
+        assert_eq!(ws.get_settings().unwrap().extra.get("layout"), Some(&json!(2)), "a new workspace needs no migration");
         let projects = ws.list_projects().unwrap();
         assert_eq!(projects.len(), 1);
-        assert!(projects[0].is_inbox);
         // reopening keeps existing data
-        ws.create_card(INBOX_SLUG, new_card("keep me")).unwrap();
+        ws.create_card(P, new_card("keep me")).unwrap();
         let again = Workspace::open(&ws.root).unwrap();
+        assert_eq!(again.list_projects().unwrap().len(), 1);
         assert_eq!(again.list_projects().unwrap()[0].card_count, 1);
     }
 
@@ -1801,29 +1428,23 @@ mod tests {
     }
 
     #[test]
-    fn projects_get_unique_slugs_and_inbox_is_reserved() {
+    fn projects_get_unique_slugs() {
         let (_d, ws) = ws();
         let a = ws.create_project("Fish-punk fishing!").unwrap();
         // The same name twice is refused (item 8); a different name with the same slug gets -2.
         assert!(ws.create_project("Fish-punk fishing!").is_err());
         let b = ws.create_project("Fish punk, fishing").unwrap();
-        // "Inbox" itself is taken by name; "Inbox!" slugifies to the reserved "inbox".
-        assert!(ws.create_project("Inbox").is_err());
-        let i = ws.create_project("Inbox!").unwrap();
+        // "Inbox" is an ordinary name now.
+        let i = ws.create_project("Inbox").unwrap();
         assert_eq!(a.slug, "fish-punk-fishing");
         assert_eq!(b.slug, "fish-punk-fishing-2");
-        assert_eq!(i.slug, "inbox-2");
+        assert_eq!(i.slug, "inbox");
         assert!(ws.create_project("   ").is_err());
-        let list = ws.list_projects().unwrap();
-        assert!(list[0].is_inbox);
-        assert_eq!(list.len(), 4);
+        assert_eq!(ws.list_projects().unwrap().len(), 4);
         let u = ws.update_project(&a.slug, ProjectPatch { name: Some("Renamed".into()), theme: Some("iridescent".into()), ..Default::default() }).unwrap();
         assert_eq!((u.name.as_str(), u.theme.as_deref()), ("Renamed", Some("iridescent")));
         let u = ws.update_project(&a.slug, ProjectPatch { theme: Some(String::new()), ..Default::default() }).unwrap();
         assert_eq!(u.theme, None);
-        // inbox cannot be renamed
-        let u = ws.update_project(INBOX_SLUG, ProjectPatch { name: Some("Nope".into()), ..Default::default() }).unwrap();
-        assert_eq!(u.name, "Inbox");
     }
 
     #[test]
@@ -1833,7 +1454,7 @@ mod tests {
             assert!(ws.load_project(bad).is_err(), "{bad:?}");
         }
         for bad in ["../x", "a/b", "", "a.b", "a b"] {
-            assert!(ws.read_card(INBOX_SLUG, bad).is_err(), "{bad:?}");
+            assert!(ws.read_card(P, bad).is_err(), "{bad:?}");
         }
         assert!(matches!(ws.load_project("nope"), Err(AppError::NotFound(_))));
     }
@@ -1843,7 +1464,7 @@ mod tests {
         let (_d, ws) = ws();
         let c = ws
             .create_card(
-                INBOX_SLUG,
+                P,
                 NewCard {
                     title: Some("Harpoon rod".into()),
                     body: Some("# Notes\n\nTwo moods.\n\n---\n\nA rule above.".into()),
@@ -1856,7 +1477,7 @@ mod tests {
                 },
             )
             .unwrap();
-        let text = fs::read_to_string(ws.root.join(format!("inbox/cards/{}.md", c.meta.id))).unwrap();
+        let text = fs::read_to_string(ws.root.join(format!("projects/ideas/cards/{}.md", c.meta.id))).unwrap();
         assert!(text.starts_with("---\nid: "), "{text}");
         assert!(text.contains("stage: lucid"));
         assert!(text.contains("source: claude"));
@@ -1864,7 +1485,7 @@ mod tests {
         assert!(text.contains("- to: 01OTHER\n  label: feeds"));
         assert!(!text.contains("branch"), "branch omitted when unset");
         assert!(!text.contains('\r'));
-        let back = ws.read_card(INBOX_SLUG, &c.meta.id).unwrap();
+        let back = ws.read_card(P, &c.meta.id).unwrap();
         assert_eq!(back, c);
         assert!(back.body.contains("A rule above."), "a --- rule in the body must not end the frontmatter");
         assert_eq!(c.meta.id.len(), 26, "ULID");
@@ -1898,24 +1519,24 @@ mod tests {
     #[test]
     fn update_card_patches_and_preserves_the_rest() {
         let (_d, ws) = ws();
-        let c = ws.create_card(INBOX_SLUG, NewCard { title: Some("A".into()), body: Some("body".into()), tags: Some(vec!["t".into()]), ..Default::default() }).unwrap();
-        let u = ws.update_card(INBOX_SLUG, &c.meta.id, CardPatch { stage: Some(Stage::Dream), title: Some("  B ".into()), ..Default::default() }).unwrap();
+        let c = ws.create_card(P, NewCard { title: Some("A".into()), body: Some("body".into()), tags: Some(vec!["t".into()]), ..Default::default() }).unwrap();
+        let u = ws.update_card(P, &c.meta.id, CardPatch { stage: Some(Stage::Dream), title: Some("  B ".into()), ..Default::default() }).unwrap();
         assert_eq!(u.meta.title, "B");
         assert_eq!(u.meta.stage, Stage::Dream);
         assert_eq!(u.body, "body");
         assert_eq!(u.meta.tags, vec!["t"]);
         assert_eq!(u.meta.created, c.meta.created);
         assert!(u.meta.updated >= c.meta.updated);
-        assert!(matches!(ws.update_card(INBOX_SLUG, "01MISSING", CardPatch::default()), Err(AppError::NotFound(_))));
+        assert!(matches!(ws.update_card(P, "01MISSING", CardPatch::default()), Err(AppError::NotFound(_))));
     }
 
     #[test]
     fn new_cards_are_placed_without_overlap_and_explicit_positions_are_kept() {
         let (_d, ws) = ws();
-        let a = ws.create_card(INBOX_SLUG, new_card("a")).unwrap();
-        let b = ws.create_card(INBOX_SLUG, new_card("b")).unwrap();
-        let c = ws.create_card(INBOX_SLUG, NewCard { x: Some(900.0), y: Some(-40.0), ..new_card("c") }).unwrap();
-        let data = ws.load_project(INBOX_SLUG).unwrap();
+        let a = ws.create_card(P, new_card("a")).unwrap();
+        let b = ws.create_card(P, new_card("b")).unwrap();
+        let c = ws.create_card(P, NewCard { x: Some(900.0), y: Some(-40.0), ..new_card("c") }).unwrap();
+        let data = ws.load_project(P).unwrap();
         let pa = data.canvas.cards[&a.meta.id];
         let pb = data.canvas.cards[&b.meta.id];
         assert_ne!(pa, pb);
@@ -1926,47 +1547,47 @@ mod tests {
     #[test]
     fn externally_added_and_removed_cards_are_reconciled_on_load() {
         let (_d, ws) = ws();
-        let a = ws.create_card(INBOX_SLUG, new_card("a")).unwrap();
+        let a = ws.create_card(P, new_card("a")).unwrap();
         // a card dropped in by Claude Code / git, and a corrupt one
-        fs::write(ws.root.join("inbox/cards/01EXTERNAL.md"), "---\ntitle: External\nstage: reverie\n---\nhi\n").unwrap();
-        fs::write(ws.root.join("inbox/cards/01BROKEN.md"), "---\ntitle: [oops\n---\n").unwrap();
-        fs::write(ws.root.join("inbox/cards/notes.txt"), "ignored").unwrap();
-        let data = ws.load_project(INBOX_SLUG).unwrap();
+        fs::write(ws.root.join("projects/ideas/cards/01EXTERNAL.md"), "---\ntitle: External\nstage: reverie\n---\nhi\n").unwrap();
+        fs::write(ws.root.join("projects/ideas/cards/01BROKEN.md"), "---\ntitle: [oops\n---\n").unwrap();
+        fs::write(ws.root.join("projects/ideas/cards/notes.txt"), "ignored").unwrap();
+        let data = ws.load_project(P).unwrap();
         assert_eq!(data.cards.len(), 2);
         assert!(data.canvas.cards.contains_key("01EXTERNAL"));
         assert_eq!(data.warnings.len(), 1);
         assert!(data.warnings[0].contains("01BROKEN"));
         // removed outside the app: position dropped
-        fs::remove_file(ws.root.join(format!("inbox/cards/{}.md", a.meta.id))).unwrap();
-        let data = ws.load_project(INBOX_SLUG).unwrap();
+        fs::remove_file(ws.root.join(format!("projects/ideas/cards/{}.md", a.meta.id))).unwrap();
+        let data = ws.load_project(P).unwrap();
         assert!(!data.canvas.cards.contains_key(&a.meta.id));
         // positions were persisted
-        let on_disk: Canvas = serde_json::from_str(&fs::read_to_string(ws.root.join("inbox/canvas.json")).unwrap()).unwrap();
+        let on_disk: Canvas = serde_json::from_str(&fs::read_to_string(ws.root.join("projects/ideas/canvas.json")).unwrap()).unwrap();
         assert!(on_disk.cards.contains_key("01EXTERNAL"));
     }
 
     #[test]
     fn delete_goes_to_trash_and_restore_returns_card_to_old_position() {
         let (_d, ws) = ws();
-        let c = ws.create_card(INBOX_SLUG, NewCard { x: Some(123.0), y: Some(456.0), ..new_card("doomed") }).unwrap();
+        let c = ws.create_card(P, NewCard { x: Some(123.0), y: Some(456.0), ..new_card("doomed") }).unwrap();
         let id = c.meta.id.clone();
-        let item = ws.delete_card(INBOX_SLUG, &id).unwrap();
+        let item = ws.delete_card(P, &id).unwrap();
         assert_eq!(item.reason, "deleted");
-        assert!(!ws.root.join(format!("inbox/cards/{id}.md")).exists());
-        assert!(ws.root.join(format!("inbox/trash/{id}.md")).is_file());
-        let data = ws.load_project(INBOX_SLUG).unwrap();
+        assert!(!ws.root.join(format!("projects/ideas/cards/{id}.md")).exists());
+        assert!(ws.root.join(format!("projects/ideas/trash/{id}.md")).is_file());
+        let data = ws.load_project(P).unwrap();
         assert!(data.cards.is_empty() && data.canvas.cards.is_empty());
-        let trash = ws.list_trash(INBOX_SLUG).unwrap();
+        let trash = ws.list_trash(P).unwrap();
         assert_eq!(trash.len(), 1);
         assert_eq!(trash[0].title, "doomed");
 
-        let back = ws.restore_card(INBOX_SLUG, &id).unwrap();
+        let back = ws.restore_card(P, &id).unwrap();
         assert_eq!(back.meta.title, "doomed");
-        let data = ws.load_project(INBOX_SLUG).unwrap();
+        let data = ws.load_project(P).unwrap();
         assert_eq!((data.canvas.cards[&id].x, data.canvas.cards[&id].y), (123.0, 456.0));
-        assert!(ws.list_trash(INBOX_SLUG).unwrap().is_empty());
-        assert!(ws.restore_card(INBOX_SLUG, &id).is_err());
-        assert!(matches!(ws.delete_card(INBOX_SLUG, "01NOPE"), Err(AppError::NotFound(_))));
+        assert!(ws.list_trash(P).unwrap().is_empty());
+        assert!(ws.restore_card(P, &id).is_err());
+        assert!(matches!(ws.delete_card(P, "01NOPE"), Err(AppError::NotFound(_))));
     }
 
     // ----- fix pass #3, item 8: create/delete reliability -----
@@ -1980,7 +1601,7 @@ mod tests {
             let e = ws.create_project(again).unwrap_err().to_string();
             assert!(e.contains("already exists") && e.contains("Twice"), "{again:?}: {e}");
         }
-        assert!(ws.create_project("Inbox").unwrap_err().to_string().contains("already exists"));
+        assert!(ws.create_project("Ideas").unwrap_err().to_string().contains("already exists"));
         // Only one folder was made; a different name that slugifies the same still works.
         assert_eq!(ws.list_projects().unwrap().iter().filter(|p| p.name == "Twice").count(), 1);
         assert_eq!(ws.create_project("Twice!").unwrap().slug, "twice-2");
@@ -2001,7 +1622,7 @@ mod tests {
         let oks = handles.into_iter().map(|h| h.join().unwrap()).filter(|ok| *ok).count();
         assert_eq!(oks, 1);
         let ws = shared.lock().unwrap();
-        assert_eq!(fs::read_dir(ws.root.join("projects")).unwrap().count(), 1);
+        assert_eq!(fs::read_dir(ws.root.join("projects")).unwrap().count(), 2, "ideas + race");
     }
 
     fn project_with_files(ws: &Workspace, name: &str) -> (String, PathBuf) {
@@ -2111,13 +1732,12 @@ mod tests {
     }
 
     #[test]
-    fn delete_project_removes_folder_refuses_inbox_and_clears_last_project() {
+    fn delete_project_removes_folder_keeps_the_last_project_and_clears_last_project() {
         let (_d, ws) = ws();
         let p = ws.create_project("Doomed").unwrap();
         ws.create_card(&p.slug, new_card("x")).unwrap();
         ws.save_chat(&p.slug, "project", &serde_json::json!({"messages": []})).unwrap();
         ws.update_settings(SettingsPatch { last_project: Some(p.slug.clone()), ..Default::default() }).unwrap();
-        assert!(matches!(ws.delete_project(INBOX_SLUG, false), Err(AppError::Invalid(_))));
         assert!(matches!(ws.delete_project("nope", false), Err(AppError::NotFound(_))));
         assert!(ws.delete_project("../inbox", false).is_err());
         let out = ws.delete_project(&p.slug, false).unwrap();
@@ -2125,7 +1745,8 @@ mod tests {
         assert!(!ws.root.join("projects").join(&p.slug).exists());
         assert_eq!(ws.get_settings().unwrap().last_project, None);
         assert!(ws.list_projects().unwrap().iter().all(|s| s.slug != p.slug));
-        assert!(ws.root.join("inbox").is_dir(), "inbox untouched");
+        assert!(ws.root.join("projects/ideas").is_dir(), "others untouched");
+        assert!(matches!(ws.delete_project(P, false), Err(AppError::Invalid(_))), "the last project stays");
     }
 
     /// Moves a throwaway project to the real Recycle Bin: `cargo test -- --ignored recycle`.
@@ -2143,40 +1764,40 @@ mod tests {
     #[test]
     fn chat_threads_are_per_card_files_and_reset_clears_one() {
         let (_d, ws) = ws();
-        let a = ws.create_card(INBOX_SLUG, new_card("a")).unwrap();
-        let empty = ws.load_chat(INBOX_SLUG, &a.meta.id).unwrap();
+        let a = ws.create_card(P, new_card("a")).unwrap();
+        let empty = ws.load_chat(P, &a.meta.id).unwrap();
         assert_eq!(empty["messages"], serde_json::json!([]));
         let t1 = serde_json::json!({"version": 1, "sessionId": "s1", "messages": [{"id": "m1", "role": "user", "text": "hi"}]});
-        ws.save_chat(INBOX_SLUG, &a.meta.id, &t1).unwrap();
-        ws.save_chat(INBOX_SLUG, "project", &serde_json::json!({"messages": [1]})).unwrap();
-        assert!(ws.root.join(format!("inbox/chats/{}.json", a.meta.id)).is_file());
-        assert_eq!(ws.load_chat(INBOX_SLUG, &a.meta.id).unwrap(), t1);
-        ws.reset_chat(INBOX_SLUG, &a.meta.id).unwrap();
-        assert_eq!(ws.load_chat(INBOX_SLUG, &a.meta.id).unwrap()["messages"], serde_json::json!([]));
-        assert_eq!(ws.load_chat(INBOX_SLUG, "project").unwrap()["messages"], serde_json::json!([1]), "other threads untouched");
-        ws.reset_chat(INBOX_SLUG, &a.meta.id).unwrap(); // idempotent
-        assert!(ws.load_chat(INBOX_SLUG, "../workspace").is_err());
-        assert!(ws.save_chat(INBOX_SLUG, "a/b", &serde_json::json!({})).is_err());
+        ws.save_chat(P, &a.meta.id, &t1).unwrap();
+        ws.save_chat(P, "project", &serde_json::json!({"messages": [1]})).unwrap();
+        assert!(ws.root.join(format!("projects/ideas/chats/{}.json", a.meta.id)).is_file());
+        assert_eq!(ws.load_chat(P, &a.meta.id).unwrap(), t1);
+        ws.reset_chat(P, &a.meta.id).unwrap();
+        assert_eq!(ws.load_chat(P, &a.meta.id).unwrap()["messages"], serde_json::json!([]));
+        assert_eq!(ws.load_chat(P, "project").unwrap()["messages"], serde_json::json!([1]), "other threads untouched");
+        ws.reset_chat(P, &a.meta.id).unwrap(); // idempotent
+        assert!(ws.load_chat(P, "../workspace").is_err());
+        assert!(ws.save_chat(P, "a/b", &serde_json::json!({})).is_err());
         // Rust-owned fields (context snapshot, usage, summary) survive UI saves; reset clears them.
-        ws.update_chat(INBOX_SLUG, &a.meta.id, |f| {
+        ws.update_chat(P, &a.meta.id, |f| {
             f.insert("ctx".into(), serde_json::json!({"memoryHash": "h", "cards": {}}));
             f.insert("last_input_tokens".into(), serde_json::json!(123));
             f.insert("summary".into(), serde_json::json!("s"));
         })
         .unwrap();
-        ws.save_chat(INBOX_SLUG, &a.meta.id, &serde_json::json!({"version": 1, "sessionId": "x", "messages": [2]})).unwrap();
-        let kept = ws.load_chat(INBOX_SLUG, &a.meta.id).unwrap();
+        ws.save_chat(P, &a.meta.id, &serde_json::json!({"version": 1, "sessionId": "x", "messages": [2]})).unwrap();
+        let kept = ws.load_chat(P, &a.meta.id).unwrap();
         assert_eq!((kept["ctx"]["memoryHash"].as_str(), kept["last_input_tokens"].as_u64(), kept["summary"].as_str(), kept["messages"][0].as_i64()), (Some("h"), Some(123), Some("s"), Some(2)));
-        ws.reset_chat(INBOX_SLUG, &a.meta.id).unwrap();
-        assert!(ws.load_chat(INBOX_SLUG, &a.meta.id).unwrap().get("summary").is_none());
+        ws.reset_chat(P, &a.meta.id).unwrap();
+        assert!(ws.load_chat(P, &a.meta.id).unwrap().get("summary").is_none());
     }
 
     #[test]
     fn size_and_z_order_persist_through_save_trash_and_restore() {
         let (_d, ws) = ws();
-        let a = ws.create_card(INBOX_SLUG, new_card("a")).unwrap();
-        let b = ws.create_card(INBOX_SLUG, new_card("b")).unwrap();
-        let mut canvas = ws.load_project(INBOX_SLUG).unwrap().canvas;
+        let a = ws.create_card(P, new_card("a")).unwrap();
+        let b = ws.create_card(P, new_card("b")).unwrap();
+        let mut canvas = ws.load_project(P).unwrap().canvas;
         // New cards stack upward.
         assert!(canvas.cards[&b.meta.id].z > canvas.cards[&a.meta.id].z);
         // The UI resizes `a`, sends it to the back, and saves (bad values get sanitized).
@@ -2185,32 +1806,32 @@ mod tests {
         pa.h = Some(f64::NAN);
         pa.z = Some(-5);
         pa.back = true;
-        ws.save_canvas(INBOX_SLUG, None, &canvas).unwrap();
-        let saved = ws.load_project(INBOX_SLUG).unwrap().canvas.cards[&a.meta.id];
+        ws.save_canvas(P, &canvas).unwrap();
+        let saved = ws.load_project(P).unwrap().canvas.cards[&a.meta.id];
         assert_eq!((saved.w, saved.h, saved.z, saved.back), (Some(420.0), None, Some(-5), true));
         // Trash keeps the whole Pos; restore brings size and stacking back.
-        ws.delete_card(INBOX_SLUG, &a.meta.id).unwrap();
-        ws.restore_card(INBOX_SLUG, &a.meta.id).unwrap();
-        assert_eq!(ws.load_project(INBOX_SLUG).unwrap().canvas.cards[&a.meta.id], saved);
+        ws.delete_card(P, &a.meta.id).unwrap();
+        ws.restore_card(P, &a.meta.id).unwrap();
+        assert_eq!(ws.load_project(P).unwrap().canvas.cards[&a.meta.id], saved);
         // A third card goes above everything again.
-        let c = ws.create_card(INBOX_SLUG, new_card("c")).unwrap();
-        let cv = ws.load_project(INBOX_SLUG).unwrap().canvas;
+        let c = ws.create_card(P, new_card("c")).unwrap();
+        let cv = ws.load_project(P).unwrap().canvas;
         assert_eq!(cv.cards[&c.meta.id].z, Some(cv.cards[&b.meta.id].z.unwrap() + 1));
     }
 
     #[test]
     fn trash_reason_label_and_empty_trash() {
         let (_d, ws) = ws();
-        let a = ws.create_card(INBOX_SLUG, new_card("loser")).unwrap();
-        let b = ws.create_card(INBOX_SLUG, new_card("gone")).unwrap();
-        ws.trash_card(INBOX_SLUG, &a.meta.id, "lost to Winner").unwrap();
-        ws.delete_card(INBOX_SLUG, &b.meta.id).unwrap();
-        let reasons: Vec<_> = ws.list_trash(INBOX_SLUG).unwrap().into_iter().map(|i| i.reason).collect();
+        let a = ws.create_card(P, new_card("loser")).unwrap();
+        let b = ws.create_card(P, new_card("gone")).unwrap();
+        ws.trash_card(P, &a.meta.id, "lost to Winner").unwrap();
+        ws.delete_card(P, &b.meta.id).unwrap();
+        let reasons: Vec<_> = ws.list_trash(P).unwrap().into_iter().map(|i| i.reason).collect();
         assert_eq!(reasons, vec!["lost to Winner", "deleted"]);
-        assert_eq!(ws.empty_trash(INBOX_SLUG).unwrap(), 2);
-        assert!(ws.list_trash(INBOX_SLUG).unwrap().is_empty());
-        assert!(!ws.root.join(format!("inbox/trash/{}.md", a.meta.id)).exists());
-        assert!(ws.root.join("inbox/trash/trash.json").is_file());
+        assert_eq!(ws.empty_trash(P).unwrap(), 2);
+        assert!(ws.list_trash(P).unwrap().is_empty());
+        assert!(!ws.root.join(format!("projects/ideas/trash/{}.md", a.meta.id)).exists());
+        assert!(ws.root.join("projects/ideas/trash/trash.json").is_file());
     }
 
     #[test]
@@ -2230,18 +1851,18 @@ mod tests {
         let p = ws.create_project("P").unwrap();
         let mut data = ws.load_project(&p.slug).unwrap();
         data.canvas.viewport = Viewport { x: -50.0, y: 20.0, zoom: 0.5 };
-        ws.save_canvas(&p.slug, None, &data.canvas).unwrap();
+        ws.save_canvas(&p.slug, &data.canvas).unwrap();
         assert_eq!(ws.load_project(&p.slug).unwrap().canvas.viewport, Viewport { x: -50.0, y: 20.0, zoom: 0.5 });
     }
 
     #[test]
     fn media_is_saved_under_the_project_and_rejects_escaping_paths() {
         let (_d, ws) = ws();
-        let rel = ws.save_media(INBOX_SLUG, "photo.PNG", b"\x89PNG-ish").unwrap();
+        let rel = ws.save_media(P, "photo.PNG", b"\x89PNG-ish").unwrap();
         assert!(rel.starts_with("media/") && rel.ends_with(".png"));
-        assert_eq!(ws.read_project_file(INBOX_SLUG, &rel).unwrap(), b"\x89PNG-ish");
-        assert!(ws.read_project_file(INBOX_SLUG, "../../etc/passwd").is_err());
-        assert!(ws.read_project_file(INBOX_SLUG, "media/nope.png").is_err());
+        assert_eq!(ws.read_project_file(P, &rel).unwrap(), b"\x89PNG-ish");
+        assert!(ws.read_project_file(P, "../../etc/passwd").is_err());
+        assert!(ws.read_project_file(P, "media/nope.png").is_err());
     }
 
     #[test]
@@ -2276,7 +1897,7 @@ mod tests {
         let (_d, ws) = ws();
         let c = ws
             .create_card(
-                INBOX_SLUG,
+                P,
                 NewCard {
                     kind: Some(CardKind::Checklist),
                     color: Some(" #ffcc00 ".into()),
@@ -2292,9 +1913,9 @@ mod tests {
         assert_eq!(c.meta.color.as_deref(), Some("#ffcc00"));
         assert!(!c.meta.items[0].id.is_empty(), "missing item ids are filled");
         assert!(!c.meta.attachments[0].id().is_empty(), "missing attachment ids are filled");
-        let back = ws.read_card(INBOX_SLUG, &c.meta.id).unwrap();
+        let back = ws.read_card(P, &c.meta.id).unwrap();
         assert_eq!(back, c);
-        let text = fs::read_to_string(ws.root.join(format!("inbox/cards/{}.md", c.meta.id))).unwrap();
+        let text = fs::read_to_string(ws.root.join(format!("projects/ideas/cards/{}.md", c.meta.id))).unwrap();
         assert!(text.contains("kind: checklist") && text.contains("type: clip"), "{text}");
 
         // A plain card file without the new keys reads as kind "card" with no attachments.
@@ -2305,9 +1926,9 @@ mod tests {
         assert_eq!(bad.meta.attachments, vec![img("i", "media/x.png")]);
 
         // Escaping paths are refused.
-        let err = ws.create_card(INBOX_SLUG, NewCard { attachments: Some(vec![img("", "../x.png")]), ..new_card("x") });
+        let err = ws.create_card(P, NewCard { attachments: Some(vec![img("", "../x.png")]), ..new_card("x") });
         assert!(matches!(err, Err(AppError::Invalid(_))));
-        let u = ws.update_card(INBOX_SLUG, &c.meta.id, CardPatch { kind: Some(CardKind::Sticky), color: Some(String::new()), ..Default::default() }).unwrap();
+        let u = ws.update_card(P, &c.meta.id, CardPatch { kind: Some(CardKind::Sticky), color: Some(String::new()), ..Default::default() }).unwrap();
         assert_eq!((u.meta.kind, u.meta.color.clone()), (CardKind::Sticky, None));
         assert_eq!(u.meta.attachments.len(), 2, "untouched by a patch without attachments");
     }
@@ -2316,19 +1937,19 @@ mod tests {
     fn legacy_image_and_clip_fields_become_attachments_and_leave_on_write() {
         let (_d, ws) = ws();
         let id = "01LEGACY0000000000000000000";
-        let path = ws.root.join(format!("inbox/cards/{id}.md"));
+        let path = ws.root.join(format!("projects/ideas/cards/{id}.md"));
         fs::write(&path, "---\ntitle: Old\nfields:\n  image: media/old.png\n  url: https://ex.com\n  clip_title: Ex\n  mood: calm\nattachments:\n  - {type: image, id: a1, path: media/more.png}\nnotes: keep\n---\nbody\n").unwrap();
-        let c = ws.read_card(INBOX_SLUG, id).unwrap();
+        let c = ws.read_card(P, id).unwrap();
         let ids: Vec<_> = c.meta.attachments.iter().map(|a| a.id().to_string()).collect();
         assert_eq!(ids, ["legacy-image", "legacy-clip", "a1"], "image first, then clip, then the rest");
         assert!(matches!(&c.meta.attachments[1], Attachment::Clip { title: Some(t), .. } if t == "Ex"));
         assert_eq!(c.meta.fields.keys().collect::<Vec<_>>(), ["mood"]);
-        assert_eq!(ws.read_card(INBOX_SLUG, id).unwrap(), c, "stable ids across reads");
+        assert_eq!(ws.read_card(P, id).unwrap(), c, "stable ids across reads");
         // Any write drops the legacy keys; unknown keys still pass through.
-        ws.update_attachment(INBOX_SLUG, id, "legacy-image", &json!({"caption": "cover"})).unwrap();
+        ws.update_attachment(P, id, "legacy-image", &json!({"caption": "cover"})).unwrap();
         let text = fs::read_to_string(&path).unwrap();
         assert!(!text.contains("clip_title") && !text.contains("  image:") && text.contains("notes: keep") && text.contains("mood: calm"), "{text}");
-        let again = ws.read_card(INBOX_SLUG, id).unwrap();
+        let again = ws.read_card(P, id).unwrap();
         assert_eq!(again.meta.attachments.len(), 3);
         assert!(matches!(&again.meta.attachments[0], Attachment::Image { caption: Some(c), .. } if c == "cover"));
     }
@@ -2336,57 +1957,57 @@ mod tests {
     #[test]
     fn attachment_commands_add_update_reorder_remove() {
         let (_d, ws) = ws();
-        let c = ws.create_card(INBOX_SLUG, new_card("a")).unwrap();
+        let c = ws.create_card(P, new_card("a")).unwrap();
         let id = c.meta.id.as_str();
-        let rels = ws.save_media_many(INBOX_SLUG, &[MediaUpload { name_hint: "a.png".into(), bytes: b"1".to_vec() }, MediaUpload { name_hint: "b.jpg".into(), bytes: b"2".to_vec() }]).unwrap();
+        let rels = ws.save_media_many(P, &[MediaUpload { name_hint: "a.png".into(), bytes: b"1".to_vec() }, MediaUpload { name_hint: "b.jpg".into(), bytes: b"2".to_vec() }]).unwrap();
         assert_eq!(rels.len(), 2);
         assert!(rels[1].ends_with(".jpg"));
-        ws.add_attachment(INBOX_SLUG, id, img("i1", &rels[0])).unwrap();
-        ws.add_attachment(INBOX_SLUG, id, img("i1", &rels[1])).unwrap(); // taken id → fresh one
-        let c = ws.add_attachment(INBOX_SLUG, id, clip("", "https://a.b")).unwrap();
+        ws.add_attachment(P, id, img("i1", &rels[0])).unwrap();
+        ws.add_attachment(P, id, img("i1", &rels[1])).unwrap(); // taken id → fresh one
+        let c = ws.add_attachment(P, id, clip("", "https://a.b")).unwrap();
         assert_eq!(c.meta.attachments.len(), 3);
         let i2 = c.meta.attachments[1].id().to_string();
         let cl = c.meta.attachments[2].id().to_string();
         assert_ne!(i2, "i1");
-        assert!(ws.add_attachment(INBOX_SLUG, id, img("", "C:/x.png")).is_err());
+        assert!(ws.add_attachment(P, id, img("", "C:/x.png")).is_err());
 
-        let c = ws.update_attachment(INBOX_SLUG, id, &cl, &json!({"title": "A", "fetch_error": "timeout", "id": "hijack", "type": "image"})).unwrap();
+        let c = ws.update_attachment(P, id, &cl, &json!({"title": "A", "fetch_error": "timeout", "id": "hijack", "type": "image"})).unwrap();
         assert!(matches!(&c.meta.attachments[2], Attachment::Clip { id, title: Some(t), fetch_error: Some(_), .. } if id == &cl && t == "A"));
-        let c = ws.update_attachment(INBOX_SLUG, id, &cl, &json!({"fetch_error": null})).unwrap();
+        let c = ws.update_attachment(P, id, &cl, &json!({"fetch_error": null})).unwrap();
         assert!(matches!(&c.meta.attachments[2], Attachment::Clip { fetch_error: None, .. }));
-        assert!(ws.update_attachment(INBOX_SLUG, id, &cl, &json!({"thumb": "../t.png"})).is_err());
-        assert!(matches!(ws.update_attachment(INBOX_SLUG, id, "nope", &json!({})), Err(AppError::NotFound(_))));
+        assert!(ws.update_attachment(P, id, &cl, &json!({"thumb": "../t.png"})).is_err());
+        assert!(matches!(ws.update_attachment(P, id, "nope", &json!({})), Err(AppError::NotFound(_))));
 
-        let c = ws.reorder_attachments(INBOX_SLUG, id, &[cl.clone(), i2.clone()]).unwrap();
+        let c = ws.reorder_attachments(P, id, &[cl.clone(), i2.clone()]).unwrap();
         let order: Vec<_> = c.meta.attachments.iter().map(|a| a.id().to_string()).collect();
         assert_eq!(order, [cl.clone(), i2.clone(), "i1".into()], "unlisted ones keep their order at the end");
-        assert!(ws.reorder_attachments(INBOX_SLUG, id, &["nope".into()]).is_err());
+        assert!(ws.reorder_attachments(P, id, &["nope".into()]).is_err());
 
-        let c = ws.remove_attachment(INBOX_SLUG, id, "i1").unwrap();
+        let c = ws.remove_attachment(P, id, "i1").unwrap();
         assert_eq!(c.meta.attachments.len(), 2);
-        assert!(ws.root.join("inbox").join(&rels[0]).is_file(), "media stays until the Trash is emptied");
-        assert!(ws.remove_attachment(INBOX_SLUG, id, "i1").is_err());
+        assert!(ws.root.join("projects/ideas").join(&rels[0]).is_file(), "media stays until the Trash is emptied");
+        assert!(ws.remove_attachment(P, id, "i1").is_err());
     }
 
     #[test]
     fn empty_trash_sweeps_only_unreferenced_media() {
         let (_d, ws) = ws();
-        let keep = ws.create_card(INBOX_SLUG, new_card("keep")).unwrap();
-        let gone = ws.create_card(INBOX_SLUG, new_card("gone")).unwrap();
-        let r = ws.save_media_many(INBOX_SLUG, &["a.png", "b.png", "c.png", "d.png"].map(|n| MediaUpload { name_hint: n.into(), bytes: vec![1] })).unwrap();
-        ws.add_attachment(INBOX_SLUG, &keep.meta.id, img("", &r[0])).unwrap();
-        ws.add_attachment(INBOX_SLUG, &keep.meta.id, img("x", &r[1])).unwrap();
-        ws.remove_attachment(INBOX_SLUG, &keep.meta.id, "x").unwrap();
-        ws.update_card(INBOX_SLUG, &keep.meta.id, CardPatch { body: Some(format!("![]({})", r[3])), ..Default::default() }).unwrap();
-        ws.add_attachment(INBOX_SLUG, &gone.meta.id, img("", &r[2])).unwrap();
-        ws.delete_card(INBOX_SLUG, &gone.meta.id).unwrap();
+        let keep = ws.create_card(P, new_card("keep")).unwrap();
+        let gone = ws.create_card(P, new_card("gone")).unwrap();
+        let r = ws.save_media_many(P, &["a.png", "b.png", "c.png", "d.png"].map(|n| MediaUpload { name_hint: n.into(), bytes: vec![1] })).unwrap();
+        ws.add_attachment(P, &keep.meta.id, img("", &r[0])).unwrap();
+        ws.add_attachment(P, &keep.meta.id, img("x", &r[1])).unwrap();
+        ws.remove_attachment(P, &keep.meta.id, "x").unwrap();
+        ws.update_card(P, &keep.meta.id, CardPatch { body: Some(format!("![]({})", r[3])), ..Default::default() }).unwrap();
+        ws.add_attachment(P, &gone.meta.id, img("", &r[2])).unwrap();
+        ws.delete_card(P, &gone.meta.id).unwrap();
         // Trash keeps attachments: restore brings them back intact.
-        let back = ws.restore_card(INBOX_SLUG, &gone.meta.id).unwrap();
+        let back = ws.restore_card(P, &gone.meta.id).unwrap();
         assert_eq!(back.meta.attachments.len(), 1);
-        ws.delete_card(INBOX_SLUG, &gone.meta.id).unwrap();
-        let media = |rel: &str| ws.root.join("inbox").join(rel).is_file();
+        ws.delete_card(P, &gone.meta.id).unwrap();
+        let media = |rel: &str| ws.root.join("projects/ideas").join(rel).is_file();
         assert!(media(&r[1]) && media(&r[2]), "nothing is swept before the Trash is emptied");
-        ws.empty_trash(INBOX_SLUG).unwrap();
+        ws.empty_trash(P).unwrap();
         assert!(media(&r[0]), "attached to a live card");
         assert!(media(&r[3]), "mentioned in a live body");
         assert!(!media(&r[1]), "removed attachment");
@@ -2509,27 +2130,27 @@ mod tests {
     fn one_decisions_card_per_project() {
         let (_d, ws) = ws();
         let dec = |t: &str| NewCard { role: Some("decisions".into()), ..new_card(t) };
-        assert_eq!(ws.create_card(INBOX_SLUG, dec("Project decisions")).unwrap().meta.role.as_deref(), Some(ROLE_DECISIONS));
-        assert!(ws.create_card(INBOX_SLUG, dec("again")).is_err());
-        assert!(ws.create_card(INBOX_SLUG, NewCard { role: Some("tech".into()), ..new_card("t") }).is_ok(), "roles are independent");
+        assert_eq!(ws.create_card(P, dec("Project decisions")).unwrap().meta.role.as_deref(), Some(ROLE_DECISIONS));
+        assert!(ws.create_card(P, dec("again")).is_err());
+        assert!(ws.create_card(P, NewCard { role: Some("tech".into()), ..new_card("t") }).is_ok(), "roles are independent");
     }
 
     #[test]
     fn only_one_tech_card_per_project() {
         let (_d, ws) = ws();
         let tech = |t: &str| NewCard { role: Some("Tech".into()), ..new_card(t) };
-        let a = ws.create_card(INBOX_SLUG, tech("a")).unwrap();
+        let a = ws.create_card(P, tech("a")).unwrap();
         assert_eq!(a.meta.role.as_deref(), Some(ROLE_TECH));
-        assert!(matches!(ws.create_card(INBOX_SLUG, tech("b")), Err(AppError::Invalid(_))));
-        assert!(ws.create_card(INBOX_SLUG, NewCard { role: Some("boss".into()), ..new_card("c") }).is_err());
-        let b = ws.create_card(INBOX_SLUG, new_card("b")).unwrap();
-        assert!(ws.update_card(INBOX_SLUG, &b.meta.id, CardPatch { role: Some("tech".into()), ..Default::default() }).is_err());
-        assert!(ws.update_card(INBOX_SLUG, &a.meta.id, CardPatch { role: Some("tech".into()), title: Some("A".into()), ..Default::default() }).is_ok(), "re-setting its own role is fine");
+        assert!(matches!(ws.create_card(P, tech("b")), Err(AppError::Invalid(_))));
+        assert!(ws.create_card(P, NewCard { role: Some("boss".into()), ..new_card("c") }).is_err());
+        let b = ws.create_card(P, new_card("b")).unwrap();
+        assert!(ws.update_card(P, &b.meta.id, CardPatch { role: Some("tech".into()), ..Default::default() }).is_err());
+        assert!(ws.update_card(P, &a.meta.id, CardPatch { role: Some("tech".into()), title: Some("A".into()), ..Default::default() }).is_ok(), "re-setting its own role is fine");
         // Trashed tech card doesn't block; restoring it yields the role to the newer one.
-        ws.delete_card(INBOX_SLUG, &a.meta.id).unwrap();
-        ws.update_card(INBOX_SLUG, &b.meta.id, CardPatch { role: Some("tech".into()), ..Default::default() }).unwrap();
-        assert_eq!(ws.restore_card(INBOX_SLUG, &a.meta.id).unwrap().meta.role, None);
-        assert_eq!(ws.read_card(INBOX_SLUG, &a.meta.id).unwrap().meta.role, None);
+        ws.delete_card(P, &a.meta.id).unwrap();
+        ws.update_card(P, &b.meta.id, CardPatch { role: Some("tech".into()), ..Default::default() }).unwrap();
+        assert_eq!(ws.restore_card(P, &a.meta.id).unwrap().meta.role, None);
+        assert_eq!(ws.read_card(P, &a.meta.id).unwrap().meta.role, None);
         let other = ws.create_project("Other").unwrap();
         assert!(ws.create_card(&other.slug, tech("t")).is_ok(), "per project");
     }
@@ -2544,7 +2165,7 @@ mod tests {
         assert!(data.canvas.frames.is_empty());
         assert_eq!(data.canvas.version, CANVAS_VERSION);
         data.canvas.frames.insert("f1".into(), Frame { x: 10.0, y: f64::NAN, w: 5.0, h: 600.0, title: "Combat".into(), color: Some("#f00".into()), z: 2 });
-        ws.save_canvas(&p.slug, None, &data.canvas).unwrap();
+        ws.save_canvas(&p.slug, &data.canvas).unwrap();
         let f = ws.load_project(&p.slug).unwrap().canvas.frames["f1"].clone();
         assert_eq!(f, Frame { x: 10.0, y: 0.0, w: MIN_FRAME_SIDE, h: 600.0, title: "Combat".into(), color: Some("#f00".into()), z: 2 });
         let raw: Value = serde_json::from_str(&fs::read_to_string(dir.join("canvas.json")).unwrap()).unwrap();
@@ -2575,34 +2196,34 @@ mod tests {
     #[test]
     fn proposals_live_beside_the_card_and_go_with_it() {
         let (_d, ws) = ws();
-        let c = ws.create_card(INBOX_SLUG, new_card("A")).unwrap();
+        let c = ws.create_card(P, new_card("A")).unwrap();
         let id = c.meta.id.clone();
-        ws.write_proposal(INBOX_SLUG, &id, &serde_json::json!({ "title": "B", "reason": "r" })).unwrap();
-        ws.write_proposal(INBOX_SLUG, &id, &serde_json::json!({ "title": "C", "reason": "r" })).unwrap();
-        let data = ws.load_project(INBOX_SLUG).unwrap();
+        ws.write_proposal(P, &id, &serde_json::json!({ "title": "B", "reason": "r" })).unwrap();
+        ws.write_proposal(P, &id, &serde_json::json!({ "title": "C", "reason": "r" })).unwrap();
+        let data = ws.load_project(P).unwrap();
         assert_eq!(data.proposals.len(), 1);
         assert_eq!(data.proposals[&id]["title"], "C", "a new proposal replaces the old one");
         assert_eq!(data.cards.len(), 1, "the proposal file is not read as a card");
-        assert_eq!(ws.read_card(INBOX_SLUG, &id).unwrap().meta.title, "A", "the card file is untouched");
-        ws.delete_proposal(INBOX_SLUG, &id).unwrap();
-        ws.delete_proposal(INBOX_SLUG, &id).unwrap();
-        assert!(ws.load_project(INBOX_SLUG).unwrap().proposals.is_empty());
-        ws.write_proposal(INBOX_SLUG, &id, &serde_json::json!({ "body": "x" })).unwrap();
-        ws.delete_card(INBOX_SLUG, &id).unwrap();
-        assert!(!ws.root.join(format!("inbox/cards/{id}.proposal.json")).exists(), "trashing the card drops its proposal");
-        assert!(ws.write_proposal(INBOX_SLUG, "01NOSUCHCARD", &serde_json::json!({})).is_err());
+        assert_eq!(ws.read_card(P, &id).unwrap().meta.title, "A", "the card file is untouched");
+        ws.delete_proposal(P, &id).unwrap();
+        ws.delete_proposal(P, &id).unwrap();
+        assert!(ws.load_project(P).unwrap().proposals.is_empty());
+        ws.write_proposal(P, &id, &serde_json::json!({ "body": "x" })).unwrap();
+        ws.delete_card(P, &id).unwrap();
+        assert!(!ws.root.join(format!("projects/ideas/cards/{id}.proposal.json")).exists(), "trashing the card drops its proposal");
+        assert!(ws.write_proposal(P, "01NOSUCHCARD", &serde_json::json!({})).is_err());
     }
 
     #[test]
     fn card_frames_use_the_card_centre_and_topmost_frame() {
         let (_d, ws) = ws();
-        let a = ws.create_card(INBOX_SLUG, NewCard { x: Some(0.0), y: Some(0.0), ..new_card("A") }).unwrap();
-        let b = ws.create_card(INBOX_SLUG, NewCard { x: Some(2000.0), y: Some(0.0), ..new_card("B") }).unwrap();
-        let mut data = ws.load_project(INBOX_SLUG).unwrap();
+        let a = ws.create_card(P, NewCard { x: Some(0.0), y: Some(0.0), ..new_card("A") }).unwrap();
+        let b = ws.create_card(P, NewCard { x: Some(2000.0), y: Some(0.0), ..new_card("B") }).unwrap();
+        let mut data = ws.load_project(P).unwrap();
         data.canvas.frames.insert("f1".into(), Frame { x: 100.0, y: 50.0, w: 400.0, h: 400.0, title: "Low".into(), color: None, z: 1 });
         data.canvas.frames.insert("f2".into(), Frame { x: 100.0, y: 50.0, w: 400.0, h: 400.0, title: " ".into(), color: None, z: 5 });
-        ws.save_canvas(INBOX_SLUG, None, &data.canvas).unwrap();
-        let frames = ws.card_frames(INBOX_SLUG).unwrap();
+        ws.save_canvas(P, &data.canvas).unwrap();
+        let frames = ws.card_frames(P).unwrap();
         assert_eq!(frames.get(&a.meta.id).map(String::as_str), Some("Untitled frame"), "centre (118, 75) is inside; topmost wins");
         assert!(!frames.contains_key(&b.meta.id));
     }

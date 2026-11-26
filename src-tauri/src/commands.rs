@@ -70,13 +70,9 @@ pub fn create_project(state: State<AppState>, name: String) -> Result<ProjectSum
 #[tauri::command(async)]
 pub fn update_project(app: AppHandle, state: State<AppState>, slug: String, patch: ProjectPatch) -> Result<ProjectSummary> {
     let retarget = patch.handoff_target.is_some();
-    let relink = patch.last_version.is_some();
     let out = with_ws(&state, |ws| ws.update_project(&slug, patch))?;
     if retarget {
         state.refresh_questions(&app, true);
-    }
-    if relink {
-        AppState::write_link_now(&app, &slug);
     }
     Ok(out)
 }
@@ -150,37 +146,15 @@ pub fn load_project(state: State<AppState>, slug: String) -> Result<ProjectData>
     with_ws(&state, |ws| ws.load_project(&slug))
 }
 
-/// The one-time "Treat these folders as versions?" answer: the folder ids that become versions.
 #[tauri::command(async)]
-pub fn migrate_versions(state: State<AppState>, slug: String, versions: Vec<String>) -> Result<bool> {
-    with_ws(&state, |ws| ws.migrate_versions(&slug, Some(versions)))
+pub fn save_canvas(state: State<AppState>, slug: String, canvas: Canvas) -> Result<()> {
+    with_ws(&state, |ws| ws.save_canvas(&slug, &canvas))
 }
 
-/// "New version from <from>…": a full copy (see storage/versions.rs). Returns `{ version, cards }`.
+/// Why the workspace opened read-only (a failed layout migration), or null.
 #[tauri::command(async)]
-pub fn new_version(state: State<AppState>, slug: String, from: String, title: String) -> Result<Value> {
-    let out = with_ws(&state, |ws| ws.new_version(&slug, &from, &title))?;
-    if let Ok(mut idx) = state.search.lock() {
-        idx.mark_dirty(Some(&slug));
-    }
-    Ok(out)
-}
-
-#[tauri::command(async)]
-pub fn save_canvas(state: State<AppState>, slug: String, canvas: Canvas, folder: Option<String>) -> Result<()> {
-    with_ws(&state, |ws| ws.save_canvas(&slug, folder.as_deref().filter(|f| !f.is_empty()), &canvas))
-}
-
-/// Several canvases and the folder list in one write (moves between folders, folder edits).
-#[tauri::command(async)]
-pub fn save_layout(state: State<AppState>, slug: String, layout: LayoutWrite) -> Result<()> {
-    with_ws(&state, |ws| ws.save_layout(&slug, layout))
-}
-
-/// A folder and its subtree to the Trash, as one item.
-#[tauri::command(async)]
-pub fn delete_folder(state: State<AppState>, slug: String, id: String) -> Result<TrashItem> {
-    with_ws(&state, |ws| ws.trash_folder(&slug, &id))
+pub fn migration_status(state: State<AppState>) -> Result<Option<String>> {
+    with_ws(&state, |ws| Ok(ws.read_only()))
 }
 
 #[tauri::command(async)]
@@ -271,9 +245,6 @@ pub fn memory_get(state: State<AppState>, slug: String) -> Result<crate::memory:
 /// The Memory modal's Save (`source` "user") and the seed's Keep / Start empty ("seed").
 #[tauri::command(async)]
 pub fn memory_save(state: State<AppState>, slug: String, text: String, source: String) -> Result<crate::memory::View> {
-    if slug == crate::storage::INBOX_SLUG {
-        return Err(AppError::Invalid("the Inbox has no project memory".into()));
-    }
     with_ws(&state, |ws| {
         crate::memory::save_text(&ws.existing_project_dir(&slug)?, &text, &source)?;
         crate::memory::view(ws, &slug)
@@ -551,7 +522,8 @@ pub fn claude_send(
     pin: Option<String>,
     resume_local: Option<String>,
     escalate: Option<String>,
-    folder: Option<String>,
+    scope_ids: Option<Vec<String>>,
+    scope_name: Option<String>,
     organize: Option<String>,
     organize_backend: Option<String>,
     organize_instruction: Option<String>,
@@ -566,7 +538,7 @@ pub fn claude_send(
         text,
         context,
         thread: thread.unwrap_or_else(|| "project".into()),
-        folder: folder.filter(|f| !f.is_empty()),
+        scope: crate::organize::Scope::new(organize.as_deref(), scope_name, scope_ids),
         resume,
         web: web.unwrap_or(false),
         selection: selection.unwrap_or_default(),
@@ -582,7 +554,7 @@ pub fn claude_send(
                 Some("local") => Some(crate::router::Backend::Local),
                 _ => None,
             };
-            (if s == "project" { "project".to_string() } else { "folder".to_string() }, backend)
+            (if matches!(s.as_str(), "frame" | "selection") { s } else { "project".to_string() }, backend)
         }),
         organize_instruction,
         organize_prior: organize_prior.filter(|v| v.is_object()),
@@ -708,11 +680,7 @@ pub fn search_cards(state: State<AppState>, query: String, project: Option<Strin
     if let Some(p) = &project {
         crate::storage::check_slug(p)?;
     }
-    let mut hits = state.with_search(|idx| idx.search(&query, project.as_deref(), limit.unwrap_or(20)))?;
-    with_ws(&state, |ws| {
-        ws.annotate_hits(&mut hits);
-        Ok(hits)
-    })
+    state.with_search(|idx| idx.search(&query, project.as_deref(), limit.unwrap_or(20)))
 }
 
 /// User action from the sidebar (with an "Are you sure?" dialog). Moves the project folder to the

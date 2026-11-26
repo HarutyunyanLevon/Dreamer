@@ -1,5 +1,5 @@
 import { api, type Card, type CardKind, type ProjectData } from "../api";
-import type { Items, Workspace } from "../state/useWorkspace";
+import type { Workspace } from "../state/useWorkspace";
 import { STAGES, STAGE_LABEL } from "../theme/types";
 import type { Rect } from "./cardGeometry";
 import type { MenuItem, MenuSection } from "./ContextMenu";
@@ -16,8 +16,7 @@ export type MenuTarget =
   | { kind: "card"; id: string }
   | { kind: "multi"; ids: string[] }
   | { kind: "link"; from: string; to: string }
-  | { kind: "frame"; id: string }
-  | { kind: "folder"; id: string };
+  | { kind: "frame"; id: string };
 
 /** Everything the menus need from the canvas. All card/frame changes go through `ws` (undoable). */
 export interface MenuEnv {
@@ -49,15 +48,6 @@ export interface MenuEnv {
   frameMembers: (id: string) => string[];
   renameFrame: (id: string) => void;
   clearFrameSelection: () => void;
-  /** New folder at a world point (its centre), name field focused. */
-  newFolder: (point: { x: number; y: number }) => void;
-  /** These items move into a new folder. */
-  groupIntoFolder: (items: Items) => void;
-  /** Everything inside a frame: cards, folder nodes, smaller frames. */
-  frameContents: (id: string) => Items;
-  renameFolder: (id: string) => void;
-  /** Folder nodes selected on the canvas. */
-  folderSelection: string[];
   /** Card › Visualize… : an artifact of that type from the card (brief = title, body, tags), linked to it. */
   visualize: (c: Card, type: ArtifactType) => void;
   /** Add › New artifact… at a world point. */
@@ -95,72 +85,12 @@ export function menuFor(target: MenuTarget, env: MenuEnv): { label: string; sect
     }
     case "frame":
       return data.canvas.frames?.[target.id] ? { label: "Frame menu", sections: frameMenu(target.id, env) } : null;
-    case "folder":
-      return data.canvas.folders?.[target.id] ? { label: "Folder menu", sections: folderMenu(target.id, env) } : null;
   }
 }
 
-function pinItem(kind: "cards" | "folders", id: string, env: MenuEnv): MenuItem {
-  const pinned = !!env.data.canvas[kind]?.[id]?.pinned;
-  return { label: pinned ? "Unpin position" : "Pin position", checked: pinned, run: () => env.ws.setPinned(kind, id, !pinned) };
-}
-
-function folderMenu(id: string, env: MenuEnv): MenuSection[] {
-  const { ws, data } = env;
-  const f = data.folders.find((x) => x.id === id);
-  if (!f) return [];
-  const sel = env.folderSelection.includes(id) ? env.folderSelection : [id];
-  if (f.kind === "version" && !f.parent) {
-    const name = f.title.trim() || "Untitled folder";
-    return [
-      {
-        title: "Version",
-        items: [
-          { label: "Open", hint: "Enter", run: () => ws.openFolder(id) },
-          { label: "Rename version", run: () => ws.setVersionDialog({ kind: "rename", id }) },
-          { label: `New version from ${name}…`, run: () => ws.setVersionDialog({ kind: "new", from: id }) },
-          { label: "Compare versions…", run: () => ws.setVersionDialog({ kind: "compare", b: id }) },
-        ],
-      },
-      { title: "Claude", items: [{ label: "Summarize this version…", run: () => ws.openHandoff({ kind: "folder", id }) }, { label: "Make build prompt", run: () => ws.openTask({ kind: "folder", id }) }] },
-      { title: "Arrange", items: [pinItem("folders", id, env), { label: "Bring to front", run: () => ws.setFolderStacking(id, "front") }, { label: "Send to back", run: () => ws.setFolderStacking(id, "back") }] },
-      { title: "Danger", items: [{ label: "Delete version", danger: true, run: () => void ws.deleteFolder(id) }] },
-    ];
-  }
-  return [
-    {
-      title: "Folder",
-      items: [
-        { label: "Open", hint: "Enter", run: () => ws.openFolder(id) },
-        { label: "Rename", run: () => env.renameFolder(id) },
-        {
-          label: "Color",
-          submenu: [
-            {
-              items: [
-                { label: "None", icon: swatch(null), checked: !swatchOf(f.color, null), run: () => ws.updateFolder(id, { color: undefined }, "tint folder") },
-                ...SWATCHES.map((sw) => ({ label: SWATCH_LABEL[sw], icon: swatch(sw), checked: swatchOf(f.color, null) === sw, run: () => ws.updateFolder(id, { color: sw }, "tint folder") })),
-              ],
-            },
-          ],
-        },
-        { label: "New folder", run: () => env.newFolder({ x: (data.canvas.folders[id]?.x ?? 0) + 340, y: (data.canvas.folders[id]?.y ?? 0) + 80 }) },
-        { label: sel.length > 1 ? `Group ${sel.length} folders into a folder` : "Group into folder", run: () => env.groupIntoFolder({ folders: sel }) },
-      ],
-    },
-    { title: "Claude", items: [{ label: "Summarize this folder…", run: () => ws.openHandoff({ kind: "folder", id }) }, { label: "Make build prompt", run: () => ws.openTask({ kind: "folder", id }) }] },
-    {
-      title: "Arrange",
-      items: [
-        { label: "Lay out as frame", run: () => void ws.folderToFrame(id) },
-        { label: "Ungroup folder", run: () => void ws.ungroupFolder(id) },
-        pinItem("folders", id, env),
-        { label: "Bring to front", run: () => ws.setFolderStacking(id, "front") },
-        { label: "Send to back", run: () => ws.setFolderStacking(id, "back") },
-      ],
-    },
-    { title: "Danger", items: [{ label: "Delete folder", hint: "Del", danger: true, run: () => void ws.deleteFolder(id) }] },
-  ];
+function pinItem(id: string, env: MenuEnv): MenuItem {
+  const pinned = !!env.data.canvas.cards[id]?.pinned;
+  return { label: pinned ? "Unpin position" : "Pin position", checked: pinned, run: () => env.ws.setPinned(id, !pinned) };
 }
 
 function canvasMenu(p: { x: number; y: number }, env: MenuEnv): MenuSection[] {
@@ -181,7 +111,6 @@ function canvasMenu(p: { x: number; y: number }, env: MenuEnv): MenuSection[] {
                 { label: "Checklist", run: add("checklist") },
                 { label: "Question list", run: add("questions") },
                 { label: "Frame", run: add("frame") },
-                { label: "Folder", run: () => env.newFolder(p) },
               ],
             },
             { items: [{ label: "New artifact…", run: () => env.newArtifact(p) }] },
@@ -194,7 +123,6 @@ function canvasMenu(p: { x: number; y: number }, env: MenuEnv): MenuSection[] {
             { items: [{ label: "Tech & constraints card", run: add("tech"), disabled: tech ? "This project already has one" : undefined }] },
           ],
         },
-        { label: "New folder", run: () => env.newFolder(p) },
         { label: "Paste", hint: "Ctrl+V", run: () => env.paste(p) },
         { label: "New card from clipboard", run: () => env.paste(p) },
         { label: "Import bundle…", run: () => pickBundle([p.x - 120, p.y - 80]) },
@@ -319,8 +247,7 @@ function artifactMenu(c: Card, env: MenuEnv): MenuSection[] {
       items: [
         { label: "Link from here", hint: "L", run: () => env.startLink(c.id) },
         { label: "Wrap in frame", hint: "Ctrl+G", run: () => env.wrap([c.id]) },
-        { label: "Group into folder", run: () => env.groupIntoFolder({ cards: [c.id] }) },
-        pinItem("cards", c.id, env),
+        pinItem(c.id, env),
         { label: "Bring to front", run: () => ws.bringToFront(c.id) },
         { label: "Send to back", run: () => ws.sendToBack(c.id) },
       ],
@@ -370,8 +297,7 @@ function cardMenu(c: Card, env: MenuEnv): MenuSection[] {
   }
   arrange.push(
     { label: "Wrap in frame", hint: "Ctrl+G", run: () => env.wrap([c.id]) },
-    { label: "Group into folder", run: () => env.groupIntoFolder({ cards: [c.id] }) },
-    pinItem("cards", c.id, env),
+    pinItem(c.id, env),
     { label: "Bring to front", run: () => ws.bringToFront(c.id) },
     { label: "Send to back", run: () => ws.sendToBack(c.id) },
   );
@@ -433,8 +359,7 @@ function objectMenu(c: Card, env: MenuEnv): MenuSection[] {
       title: "Arrange",
       items: [
         { label: "Convert to card", run: () => void ws.convertKind(c.id, "card") },
-        { label: "Group into folder", run: () => env.groupIntoFolder({ cards: [c.id] }) },
-        pinItem("cards", c.id, env),
+        pinItem(c.id, env),
         { label: "Bring to front", run: () => ws.bringToFront(c.id) },
         { label: "Send to back", run: () => ws.sendToBack(c.id) },
       ],
@@ -520,7 +445,6 @@ function multiMenu(cards: Card[], env: MenuEnv): MenuSection[] {
       title: "Arrange",
       items: [
         { label: "Wrap in frame", hint: "Ctrl+G", run: () => env.wrap(ids) },
-        { label: env.folderSelection.length ? `Group ${n} cards and ${env.folderSelection.length} folder${env.folderSelection.length === 1 ? "" : "s"} into a folder` : "Group into folder", run: () => env.groupIntoFolder({ cards: ids, folders: env.folderSelection }) },
         {
           label: "Align",
           submenu: [
@@ -592,13 +516,6 @@ function frameMenu(id: string, env: MenuEnv): MenuSection[] {
         },
         { label: "Select contents", disabled: empty, run: () => env.select(members) },
         { label: "New card from clipboard", run: () => env.paste({ x: f.x + f.w / 2, y: f.y + f.h / 2 }) },
-        {
-          label: "Turn into folder",
-          run: () => {
-            env.clearFrameSelection();
-            ws.frameToFolder(id, env.frameContents(id));
-          },
-        },
         {
           label: "Fit to contents",
           disabled: empty,
