@@ -475,6 +475,21 @@ pub fn layout(groups: &[Vec<CardBox>], loose: &[CardBox], obstacles: &[Rect], or
 mod tests {
     use super::*;
 
+    #[test]
+    fn scope_keeps_plans_to_their_cards() {
+        // A frame or selection without ids never widens silently: it is the whole project.
+        let s = Scope::new(Some("frame"), Some("Combat".into()), None);
+        assert_eq!(s.kind, "project");
+        assert!(s.has("anything"));
+        let s = Scope::new(Some("frame"), Some("Combat".into()), Some(vec!["a".into()]));
+        assert_eq!((s.kind.as_str(), s.name.as_str()), ("frame", "Combat"));
+        assert!(s.has("a") && !s.has("b"));
+        let s = Scope::new(Some("selection"), None, Some(vec![]));
+        assert_eq!(s.name, "the selection");
+        assert!(!s.has("a"), "an empty selection touches nothing");
+        assert_eq!(Scope::new(Some("bogus"), None, Some(vec!["a".into()])).kind, "project");
+    }
+
     fn b(id: &str, h: f64) -> CardBox {
         CardBox { id: id.into(), w: CARD_W, h }
     }

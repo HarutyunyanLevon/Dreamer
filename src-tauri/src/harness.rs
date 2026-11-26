@@ -699,7 +699,6 @@ pub struct PlanCheck {
     pub covered: usize,
     pub frames: usize,
     pub retags: usize,
-    pub folder_ops: usize,
     pub overlaps: Option<usize>,
     pub unplaced: usize,
     pub problems: Vec<String>,
@@ -727,8 +726,6 @@ pub fn check_plan(state: &AppState, slug: &str, plan: &Value) -> PlanCheck {
     for op in &ops {
         let kind = op.get("op").and_then(Value::as_str).unwrap_or_default();
         match kind {
-            "create_folder" => c.folder_ops += 1,
-            "move" => c.folder_ops += 1,
             "create_frame" => c.frames += 1,
             "retag" => c.retags += 1,
             "arrange" => {
@@ -788,9 +785,6 @@ pub fn check_plan(state: &AppState, slug: &str, plan: &Value) -> PlanCheck {
     }
     if c.retags == 0 {
         c.problems.push("no retags".into());
-    }
-    if c.folder_ops > 0 {
-        c.problems.push(format!("{} folder ops", c.folder_ops));
     }
     match c.overlaps {
         Some(n) if n > 0 => c.problems.push(format!("{n} overlapping card pairs")),
@@ -865,7 +859,7 @@ fn s3(d: &mut Driver, run: usize, slug: &str) -> RunRecord {
     let note = format!(
         "{:?} {} {}",
         t.end,
-        check.as_ref().map(|c| format!("cards={} pinned={} covered={} frames={} retags={} folder_ops={} overlaps={:?} unplaced={}", c.cards, c.pinned, c.covered, c.frames, c.retags, c.folder_ops, c.overlaps, c.unplaced)).unwrap_or_default(),
+        check.as_ref().map(|c| format!("cards={} pinned={} covered={} frames={} retags={} overlaps={:?} unplaced={}", c.cards, c.pinned, c.covered, c.frames, c.retags, c.overlaps, c.unplaced)).unwrap_or_default(),
         check.as_ref().map(|c| c.problems.join("; ")).unwrap_or_else(|| "no plan".into())
     );
     let mut r = rec("S3", run, ok, note, vec![t]);

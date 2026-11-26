@@ -378,7 +378,7 @@ fn migrate_project(dir: &Path, log: &mut Vec<String>) -> std::result::Result<(),
                 for c in ids {
                     let p = dir.join("trash").join(format!("{c}.md"));
                     let Some(card) = fs::read_to_string(&p).ok().and_then(|t| parse_card(&t, &c).ok()) else { continue };
-                    out.push(json!({ "id": c, "title": card.meta.title, "stage": card.meta.stage, "reason": "deleted", "deleted_at": it.get("deleted_at").cloned().unwrap_or(Value::Null), "pos": null }));
+                    out.push(json!({ "id": c, "title": card.meta.title, "stage": card.meta.stage, "reason": "deleted", "deleted_at": it.get("deleted_at").filter(|v| v.is_string()).cloned().unwrap_or_else(|| json!(now())), "pos": null }));
                     n += 1;
                 }
                 log.push(format!("  trashed folder \"{}\" -> {n} trashed cards", it.get("title").and_then(Value::as_str).unwrap_or_default()));
@@ -587,6 +587,16 @@ mod tests {
         assert_eq!(trash.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(), ["01TRASHED"], "a trashed folder becomes its cards");
         assert_eq!(ws.get_settings().unwrap().last_project.as_deref(), Some("inbox-ideas"));
         assert_eq!(ws.get_settings().unwrap().extra.get("layout"), Some(&json!(2)));
+    }
+
+    #[test]
+    fn a_lost_workspace_json_still_migrates() {
+        let (_t, root) = fixture();
+        fs::remove_file(root.join("workspace.json")).unwrap();
+        fs::remove_dir_all(root.join("inbox")).unwrap();
+        Workspace::open(&root).unwrap();
+        assert!(!root.join("projects/game/folders.json").exists(), "folders became frames");
+        assert!(root.join("projects/game/archive/versions/v1").is_dir());
     }
 
     #[test]

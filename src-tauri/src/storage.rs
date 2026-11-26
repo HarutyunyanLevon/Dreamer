@@ -228,7 +228,9 @@ impl Workspace {
         if let Ok(mut ro) = READ_ONLY.lock() {
             ro.retain(|(r, _)| r != &ws.root);
         }
-        if !ws.root.join("workspace.json").exists() && !ws.root.join("inbox").exists() {
+        // New = nothing from an older layout here (a lost workspace.json alone must still migrate).
+        let no_projects = fs::read_dir(ws.root.join("projects")).map(|mut d| d.next().is_none()).unwrap_or(true);
+        if !ws.root.join("workspace.json").exists() && !ws.root.join("inbox").exists() && no_projects {
             let mut s = Settings::default();
             s.extra.insert("layout".into(), Value::from(migrate::LAYOUT));
             write_json(&ws.root.join("workspace.json"), &s)?;
