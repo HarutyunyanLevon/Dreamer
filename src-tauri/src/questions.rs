@@ -90,7 +90,12 @@ pub fn import(ws: &Workspace, slug: &str) -> Result<bool> {
     let lines = parse(&text);
     let data = ws.load_project(slug)?;
     let card = data.cards.iter().find(|c| c.meta.role.as_deref() == Some(ROLE_CC_QUESTIONS));
-    let known = |l: &String| card.is_some_and(|c| c.meta.items.iter().any(|i| i.source.as_deref().map(str::trim_end) == Some(l.trim_end())));
+    // Known = on the card, or deleted from it (dismissed).
+    let known = |l: &String| {
+        card.is_some_and(|c| {
+            c.meta.items.iter().filter_map(|i| i.source.as_deref()).chain(c.meta.dismissed_sources.iter().map(String::as_str)).any(|s| s.trim_end() == l.trim_end())
+        })
+    };
     let fresh: Vec<ChecklistItem> = lines
         .iter()
         .filter(|l| !known(l))

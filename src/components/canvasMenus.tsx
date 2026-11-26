@@ -3,7 +3,7 @@ import type { Items, Workspace } from "../state/useWorkspace";
 import { STAGES, STAGE_LABEL } from "../theme/types";
 import type { Rect } from "./cardGeometry";
 import type { MenuItem, MenuSection } from "./ContextMenu";
-import { CONVERTIBLE, KIND_LABEL, SWATCHES, SWATCH_LABEL, hasStage, labelSize, swatchOf, type LabelSize } from "./kinds";
+import { CONVERTIBLE, KIND_LABEL, isAnswered, SWATCHES, SWATCH_LABEL, hasStage, labelSize, swatchOf, type LabelSize } from "./kinds";
 import { isClip, isImage } from "./Attachments";
 import { pickBundle } from "./Import";
 import { openScan } from "./Scan";
@@ -342,6 +342,7 @@ function cardMenu(c: Card, env: MenuEnv): MenuSection[] {
       run: () => requestAnimationFrame(() => document.querySelector<HTMLInputElement>(`.card[data-id="${c.id}"] .check-add`)?.focus()),
     });
   }
+  const answered = c.kind === "checklist" ? (c.items ?? []).filter(isAnswered) : [];
   const convertible = CONVERTIBLE.includes(c.kind) && !c.role;
   const arrange: MenuItem[] = [
     { label: "Link from here", hint: "L", run: () => env.startLink(c.id) },
@@ -381,6 +382,7 @@ function cardMenu(c: Card, env: MenuEnv): MenuSection[] {
         { label: "Open", hint: "Enter", run: () => env.openEditor(c) },
         { label: "Add", disabled: isLabel ? "Labels don't show images or clips" : undefined, submenu: [{ items: addItems }] },
         stageMenu([c], env),
+        ...(answered.length ? [{ label: "Clear answered", run: () => void env.ws.deleteChecklistItems(c.id, answered.map((i) => i.id)) }] : []),
       ],
     },
     { title: "Claude", items: [claudeCardMenu(c, env), visualizeMenu(c, env)] },

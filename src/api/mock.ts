@@ -190,11 +190,24 @@ export function createMockApi(): Api {
   add(inbox, { title: "Neon bait", body: "Glows brighter the angrier the fish." }, 528, 0);
   projects.set("inbox", inbox);
   const fish = seedProject("fish-punk-fishing", "Fish-punk fishing");
-  add(fish, { title: "Fish that fight back", body: "What if the lake bites first?" }, 0, 10);
+  const fight = add(fish, { title: "Fish that fight back", body: "What if the lake bites first?" }, 0, 10);
   add(fish, { title: "Chill loop", body: "Cast, wait, let the combo breathe.", stage: "reverie" }, 290, -10);
   add(fish, { title: "Harpoon-rod hybrid", body: "One tool, two moods: patient and loud.", stage: "lucid" }, 540, 50);
   add(fish, { title: "Fish-punk: the dream", body: "Doom energy at a calm pace. Reel in a riff.", stage: "dream" }, 40, 230);
   add(fish, { title: "Rust-lake biome", body: "Neon bait glowing in oily water.", stage: "reverie", source: "claude", ghost: true }, 350, 260);
+  // A "From Claude Code" card (Tauri imports these from QUESTIONS.md): grouped, long, one answered.
+  const cc = (id: string, text: string, answer?: string) => ({ id, text, done: false, question: true, source: `- [ ] ${text}`, ...(answer ? { answer } : {}) });
+  add(fish, {
+    title: "From Claude Code",
+    kind: "checklist",
+    role: "cc-questions",
+    items: [
+      cc("q1", `Q (${fight.id}): How hard should a hooked fish pull back before the line snaps, and does the player get a warning beat first? — context: combat tuning; see FishFightControllerStateMachineConfiguration`),
+      cc("q2", `Q (${fight.id}): Can the fish break free mid-combo? — context: combat`, "Only on a missed beat"),
+      cc("q3", "Q (01MOCKUNKNOWN0000XYZ12): Which save slot does the tutorial use?"),
+      { id: "t1", text: "Playtest the reel timing", done: false },
+    ],
+  }, 620, 260);
   projects.set(fish.slug, fish);
 
   // `npm run dev` + `?stress=1`: a 500-card project to eyeball pan/zoom/drag performance without Tauri.

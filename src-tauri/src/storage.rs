@@ -1124,6 +1124,7 @@ impl Workspace {
                 role,
                 color: Self::clean_color(new.color),
                 items: Self::check_items(new.items.unwrap_or_default()),
+                dismissed_sources: Vec::new(),
                 attachments,
                 stage: new.stage.unwrap_or_default(),
                 tags: new.tags.unwrap_or_default(),
@@ -1202,6 +1203,9 @@ impl Workspace {
         }
         if let Some(i) = patch.items {
             card.meta.items = Self::check_items(i);
+        }
+        if let Some(d) = patch.dismissed_sources {
+            card.meta.dismissed_sources = d;
         }
         if let Some(a) = patch.attachments {
             card.meta.attachments = Self::check_attachments(a)?;
@@ -2433,6 +2437,41 @@ mod tests {
         assert!(crate::questions::import(&ws, &p.slug).unwrap());
         let n = ws.load_project(&p.slug).unwrap().cards.iter().filter(|c| c.meta.role.as_deref() == Some(ROLE_CC_QUESTIONS)).map(|c| c.meta.items.len()).sum::<usize>();
         assert_eq!(n, 3);
+    }
+
+    #[test]
+    fn dismissed_design_question_is_not_reimported() {
+        use crate::model::ROLE_CC_QUESTIONS;
+        let (d, ws) = ws();
+        let p = ws.create_project("Fish").unwrap();
+        let repo = d.path().join("repo");
+        let qpath = crate::questions::questions_path(&repo);
+        fs::create_dir_all(qpath.parent().unwrap()).unwrap();
+        fs::write(&qpath, "- [ ] one
+- [ ] two
+").unwrap();
+        ws.update_project(&p.slug, ProjectPatch { handoff_target: Some(repo.display().to_string()), ..Default::default() }).unwrap();
+        assert!(crate::questions::import(&ws, &p.slug).unwrap());
+        let card = ws.load_project(&p.slug).unwrap().cards.into_iter().find(|c| c.meta.role.as_deref() == Some(ROLE_CC_QUESTIONS)).unwrap();
+        // Delete "one" (unanswered): the source goes to dismissed_sources, QUESTIONS.md is untouched.
+        let (gone, kept): (Vec<_>, Vec<_>) = card.meta.items.iter().cloned().partition(|i| i.text == "one");
+        let patch = CardPatch { items: Some(kept), dismissed_sources: Some(vec![gone[0].source.clone().unwrap()]), ..Default::default() };
+        ws.update_card(&p.slug, &card.meta.id, patch).unwrap();
+        assert_eq!(fs::read_to_string(&qpath).unwrap(), "- [ ] one
+- [ ] two
+");
+        // QUESTIONS.md changes: the dismissed line stays out, a new one comes in.
+        fs::write(&qpath, "- [ ] one
+- [ ] two
+- [ ] three
+").unwrap();
+        assert!(crate::questions::import(&ws, &p.slug).unwrap());
+        assert!(!crate::questions::import(&ws, &p.slug).unwrap());
+        let card = ws.load_project(&p.slug).unwrap().cards.into_iter().find(|c| c.meta.role.as_deref() == Some(ROLE_CC_QUESTIONS)).unwrap();
+        assert_eq!(card.meta.items.iter().map(|i| i.text.as_str()).collect::<Vec<_>>(), vec!["two", "three"]);
+        // Undo (dismissed list cleared) lets it back in.
+        ws.update_card(&p.slug, &card.meta.id, CardPatch { dismissed_sources: Some(vec![]), ..Default::default() }).unwrap();
+        assert!(crate::questions::import(&ws, &p.slug).unwrap());
     }
 
     #[test]

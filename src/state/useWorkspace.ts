@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { proposalPatch } from "../components/ProposalView";
 import { api, type Attachment, type BuildBlock, type Canvas, type Card, type CardKind, type CardPatch, type EditProposal, type Folder, type Frame, type HandoffScope, type Link, type NewCard, type OrganizeLayout, type OrganizePlanData, type Pos, type ProjectData, type ProjectSummary } from "../api";
 import { CARD_H, CARD_W, FOLDER_H, FOLDER_W } from "../components/cardGeometry";
+import { DECISIONS_TITLE, TECH_TEMPLATE, TECH_TITLE, parseItem } from "../components/kinds";
 import type { NewArtifact } from "../api";
 import { ARTIFACT_LABEL, artifactType, createPrompt } from "../components/artifacts/prompts";
 
@@ -450,6 +451,15 @@ export function useWorkspace() {
   const dirty = useRef(new Set<string>());
   const dataRef = useRef<ProjectData | null>(null);
   /** A merge ghost's originals that are still on the canvas. */
+  /** The values `patch` overwrites on `before`, for undo. A list that was absent comes back as [] (absent would not clear it). */
+  const prevOf = (before: Card, patch: CardPatch): CardPatch => {
+    const prev: Record<string, unknown> = {};
+    for (const k of Object.keys(patch)) {
+      const v = (before as Record<string, unknown>)[k];
+      prev[k] = v === undefined && Array.isArray((patch as Record<string, unknown>)[k]) ? [] : v;
+    }
+    return prev as CardPatch;
+  };
   const liveOriginals = (c: Card) => (c.merged_from ?? []).filter((o) => dataRef.current?.cards.some((x) => x.id === o));
   const loadSeq = useRef(0);
   const undoStack = useRef<UndoEntry[]>([]);
@@ -762,7 +772,7 @@ export function useWorkspace() {
    * patch state; the final call passes `{ undoable, from }` (the Pos at drag start).
    */
   const resizeCard = useCallback(
-    (id: string, rect: { x: number; y: number; w: number; h: number }, opts?: { undoable?: boolean; from?: Pos }) => {
+    (id: string, rect: { x: number; y: number; w: number; h?: number }, opts?: { undoable?: boolean; from?: Pos }) => {
       patchPos(id, rect);
       if (opts?.undoable && opts.from) {
         const before = opts.from;
@@ -1409,12 +1419,7 @@ export function useWorkspace() {
     async (id: string, patch: CardPatch) => {
       const slug = activeRef.current!;
       const before = dataRef.current?.cards.find((c) => c.id === id);
-      const prevPatch: CardPatch = {};
-      if (before) {
-        for (const k of Object.keys(patch) as (keyof CardPatch)[]) {
-          (prevPatch as Record<string, unknown>)[k] = (before as Record<string, unknown>)[k];
-        }
-      }
+      const prevPatch: CardPatch = before ? prevOf(before, patch) : {};
       // Editing a Claude suggestion keeps it: Keep (ghost off, a merge's originals to Trash) then
       // the edit, as one undo step. Moves and resizes never come through here.
       if (before?.ghost && !("ghost" in patch)) {
@@ -1453,11 +1458,8 @@ export function useWorkspace() {
       const cards = dataRef.current?.cards ?? [];
       if (!slug || !edits.length) return;
       const undoEdits = edits.flatMap(({ id, patch }) => {
-        const before = cards.find((c) => c.id === id) as Record<string, unknown> | undefined;
-        if (!before) return [];
-        const prev: Record<string, unknown> = {};
-        for (const k of Object.keys(patch)) prev[k] = before[k];
-        return [{ id, patch: prev as CardPatch }];
+        const before = cards.find((c) => c.id === id);
+        return before ? [{ id, patch: prevOf(before, patch) }] : [];
       });
       // Editing a suggestion keeps it (same undo step); a merge's originals go to Trash with it.
       const ghosts = edits.flatMap(({ id }) => {
@@ -1486,6 +1488,70 @@ export function useWorkspace() {
       if (ok) pushUndo({ label, undo: apply([...undoEdits].reverse(), false), redo: apply(edits, true) });
     },
     [run, pushUndo],
+  );
+
+  /**
+   * Appends `text` to the project's Tech & constraints / Project decisions card, creating it when
+   * missing, together with `edits` to other cards: one undo step.
+   */
+  const appendToRoleCard = useCallback(
+    async (role: "tech" | "decisions", text: string, label: string, edits: { id: string; patch: CardPatch }[] = []) => {
+      const slug = activeRef.current;
+      if (!slug) return;
+      const join = (body: string) => `${body.trimEnd()}${body.trim() ? "\n\n" : ""}${text}`;
+      const card = dataRef.current?.cards.find((c) => c.role === role && !c.ghost);
+      if (card) return updateMany(label, [{ id: card.id, patch: { body: join(card.body) } }, ...edits]);
+      const fresh: NewCard =
+        role === "tech"
+          ? { title: TECH_TITLE, role: "tech", body: TECH_TEMPLATE }
+          : { title: DECISIONS_TITLE, role: "decisions", stage: "lucid", body: "Answers that settle open project questions." };
+      const into = folderRef.current;
+      const created = await run(() => api.createCard(slug, { ...(into ? { folder: into } : {}), ...fresh, body: join(fresh.body ?? "") }));
+      if (!created) return;
+      const cards = dataRef.current?.cards ?? [];
+      const undoEdits = edits.flatMap(({ id, patch }) => {
+        const before = cards.find((c) => c.id === id);
+        return before ? [{ id, patch: prevOf(before, patch) }] : [];
+      });
+      const apply = async (list: { id: string; patch: CardPatch }[]) => {
+        for (const { id, patch } of list) await api.updateCard(slug, id, patch);
+      };
+      await run(async () => (await apply(edits), true));
+      pushUndo({
+        label,
+        undo: async () => {
+          await apply([...undoEdits].reverse());
+          await api.deleteCard(slug, created.id);
+        },
+        redo: async () => {
+          await api.restoreCard(slug, created.id);
+          await apply(edits);
+        },
+      });
+    },
+    [run, pushUndo, updateMany],
+  );
+
+  /**
+   * Deletes checklist items. Answered questions go to Project decisions first (same undo step);
+   * a deleted cc-questions item's QUESTIONS.md line is remembered so it is never re-imported.
+   */
+  const deleteChecklistItems = useCallback(
+    async (cardId: string, ids: string[]) => {
+      const card = dataRef.current?.cards.find((c) => c.id === cardId);
+      if (!card) return;
+      const drop = new Set(ids);
+      const gone = (card.items ?? []).filter((i) => drop.has(i.id));
+      if (!gone.length) return;
+      const patch: CardPatch = { items: (card.items ?? []).filter((i) => !drop.has(i.id)) };
+      const sources = gone.flatMap((i) => (i.source ? [i.source] : []));
+      if (sources.length) patch.dismissed_sources = [...(card.dismissed_sources ?? []), ...sources];
+      const answered = gone.filter((i) => i.question && i.answer?.trim());
+      if (!answered.length) return void (await updateCard(cardId, patch));
+      const text = answered.map((i) => `**Q:** ${parseItem(i.text).body}\n**A:** ${i.answer!.trim()}`).join("\n\n");
+      await appendToRoleCard("decisions", text, answered.length > 1 ? "clear answered" : "delete item", [{ id: cardId, patch }]);
+    },
+    [updateCard, appendToRoleCard],
   );
 
   /** "Convert to": only the kind changes, so title, body, attachments (and items) carry over. */
@@ -1935,6 +2001,8 @@ export function useWorkspace() {
     deleteFrameAndCards,
     arrangeCards,
     updateMany,
+    appendToRoleCard,
+    deleteChecklistItems,
     saveImages,
     convertKind,
     setViewport,

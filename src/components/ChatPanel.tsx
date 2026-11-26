@@ -1,5 +1,5 @@
 import { Fragment, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { api, TECH_GAP_ITEM, type Card, type NewCard } from "../api";
+import { api, TECH_GAP_ITEM, type Card } from "../api";
 import { useClaudeChat, type ChatMessage } from "../state/useClaudeChat";
 import type { Workspace } from "../state/useWorkspace";
 import { ClaudeSetup, needsSetup } from "./ClaudeSetup";
@@ -7,7 +7,6 @@ import { IconBulb, IconClip as IconGlobe, IconPlus, IconSend } from "./Icons";
 import type { usePanels } from "../state/usePanels";
 import { ScrollArea } from "../ui/Scroll";
 import { Modal } from "../ui/Modal";
-import { DECISIONS_TITLE, TECH_TEMPLATE, TECH_TITLE } from "./kinds";
 import { ActivitySummary, LiveActivity, Tokens, fmtTokens, modelLabel } from "./Activity";
 import { isCloudModel } from "../api/claude";
 import type { LocalStatus, ModelTier } from "../api/claude";
@@ -301,20 +300,9 @@ export function ChatPanel({ ws, panels }: { ws: Workspace; panels: Pick<ReturnTy
    * A handoff gap interview answer: "platform & tech" goes on the Tech & constraints card, every
    * other item on the Project decisions card. Either is created when the project has none yet.
    */
-  const recordGapAnswer = async (item: string, question: string, choice: string) => {
-    const isTech = item.trim().toLowerCase() === TECH_GAP_ITEM;
-    const role = isTech ? "tech" : "decisions";
-    let card: Card | null | undefined = ws.data?.cards.find((c) => c.role === role && !c.ghost);
-    if (!card) {
-      const fresh: NewCard = isTech
-        ? { title: TECH_TITLE, role: "tech", body: TECH_TEMPLATE }
-        : { title: DECISIONS_TITLE, role: "decisions", stage: "lucid", body: "Answers that settle open project questions (from the handoff gap interview)." };
-      card = await ws.createCard(fresh);
-      if (!card) return;
-    }
-    const sep = card.body.trim() ? "\n\n" : "";
-    await ws.updateCard(card.id, { body: `${card.body.trimEnd()}${sep}**${item}:** ${question}\n**A:** ${choice}` });
-  };
+  const recordGapAnswer = (item: string, question: string, choice: string) =>
+    ws.appendToRoleCard(item.trim().toLowerCase() === TECH_GAP_ITEM ? "tech" : "decisions", `**${item}:** ${question}
+**A:** ${choice}`, "record answer");
 
   const answer = (m: ChatMessage, choice: string) => {
     chat.answerQuestion(m.id, choice);

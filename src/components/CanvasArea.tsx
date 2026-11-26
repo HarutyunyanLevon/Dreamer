@@ -123,16 +123,18 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
       });
     }
   }, []);
+  // Checklists always size their height to their content (an old stored h is ignored).
+  const autoHeight = useMemo(() => new Set((data?.cards ?? []).filter((c) => c.kind === "checklist").map((c) => c.id)), [data?.cards]);
   const rectOf = useCallback(
     (id: string): Rect | undefined => {
       const p = data?.canvas.cards[id];
-      if (p) return cardRect(p, heights.current.get(id));
+      if (p) return cardRect(autoHeight.has(id) ? { ...p, h: undefined } : p, heights.current.get(id));
       const f = data?.canvas.folders?.[id];
       return f ? folderRect(f) : undefined;
     },
     // measureTick: heights changed
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [data, measureTick],
+    [data, measureTick, autoHeight],
   );
 
   // "Tidy this folder?": checked only when a canvas opens and when cards are added to it.
@@ -494,7 +496,7 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
       return;
     }
     if (hasStage(card) && !filter.has(card.stage)) setFilter((prev) => new Set(prev).add(card.stage));
-    const r = cardRect(pos, heights.current.get(card.id));
+    const r = cardRect(card.kind === "checklist" ? { ...pos, h: undefined } : pos, heights.current.get(card.id));
     const { w, h } = sizeRef.current;
     const zoom = Math.min(MAX_ZOOM, Math.max(FOCUS_ZOOM, vp.zoom));
     const free = freeArea(w);
@@ -655,10 +657,14 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
   const clickRef = useRef(onCardClick);
   clickRef.current = onCardClick;
   const onOpenCard = useCallback((c: Card, additive?: boolean) => clickRef.current(c, additive), []);
-  const { moveCard, resizeCard, flushCanvas, bringToFront, updateCard, deleteCard, keepGhostCard } = ws;
+  const { moveCard, resizeCard, flushCanvas, bringToFront, updateCard, deleteCard, keepGhostCard, deleteChecklistItems } = ws;
+  // shortcut: read through a ref so cards stay memoized; a renamed card shows in checklist group headers on the checklist's next render.
+  const cardsRef = useRef(data?.cards);
+  cardsRef.current = data?.cards;
+  const titleOf = useCallback((id: string) => cardsRef.current?.find((c) => c.id === id)?.title, []);
   const cardActions = useMemo(
-    () => ({ moveCard, resizeCard, flushCanvas, bringToFront, updateCard, deleteCard, keepGhostCard }),
-    [moveCard, resizeCard, flushCanvas, bringToFront, updateCard, deleteCard, keepGhostCard],
+    () => ({ moveCard, resizeCard, flushCanvas, bringToFront, updateCard, deleteCard, keepGhostCard, deleteChecklistItems, titleOf }),
+    [moveCard, resizeCard, flushCanvas, bringToFront, updateCard, deleteCard, keepGhostCard, deleteChecklistItems, titleOf],
   );
   const onPromptCard = useCallback((id: string) => setPromptFor(id), []);
   const cardDrag = useMemo(
@@ -1775,7 +1781,7 @@ function CrossLinks({ cards, all, data, rectOf, ws }: { cards: Card[]; all: Map<
 /** What an artifact card can ask the canvas to do. */
 type ArtifactActions = { chip: (id: string, prompt: string, label: string) => void; open: (id: string) => void; settings: () => void };
 
-type CardActions = Pick<Workspace, "moveCard" | "resizeCard" | "flushCanvas" | "bringToFront" | "updateCard" | "deleteCard" | "keepGhostCard">;
+type CardActions = Pick<Workspace, "moveCard" | "resizeCard" | "flushCanvas" | "bringToFront" | "updateCard" | "deleteCard" | "keepGhostCard" | "deleteChecklistItems"> & { titleOf: (id: string) => string | undefined };
 /** Drag into a folder: start, hover (highlight), release (true = moved into a folder). */
 type CardDrag = { begin: () => void; over: (x: number, y: number, id: string) => void; drop: (x: number, y: number, id: string) => boolean; unpin: (id: string) => void };
 
@@ -1900,7 +1906,8 @@ const CardView = memo(function CardView({
   }, [ws, onOpen, onAttachment, linking, card, drag]);
 
   // ----- resize (edge and corner handles) -----
-  const resizeState = useRef<{ dir: HandleDir; x: number; y: number; zoom: number; start: Rect; from: Pos; last: Rect | null } | null>(null);
+  const resizeState = useRef<{ dir: HandleDir; x: number; y: number; zoom: number; start: Rect; from: Pos; last: (Omit<Rect, "h"> & { h?: number }) | null } | null>(null);
+  const autoH = card.kind === "checklist";
   const onHandleDown = (dir: HandleDir) => (e: ReactPointerEvent) => {
     if (e.button !== 0 || !pos || !elRef.current) return;
     e.stopPropagation();
@@ -1915,7 +1922,9 @@ const CardView = memo(function CardView({
     const r = resizeState.current;
     if (!r) return;
     e.stopPropagation();
-    r.last = resizeRect(r.start, r.dir, (e.clientX - r.x) / r.zoom, (e.clientY - r.y) / r.zoom);
+    const next = resizeRect(r.start, r.dir, (e.clientX - r.x) / r.zoom, (e.clientY - r.y) / r.zoom);
+    // A checklist keeps its auto height: only the width changes.
+    r.last = autoH ? { ...next, h: undefined } : next;
     ws.resizeCard(card.id, r.last);
   };
   const onHandleUp = (e: ReactPointerEvent) => {
@@ -1929,9 +1938,9 @@ const CardView = memo(function CardView({
   if (!pos) return null;
   const kind = card.kind ?? "card";
   const staged = hasStage(card);
-  const fixed = pos.h !== undefined;
+  const fixed = !autoH && pos.h !== undefined;
   // Labels size to their text until resized; everything else starts at the default card width.
-  const style: CSSProperties = { left: pos.x, top: pos.y, width: pos.w ?? (kind === "label" ? undefined : CARD_W), height: pos.h, zIndex: z };
+  const style: CSSProperties = { left: pos.x, top: pos.y, width: pos.w ?? (kind === "label" ? undefined : CARD_W), height: autoH ? undefined : pos.h, zIndex: z };
   const menuBtn = (
     <button
       type="button"
@@ -1999,7 +2008,14 @@ const CardView = memo(function CardView({
     <>
       {(kind !== "sticky" || card.title) && <h3>{card.title}</h3>}
       {kind !== "label" && card.attachments.length > 0 && <CardAttachments cardId={card.id} attachments={card.attachments} slug={active} onOpen={onAttachment} />}
-      {kind === "checklist" && <ChecklistBody card={card} onItems={(items) => void ws.updateCard(card.id, { items })} />}
+      {kind === "checklist" && (
+        <ChecklistBody
+          card={card}
+          onItems={(items) => void ws.updateCard(card.id, { items })}
+          onDelete={(ids) => void ws.deleteChecklistItems(card.id, ids)}
+          titleOf={ws.titleOf}
+        />
+      )}
       {kind !== "label" && bodyHtml && <ScrollArea className="card-body md" dangerouslySetInnerHTML={{ __html: bodyHtml }} />}
     </>
   );
@@ -2084,7 +2100,7 @@ const CardView = memo(function CardView({
         </button>
       )}
       {!linking &&
-        HANDLES.map((d) => (
+        (autoH ? (["e", "w"] as HandleDir[]) : HANDLES).map((d) => (
           <div
             key={d}
             className={`rh rh-${d}`}

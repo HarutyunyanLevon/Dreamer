@@ -268,6 +268,9 @@ pub struct Frontmatter {
     pub branch: Option<Value>,
     #[serde(default, deserialize_with = "lenient_list", skip_serializing_if = "Vec::is_empty")]
     pub items: Vec<ChecklistItem>,
+    /// QUESTIONS.md lines whose items were deleted from the cc-questions card: never re-imported.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dismissed_sources: Vec<String>,
     /// Display order; the first image is the cover.
     #[serde(default, deserialize_with = "lenient_list")]
     pub attachments: Vec<Attachment>,
@@ -405,6 +408,7 @@ pub struct CardPatch {
     /// `Some("")` clears it.
     pub color: Option<String>,
     pub items: Option<Vec<ChecklistItem>>,
+    pub dismissed_sources: Option<Vec<String>>,
     pub attachments: Option<Vec<Attachment>>,
 }
 

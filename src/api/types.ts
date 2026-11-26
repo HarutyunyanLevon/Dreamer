@@ -253,6 +253,8 @@ export interface Card {
   color?: string;
   /** Checklist kind. */
   items?: ChecklistItem[];
+  /** cc-questions card: QUESTIONS.md lines of deleted items, never re-imported. */
+  dismissed_sources?: string[];
   /** Display order; the first image is the cover. */
   attachments: Attachment[];
   stage: StageId;
@@ -306,7 +308,7 @@ export interface NewCard {
 }
 
 /** `role: ""` / `color: ""` clear them. */
-export type CardPatch = Partial<Pick<Card, "title" | "body" | "stage" | "tags" | "fields" | "links" | "ghost" | "kind" | "items" | "attachments">> & {
+export type CardPatch = Partial<Pick<Card, "title" | "body" | "stage" | "tags" | "fields" | "links" | "ghost" | "kind" | "items" | "dismissed_sources" | "attachments">> & {
   role?: CardRole | "";
   color?: string;
 };

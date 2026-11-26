@@ -489,3 +489,15 @@ Manual, in the app on the local model:
 3. `/grill-me handoff` from the handoff gap check still records answers on the Tech / Project decisions cards.
 4. A local reply that produced text or a card and then had a failed step: a grey "One step failed · Details" line; Details lists the failed step; ⋯ › Retry with Claude works. A local reply with nothing usable keeps the red banner with Retry with Claude.
 5. After a red-banner local failure, send another message in the same thread: the model still knows the earlier messages (ask "what did I answer first?").
+
+## Question checklists (branch `reliability`)
+`npm run test:checklist` (parseItem / grouping); `cargo test dismissed_design_question_is_not_reimported`. The browser preview's Fish-punk project has a seeded "From Claude Code" card.
+
+Manual:
+1. A long Claude Code question wraps (long words too) and the card grows; links and frames follow. Dragging a side handle changes the width only; there are no top/bottom handles.
+2. Items show under a header with the card's title ("Fish that fight back"); an unknown id shows `…` + its last 5 chars. The context shows as a small grey line and is not editable on the canvas.
+3. Enter in an item adds one below, Shift+Enter adds a newline, Esc reverts, Backspace on an empty item removes it; Enter in an answer commits.
+4. Open the card: the items are under the title, above Notes, with roomy answers; the context is editable in the item text.
+5. Answer a question: it moves into "1 answered ▸" (closed). Delete it with ×: it appears on Project decisions as **Q:**/**A:** (the card is created when missing); one Undo restores the item and the decisions text.
+6. With two answered questions, "Clear answered" (fold header, then the card menu): both go to Project decisions in one append; one Undo restores both.
+7. Delete an unanswered "From Claude Code" item, then add a line to QUESTIONS.md: the new line is imported, the deleted one is not, and QUESTIONS.md itself is unchanged by the delete.

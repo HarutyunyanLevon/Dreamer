@@ -10,7 +10,7 @@ import { IconClose, IconFork, IconTrash } from "./Icons";
 import { ScrollArea } from "../ui/Scroll";
 import { asUrl } from "../util/media";
 import { AttachmentsEditor, imageFiles } from "./Attachments";
-import { hasStage } from "./kinds";
+import { ChecklistBody, hasStage } from "./kinds";
 import { BuildTab } from "./BuildTab";
 import { needsRebuild } from "../util/build";
 
@@ -204,6 +204,18 @@ export function CardEditor({
             )}
           </div>
         </div>
+        )}
+
+        {card.kind === "checklist" && (
+          <div className="editor-row checklist-row">
+            <ChecklistBody
+              card={card}
+              roomy
+              onItems={(items) => void ws.updateCard(card.id, { items })}
+              onDelete={(ids) => void ws.deleteChecklistItems(card.id, ids)}
+              titleOf={(id) => byId.get(id)?.title}
+            />
+          </div>
         )}
 
         {!!card.fields.split_offer && <SplitChip card={card} ws={ws} />}
