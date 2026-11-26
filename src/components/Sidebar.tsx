@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type HTMLAttributes } from "react";
 import { api, type ProjectSummary } from "../api";
-import { type Workspace } from "../state/useWorkspace";
+import { type Workspace } from "../state/workspace";
 import { Modal } from "../ui/Modal";
 import { useTheme } from "../theme/ThemeContext";
 import { IconDoc, IconFolder, IconPlus, IconTrash } from "./Icons";

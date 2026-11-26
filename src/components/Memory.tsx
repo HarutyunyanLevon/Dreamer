@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, type MemoryLogEntry, type MemoryView } from "../api";
-import type { Workspace } from "../state/useWorkspace";
+import type { Workspace } from "../state/workspace";
 import { diffLines } from "../util/diff";
 import { emptyMemory, fromEditor, MEMORY_SECTIONS, memoryWords, parseMemory, renderMemory, toEditor, type MemoryLines } from "../util/memory";
 import { Modal } from "../ui/Modal";

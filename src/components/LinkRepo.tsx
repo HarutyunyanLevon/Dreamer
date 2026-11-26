@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { api } from "../api";
-import type { Workspace } from "../state/useWorkspace";
+import type { Workspace } from "../state/workspace";
 import { Modal } from "../ui/Modal";
 
 /** What linking a folder writes there; shared by the "Link repo…" dialog and the handoff's first-use confirm. */

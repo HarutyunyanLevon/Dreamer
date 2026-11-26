@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import type { OrganizeLayout, OrganizeOp, OrganizePlanData, ProjectData } from "../api";
 import type { ChatMessage } from "../state/useClaudeChat";
-import { simulateOrganize, type OrganizeSim, type Workspace } from "../state/useWorkspace";
+import { simulateOrganize, type OrganizeSim } from "../state/workspace/organizeSim";
+import { type Workspace } from "../state/workspace";
 import { type Rect } from "./cardGeometry";
 import { DuskStrip } from "./DuskGlass";
 import { IconSparkle } from "./Icons";

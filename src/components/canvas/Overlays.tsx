@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { api, type ClipAttachment, type ProjectData } from "../../api";
-import { type Workspace } from "../../state/useWorkspace";
+import { type Workspace } from "../../state/workspace";
 import { Layer } from "../../ui/Layer";
 import { Modal } from "../../ui/Modal";
 import { ScrollArea } from "../../ui/Scroll";

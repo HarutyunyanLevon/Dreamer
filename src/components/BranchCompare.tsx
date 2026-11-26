@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 import type { Card } from "../api";
-import type { Workspace } from "../state/useWorkspace";
+import type { Workspace } from "../state/workspace";
 import { diffLines } from "../util/diff";
 import { Modal } from "../ui/Modal";
 import { ScrollArea } from "../ui/Scroll";

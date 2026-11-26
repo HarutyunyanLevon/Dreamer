@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { api, type ArtMode, type ArtifactThemeRef, type ArtifactVersion, type ArtifactVersionInfo, type ArtifactView as View } from "../../api";
-import type { Workspace } from "../../state/useWorkspace";
+import type { Workspace } from "../../state/workspace";
 import { useArtifactRun } from "../../state/artifactRuns";
 import { Modal } from "../../ui/Modal";
 import { renderMarkdown } from "../../util/markdown";

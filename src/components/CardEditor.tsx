@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import type { Card, Link } from "../api";
-import { type Workspace } from "../state/useWorkspace";
+import { type Workspace } from "../state/workspace";
 import { STAGES, STAGE_LABEL, type StageId } from "../theme/types";
 import { renderMarkdown } from "../util/markdown";
 import { Modal } from "../ui/Modal";

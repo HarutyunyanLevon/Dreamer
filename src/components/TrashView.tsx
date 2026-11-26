@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { api, type TrashItem } from "../api";
-import type { Workspace } from "../state/useWorkspace";
+import type { Workspace } from "../state/workspace";
 import { STAGE_LABEL } from "../theme/types";
 import { Modal } from "../ui/Modal";
 import { ScrollArea } from "../ui/Scroll";

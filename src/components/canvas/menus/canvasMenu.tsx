@@ -1,5 +1,5 @@
 import { type Card, type CardKind, type ProjectData } from "../../../api";
-import { type Workspace } from "../../../state/useWorkspace";
+import { type Workspace } from "../../../state/workspace";
 import { type Rect } from "../../cardGeometry";
 import { type MenuSection } from "../../ContextMenu";
 import { KIND_LABEL, SWATCHES, SWATCH_LABEL, swatchOf } from "../../kinds";

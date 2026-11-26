@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, type Card, type HandoffEvent, type HandoffRepoResult, type HandoffScope, type HandoffSpec, type ProjectData } from "../api";
-import { type Workspace } from "../state/useWorkspace";
+import { type Workspace } from "../state/workspace";
 import { STAGES, STAGE_LABEL, type StageId } from "../theme/types";
 import { LinkRepoWrites } from "./LinkRepo";
 import { Modal } from "../ui/Modal";

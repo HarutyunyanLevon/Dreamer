@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
 import { api, type Card, type CardKind, type ClipAttachment, type Frame } from "../../api";
 import { CARD_H, CARD_W, cardRect, displayStack, type Rect } from "../cardGeometry";
-import { type Workspace } from "../../state/useWorkspace";
+import { type Workspace } from "../../state/workspace";
 import { useTheme } from "../../theme/ThemeContext";
 import { STAGES, STAGE_LABEL, type StageId } from "../../theme/types";
 import { Layer } from "../../ui/Layer";

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, type ImportOffer, type ImportPlan, type ImportResult, type ImportTarget } from "../api";
-import type { Workspace } from "../state/useWorkspace";
+import type { Workspace } from "../state/workspace";
 import { Modal } from "../ui/Modal";
 
 /** First non-blank line (after an optional fence) is `---` and the header has dreamer_bundle. */

@@ -1,6 +1,6 @@
 import { useState } from "react";
 import type { Card } from "../api";
-import type { Workspace } from "../state/useWorkspace";
+import type { Workspace } from "../state/workspace";
 import { STAGE_LABEL, type StageId } from "../theme/types";
 import { Modal } from "../ui/Modal";
 

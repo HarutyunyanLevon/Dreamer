@@ -2,7 +2,7 @@ import { memo, useCallback, useLayoutEffect, useMemo, useRef, type CSSProperties
 import { type Card, type Pos } from "../../api";
 import { renderMarkdown } from "../../util/markdown";
 import { CARD_W, HANDLES, resizeRect, type HandleDir, type Rect } from "../cardGeometry";
-import { type Workspace } from "../../state/useWorkspace";
+import { type Workspace } from "../../state/workspace";
 import { STAGE_LABEL } from "../../theme/types";
 import { ScrollArea } from "../../ui/Scroll";
 import { branchGroup } from "../BranchCompare";

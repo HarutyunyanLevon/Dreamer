@@ -1,5 +1,5 @@
 import { CanvasArea } from "./components/canvas/Canvas";
-import { ChatPanel } from "./components/ChatPanel";
+import { ChatPanel } from "./components/chat/ChatPanel";
 import { HandoffHost } from "./components/Handoff";
 import { MemoryHost } from "./components/Memory";
 import { PanelTabs } from "./components/PanelTabs";
@@ -9,7 +9,7 @@ import { ShaderBackground } from "./components/ShaderBackground";
 import { Sidebar } from "./components/Sidebar";
 import { ImportHost } from "./components/Import";
 import { useEffect, useState } from "react";
-import { useWorkspace } from "./state/useWorkspace";
+import { useWorkspace } from "./state/workspace";
 import { ThemeProvider } from "./theme/ThemeContext";
 import { api } from "./api";
 

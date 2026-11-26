@@ -1,6 +1,6 @@
 import { memo, useCallback, useEffect, useRef, useState, type DragEvent } from "react";
 import { api, type Attachment, type Card, type ClipAttachment, type ImageAttachment } from "../api";
-import type { Workspace } from "../state/useWorkspace";
+import type { Workspace } from "../state/workspace";
 import { Layer } from "../ui/Layer";
 import { asUrl, useMediaUrl } from "../util/media";
 import { IconClip, IconClose } from "./Icons";

@@ -1,7 +1,7 @@
 import { useMemo } from "react";
 import { type Card } from "../../api";
 import { type Rect } from "../cardGeometry";
-import { type GhostLink, type Workspace } from "../../state/useWorkspace";
+import { type GhostLink, type Workspace } from "../../state/workspace";
 
 const center = (r: Rect) => ({ x: r.x + r.w / 2, y: r.y + r.h / 2 });
 

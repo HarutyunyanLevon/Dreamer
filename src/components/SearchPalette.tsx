@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { api, type SearchHit } from "../api";
-import type { Workspace } from "../state/useWorkspace";
+import type { Workspace } from "../state/workspace";
 import { Modal } from "../ui/Modal";
 import { ScrollArea } from "../ui/Scroll";
 import { KIND_LABEL } from "./kinds";
