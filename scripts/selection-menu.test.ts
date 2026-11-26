@@ -1,6 +1,6 @@
 // npx tsx scripts/selection-menu.test.ts — selectionMenu: which items show, and that edits are ONE workspace call (= one undo step).
 import assert from "node:assert/strict";
-import { selectionMenu, type MenuEnv } from "../src/components/canvasMenus";
+import { selectionMenu, type MenuEnv } from "../src/components/canvas/menus/selectionMenu";
 import type { MenuItem, MenuSection } from "../src/components/ContextMenu";
 import type { Card } from "../src/api";
 import { VERBS, selectionBlock } from "../src/components/verbs";

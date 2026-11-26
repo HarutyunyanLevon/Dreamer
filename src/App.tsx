@@ -1,4 +1,4 @@
-import { CanvasArea } from "./components/CanvasArea";
+import { CanvasArea } from "./components/canvas/Canvas";
 import { ChatPanel } from "./components/ChatPanel";
 import { HandoffHost } from "./components/Handoff";
 import { MemoryHost } from "./components/Memory";
