@@ -425,3 +425,12 @@ Manual (Windows, `npm run tauri dev`), checks that need the real window:
 4. The sidebar has Memory, Import bundle… and Link repo… only; the canvas menus have no gap check, scan, build prompt, sticky or label; Settings has no hotkey, autostart, local model or build model fields.
 5. A chat turn, /organize and /grill-me still run (Claude only); a stalled turn still offers Stop / Retry.
 Not run in this session: the live window (the Tauri window cannot be driven here) and any real Claude turn after the sidecar edit.
+
+## Strip-down step 3 (right-click is the only card menu)
+Automated: `npm run test:menu` (selectionMenu: n=1 card, n=1 image, n=3 mixed; edits are one workspace call = one undo step), `npx tsc --noEmit`, `npm run build`.
+
+Manual (`npm run tauri dev`):
+1. No ⋯ on any card. The stage dot opens the Stage submenu; Keep/Dismiss, link, `? N` badge still work.
+2. Right-click an unselected card: only it is selected and its menu opens. Right-click inside a multi-selection: selection kept. Right-click empty canvas: canvas menu.
+3. Menu key / Shift+F10: menu for the selection, else canvas menu at the canvas centre.
+4. Select 3 cards: Stage, Add tag, Pin, Bring to front, Duplicate, each undoes with ONE Ctrl+Z. Deepen ▸ Grill me sends one chat turn naming all three.

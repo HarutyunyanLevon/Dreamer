@@ -7,7 +7,7 @@ import { coverOf, useArtifact, useArtifactFileUrl } from "./hooks";
 import { ARTIFACT_LABEL, artifactType } from "./prompts";
 
 /** The head row of an artifact card: type icon and type name (the title is the card's h3). */
-export function ArtifactHead({ card, menu }: { card: Card; menu: React.ReactNode }) {
+export function ArtifactHead({ card }: { card: Card }) {
   const type = artifactType(card);
   return (
     <div className="card-head artifact-head">
@@ -15,7 +15,6 @@ export function ArtifactHead({ card, menu }: { card: Card; menu: React.ReactNode
         <ArtifactIcon type={type} size={14} />
       </span>
       <span className="stage-name">{ARTIFACT_LABEL[type]}</span>
-      {menu}
     </div>
   );
 }

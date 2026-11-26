@@ -381,6 +381,26 @@ export function useWorkspace() {
     setCanRedo(false);
   }, []);
 
+  /** Runs `fn` and folds every undo entry it pushed into one step. */
+  const grouped = useCallback(
+    async (label: string, fn: () => Promise<unknown>) => {
+      const start = undoStack.current.length;
+      await fn();
+      const added = undoStack.current.splice(start);
+      if (added.length < 2) return void added.forEach(pushUndo);
+      pushUndo({
+        label,
+        undo: async () => {
+          for (const e of [...added].reverse()) await e.undo();
+        },
+        redo: async () => {
+          for (const e of added) await e.redo();
+        },
+      });
+    },
+    [pushUndo],
+  );
+
   const undo = useCallback(async () => {
     const entry = undoStack.current.pop();
     setCanUndo(undoStack.current.length > 0);
@@ -579,13 +599,41 @@ export function useWorkspace() {
     [flushCanvas, pushLayoutUndo],
   );
 
-  /** Pin or unpin a card's position (one undo step). */
+  /** Pin or unpin card positions (one undo step for all). */
   const setPinned = useCallback(
-    (id: string, pinned: boolean) => {
+    (ids: string | string[], pinned: boolean) => {
+      const list = Array.isArray(ids) ? ids : [ids];
       const before = layoutSnapshot();
-      if (!before?.cards[id]) return;
-      patchCanvas((c) => ({ ...c, cards: { ...c.cards, [id]: { ...c.cards[id], pinned: pinned || undefined } } }));
+      if (!before) return;
+      patchCanvas((c) => {
+        const cards = { ...c.cards };
+        for (const id of list) if (cards[id]) cards[id] = { ...cards[id], pinned: pinned || undefined };
+        return { ...c, cards };
+      });
       commitLayout(pinned ? "pin position" : "unpin position", before);
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [patchCanvas, commitLayout],
+  );
+
+  /** Bring several cards to front / send them to back, keeping their relative order (one undo step). */
+  const stackCards = useCallback(
+    (ids: string[], where: "front" | "back") => {
+      const before = layoutSnapshot();
+      if (!before) return;
+      patchCanvas((c) => {
+        const zs = (skip: string[]) => Object.entries(c.cards).filter(([k]) => !skip.includes(k)).map(([, p]) => p.z ?? 0);
+        const others = zs(ids);
+        const top = others.length ? Math.max(...others) : 0;
+        const bottom = others.length ? Math.min(...others) : 0;
+        const ordered = ids.filter((id) => c.cards[id]).sort((a, b) => (c.cards[a].z ?? 0) - (c.cards[b].z ?? 0));
+        const cards = { ...c.cards };
+        ordered.forEach((id, i) => {
+          cards[id] = where === "front" ? { ...cards[id], z: top + 1 + i, back: undefined } : { ...cards[id], z: bottom - ordered.length + i, back: true };
+        });
+        return { ...c, cards };
+      });
+      commitLayout(where === "front" ? "bring to front" : "send to back", before);
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [patchCanvas, commitLayout],
@@ -1349,6 +1397,8 @@ export function useWorkspace() {
     setOrganizePreview,
     applyOrganize,
     setPinned,
+    stackCards,
+    grouped,
     linkMode,
     linkFrom,
     setLinking,

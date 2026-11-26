@@ -14,7 +14,7 @@ import { branchGroup } from "./BranchCompare";
 import { CardEditor } from "./CardEditor";
 import { MistLayer } from "./MistLayer";
 import { DEFAULT_FRAME_TITLE, FRAME_PAD, FrameView, centerInside, type FrameControls } from "./Frames";
-import { ChecklistBody, ClipBody, DECISIONS_TITLE, ImageBody, KIND_LABEL, TECH_TEMPLATE, TECH_TITLE, hasStage, openQuestions } from "./kinds";
+import { ChecklistBody, ClipBody, DECISIONS_TITLE, ImageBody, TECH_TEMPLATE, TECH_TITLE, hasStage, openQuestions } from "./kinds";
 import { IconCard, IconCheck, IconChecklist, IconClip, IconFit, IconFrame, IconImage, IconLink, IconMerge, IconMinus, IconPin, IconPlus, IconRedo, IconSparkle, IconTrash as IconTrashCan, IconUndo } from "./Icons";
 import { PromptModal, buildPrompt } from "./PromptModal";
 import { ContextMenu, type MenuSection } from "./ContextMenu";
@@ -518,10 +518,14 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
     [linkMode, linkFrom, ws, setLinking],
   );
 
-  /** Card menu (right-click or ⋯): the whole selection's menu when the card is part of it. */
-  const openCardMenu = useCallback((id: string, x: number, y: number) => {
+  /** Right-click on a card: a selected card keeps the selection, an unselected one becomes the selection. */
+  const openCardMenu = useCallback((id: string, x: number, y: number, stage?: boolean) => {
     const sel = selectionRef.current;
-    setCtx({ x, y, target: sel.length > 1 && sel.includes(id) ? { kind: "multi", ids: sel } : { kind: "card", id } });
+    if (stage) return setCtx({ x, y, target: { kind: "stage", id } });
+    if (sel.includes(id)) return setCtx({ x, y, target: { kind: "multi", ids: sel } });
+    setSelectedFrame(null);
+    setSelection(new Set([id]));
+    setCtx({ x, y, target: { kind: "card", id } });
   }, []);
   const openCardMenuRef = useRef(openCardMenu);
   openCardMenuRef.current = openCardMenu;
@@ -895,7 +899,7 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
     const box = root.getBoundingClientRect();
     const sel = selectionRef.current;
     const near = (r: DOMRect | undefined) => (r ? { x: r.left + 16, y: r.top + 16 } : { x: box.left + box.width / 2, y: box.top + box.height / 2 });
-    if (sel.length > 1) setCtx({ ...near(rectOfEl(`.card[data-id="${sel[sel.length - 1]}"]`)), target: { kind: "multi", ids: sel } });
+    if (sel.length) setCtx({ ...near(rectOfEl(`.card[data-id="${sel[sel.length - 1]}"]`)), target: { kind: "multi", ids: sel } });
     else if (single) setCtx({ ...near(rectOfEl(`.card[data-id="${single.id}"]`)), target: { kind: "card", id: single.id } });
     else if (selectedFrame) setCtx({ ...near(rectOfEl(`[data-frame="${selectedFrame}"] .frame-tab`)), target: { kind: "frame", id: selectedFrame } });
     else {
@@ -930,9 +934,10 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
     promptClip: (t) => setClipPrompt("cardId" in t ? { cardId: t.cardId } : { at: t.point }),
     paste: (p) => void pasteAt(p),
     askText: setAsk,
-    visualize: (c, type) => {
+    visualize: (cards, type) => {
+      const c = cards[0];
       const pos = data?.canvas.cards[c.id];
-      void ws.createArtifact({ type, title: c.title, brief: briefFromCard(c, type), sourceCard: c.id, ...(pos ? { x: pos.x + (pos.w ?? CARD_W) + 60, y: pos.y } : {}) });
+      void ws.createArtifact({ type, title: cards.length > 1 ? `${c.title} + ${cards.length - 1}` : c.title, brief: cards.map((x) => briefFromCard(x, type)).join("\n\n"), sourceCard: c.id, ...(pos ? { x: pos.x + (pos.w ?? CARD_W) + 60, y: pos.y } : {}) });
     },
     newArtifact: (point) => setNewArtifact({ at: { x: point.x - CARD_W / 2, y: point.y - CARD_H / 2 } }),
     openArtifact: (id) => setArtifactView(id),
@@ -953,10 +958,10 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
       setSelection(new Set());
       setLinking(true, id);
     },
-    duplicate: (c) => void copyCard(c, "duplicate"),
+    duplicate: (cards) => void ws.grouped("duplicate", async () => { for (const c of cards) await copyCard(c, "duplicate"); }),
     branch: (c) => void copyCard(c, "branch"),
-    copyPrompt: (c) =>
-      void navigator.clipboard.writeText(buildPrompt(c, data!.cards, "Develop")).then(
+    copyPrompt: (cards) =>
+      void navigator.clipboard.writeText(cards.map((c) => buildPrompt(c, data!.cards, "Develop")).join("\n\n---\n\n")).then(
         () => ws.toast("Prompt copied to the clipboard."),
         (e) => ws.setError(`Couldn't copy: ${e instanceof Error ? e.message : String(e)}`),
       ),
@@ -1441,7 +1446,7 @@ const CardView = memo(function CardView({
   /** A Claude edit proposal is pending for this card. */
   proposed: boolean;
   onProposal: (id: string) => void;
-  onMenu: (id: string, x: number, y: number) => void;
+  onMenu: (id: string, x: number, y: number, stage?: boolean) => void;
   onMeasure: (id: string, h: number) => void;
   onAttachment: (cardId: string, attId: string, anchor: DOMRect) => void;
   drag: CardDrag;
@@ -1557,28 +1562,26 @@ const CardView = memo(function CardView({
   const staged = hasStage(card);
   const fixed = !autoH && pos.h !== undefined;
   const style: CSSProperties = { left: pos.x, top: pos.y, width: pos.w ?? CARD_W, height: autoH ? undefined : pos.h, zIndex: z };
-  const menuBtn = (
-    <button
-      type="button"
-      className="card-menu-btn"
-      aria-label={`${KIND_LABEL[kind]} menu for ${card.title || "untitled"}`}
-      onClick={(e) => {
-        e.stopPropagation();
-        const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
-        onMenu(card.id, r.left, r.bottom + 4);
-      }}
-    >
-      ⋯
-    </button>
-  );
   const open = openQuestions(card.items);
   const doneCount = (card.items ?? []).filter((i) => i.done).length;
   const ghost = !!card.ghost;
   const head = kind === "artifact" ? (
-    <ArtifactHead card={card} menu={menuBtn} />
+    <ArtifactHead card={card} />
   ) : staged ? (
     <div className="card-head">
-      <span className={`dot dot-${card.stage}`} aria-hidden="true" />
+      <button
+        type="button"
+        className="stage-dot-btn"
+        aria-label={`Stage: ${STAGE_LABEL[card.stage]}. Change stage`}
+        onPointerDown={(e) => e.stopPropagation()}
+        onClick={(e) => {
+          e.stopPropagation();
+          const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+          onMenu(card.id, r.left, r.bottom + 4, true);
+        }}
+      >
+        <span className={`dot dot-${card.stage}`} aria-hidden="true" />
+      </button>
       <span className="stage-name">{STAGE_LABEL[card.stage]}</span>
       {card.stage === "built" && <span className="built-check" aria-hidden="true"><IconCheck /></span>}
       {card.role === "tech" && <span className="tech-chip">{TECH_TITLE}</span>}
@@ -1596,7 +1599,6 @@ const CardView = memo(function CardView({
       >
         <IconSparkle />
       </button>
-      {menuBtn}
     </div>
   ) : kind === "checklist" ? (
     <div className="card-head">
@@ -1617,11 +1619,8 @@ const CardView = memo(function CardView({
           ? {open}
         </button>
       )}
-      {menuBtn}
     </div>
-  ) : (
-    menuBtn
-  );
+  ) : null;
   const media =
     kind === "artifact" && !ghost ? (
       <ArtifactCardBody card={card} slug={active} onChip={artifact.chip} onOpen={artifact.open} onSettings={artifact.settings} />

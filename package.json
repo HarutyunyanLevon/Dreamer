@@ -13,7 +13,8 @@
     "tauri": "tauri",
     "check:themes": "tsx scripts/check-themes.ts",
     "test:reliability": "tsx scripts/reliability/last-resort.test.ts",
-    "test:checklist": "tsx scripts/checklist-items.test.ts"
+    "test:checklist": "tsx scripts/checklist-items.test.ts",
+    "test:menu": "tsx scripts/selection-menu.test.ts"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.3.322",
