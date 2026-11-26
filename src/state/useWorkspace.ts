@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { proposalPatch } from "../components/ProposalView";
-import { api, type Attachment, type BuildBlock, type Canvas, type Card, type CardKind, type CardPatch, type EditProposal, type Folder, type Frame, type HandoffScope, type Link, type NewCard, type OrganizeLayout, type OrganizePlanData, type Pos, type ProjectData, type ProjectSummary } from "../api";
+import { api, type Attachment, type BuildBlock, type Canvas, type Card, type CardKind, type CardPatch, type EditProposal, type Folder, type Frame, type HandoffScope, type Link, type NewCard, type OrganizeLayout, type OrganizePlanData, type Pos, type ProjectData, type ProjectSummary, type SavedTask } from "../api";
 import { CARD_H, CARD_W, FOLDER_H, FOLDER_W } from "../components/cardGeometry";
 import { DECISIONS_TITLE, TECH_TEMPLATE, TECH_TITLE, parseItem } from "../components/kinds";
 import type { NewArtifact } from "../api";
@@ -389,6 +389,8 @@ export interface HandoffRequest {
 export interface TaskRequest {
   scope: HandoffScope;
   n: number;
+  /** Reopen this saved task in the build dialog instead of writing a new one. */
+  saved?: SavedTask;
 }
 
 export type VersionDialog = { kind: "new"; from?: string } | { kind: "rename"; id: string } | { kind: "compare"; a?: string; b?: string; card?: string };
@@ -1969,7 +1971,7 @@ export function useWorkspace() {
     openHandoff: (scope: HandoffScope) => setHandoffRequest({ scope, n: ++handoffSeq.current }),
     clearHandoff: () => setHandoffRequest(null),
     taskRequest,
-    openTask: (scope: HandoffScope) => setTaskRequest({ scope, n: ++handoffSeq.current }),
+    openTask: (scope: HandoffScope, saved?: SavedTask) => setTaskRequest({ scope, n: ++handoffSeq.current, saved }),
     clearTask: () => setTaskRequest(null),
     designOpen,
     setDesignOpen,

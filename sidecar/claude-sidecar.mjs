@@ -22,7 +22,7 @@
 //        {type:"reset_thread", thread}                    -- "Reset chat": drop that thread's session
 //        {type:"interrupt", hard?}                        -- hard: also close the session (Retry after a stall)
 //        {type:"tool_response", reqId, result} | {type:"tool_response", reqId, error}
-//        {type:"oneshot_start", job, mode:"gaps"|"generate"|"task", prompt, model}
+//        {type:"oneshot_start", job, mode:"gaps"|"generate"|"task"|"revise", prompt, model}
 //                                    -- a handoff pack session: its own one-turn query, not a chat
 //                                       thread; tools are handoff_* requests carrying the job id
 //        {type:"oneshot_cancel", job}                      -- interrupt it; Rust drops its output
@@ -2424,10 +2424,19 @@ const TASK_SYSTEM = [
     "'What to build'. Never write the diff yourself. Write the change task around it (what differs, what to keep) and " +
     "list the files from the card's build.files as the likely places to change.",
   "Flags: in meta.flags, list each thin spot: a card for which no acceptance criteria can be written, cards that " +
-    "contradict each other, an asset a card refers to that is missing. { card_id?, text } with one short sentence; " +
-    "card_id only when it is one card. An empty list is fine; do not pad it. meta.title: a short imperative title. " +
+    "contradict each other, an asset a card refers to that is missing, a card outside the job this one needs. " +
+    "{ card_id?, text, question, choices, recommended, needs_card_id? }: text is one short sentence; card_id only when " +
+    "it is one card. question: a short question the user can answer to resolve it. choices: 2-4 concrete, mutually " +
+    "exclusive answers grounded in the cards and the project (never invented scope). recommended: the one you would " +
+    "pick, copied exactly from choices. needs_card_id: only when the thin spot is a missing dependency on a card that is " +
+    "not being built (its id from list_cards or the links). An empty list is fine; do not pad it. meta.title: a short imperative title. " +
     "meta.card_ids: exactly the cards to build. Tone: formal, neutral, concise; no emoji.",
 ].join("\n\n");
+
+const REVISE_SYSTEM =
+  "You revise a build prompt for Claude Code so it reflects the user's decisions. Edit only what the decisions " +
+  "affect (lines, acceptance criteria), remove statements they contradict, keep every other byte as it is. Never " +
+  "add scope. Call write_task(markdown, meta) exactly once with the full revised prompt, then end with one short sentence.";
 
 const oneshots = new Map();
 
@@ -2463,6 +2472,7 @@ function handoffTools(job, mode) {
       wrap(async (a) => imageResult(a, await call("view_attachment", a))),
     ),
   ];
+  if (mode === "revise") return handoffTools(job, "task").filter((t) => t.name === "write_task");
   if (mode === "task") {
     tools.push(
       tool("read_design_doc", "Read one doc of the latest design revision of the open version (e.g. 01-gdd.md), if there is one.", { name: z.string() }, wrap(async (a) => text(await call("read_design_doc", a)))),
@@ -2474,7 +2484,16 @@ function handoffTools(job, mode) {
           meta: z.object({
             title: z.string(),
             card_ids: z.array(z.string()),
-            flags: z.array(z.object({ card_id: z.string().optional(), text: z.string() })),
+            flags: z.array(
+              z.object({
+                card_id: z.string().optional(),
+                text: z.string(),
+                question: z.string().optional(),
+                choices: z.array(z.string()).optional(),
+                recommended: z.string().optional(),
+                needs_card_id: z.string().optional(),
+              }),
+            ),
           }),
         },
         wrap(async (a) => text(await call("write_task", a))),
@@ -2519,7 +2538,7 @@ function startOneshot(msg) {
   entry.q = query({
     prompt: turns,
     options: {
-      systemPrompt: { type: "custom", prompt: mode === "gaps" ? GAP_SYSTEM : mode === "task" ? TASK_SYSTEM : GEN_SYSTEM },
+      systemPrompt: { type: "custom", prompt: mode === "gaps" ? GAP_SYSTEM : mode === "task" ? TASK_SYSTEM : mode === "revise" ? REVISE_SYSTEM : GEN_SYSTEM },
       allowedTools: tools.map((t) => `mcp__handoff__${t.name}`),
       // No built-in tools at all (no files, shell or web), and the user's own settings are ignored.
       // Every tool offered is in allowedTools, so no permission callback is needed.

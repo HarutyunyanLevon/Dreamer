@@ -1625,6 +1625,16 @@ input.frame-tab { cursor: text; min-width: 180px; outline: 2px solid var(--accen
 .task-flags { margin: 0; padding: 8px 12px; list-style: none; display: flex; flex-direction: column; gap: 6px; border-radius: 14px; background: rgba(255, 255, 255, 0.6); border: 1px solid var(--accent); color: var(--ink); font-size: 14px; }
 .task-flags li, .task-list li { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
 .task-flag-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.flag-stepper { gap: 10px; }
+.flag-stepper .question { display: flex; flex-direction: column; gap: 4px; align-items: flex-start; }
+.flag-step-head, .flag-step-foot { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.flag-dots { display: inline-flex; gap: 4px; }
+.flag-dot { width: 9px; height: 9px; padding: 0; border-radius: 50%; border: 1px solid var(--muted); background: transparent; cursor: pointer; }
+.flag-dot.done { background: var(--accent); border-color: var(--accent); }
+.flag-dot.skipped { border-style: dashed; }
+.flag-dot.on { outline: 2px solid var(--accent); outline-offset: 1px; }
+.flag-own { resize: none; field-sizing: content; min-height: 2.2em; max-height: 12em; }
+.flag-summary { font-size: 14px; text-decoration: none; }
 .task-edit { flex: 1; min-height: 260px; width: 100%; resize: vertical; box-sizing: border-box; padding: 14px 16px; border-radius: 18px; border: 1px solid rgba(255, 255, 255, 0.8); background: rgba(255, 255, 255, 0.62); color: var(--ink); font: 13px/1.5 ui-monospace, Consolas, monospace; }
 .task-body { min-height: 260px; }
 .tasks-panel { display: flex; flex-direction: column; gap: 12px; }

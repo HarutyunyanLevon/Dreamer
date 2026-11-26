@@ -742,6 +742,19 @@ export type HandoffEvent = { job: string } & HandoffEventBody;
 export interface TaskFlag {
   card_id?: string | null;
   text: string;
+  /** A short answerable question, 2-4 choices and the recommended one (absent in old tasks). */
+  question?: string;
+  choices?: string[];
+  recommended?: string;
+  /** The thin spot is a card outside the job this one needs. */
+  needs_card_id?: string;
+}
+/** Flag index (as a string) -> the user's decision. */
+export type FlagAnswers = Record<string, string>;
+/** "Apply decisions": rewrite this prompt for these answers instead of writing a new one. */
+export interface TaskRevise {
+  markdown: string;
+  decisions: { question: string; answer: string }[];
 }
 export type TaskKind = "build" | "rebuild";
 export interface TaskSave {
@@ -750,6 +763,8 @@ export interface TaskSave {
   card_ids: string[];
   kind: TaskKind;
   version: string;
+  flags?: TaskFlag[];
+  flag_answers?: FlagAnswers;
 }
 /** A saved task file (<repo>/docs/design/tasks/). */
 export interface SavedTask {
@@ -762,6 +777,10 @@ export interface SavedTask {
   created: string;
   version: string;
   done?: string | null;
+  /** The body without frontmatter. */
+  markdown?: string;
+  flags?: TaskFlag[];
+  flag_answers?: FlagAnswers;
 }
 /** What Claude Code is told to do with a saved task (mirrors task::reference). */
 export const taskReference = (file: string) => `Implement ${file}. Follow CLAUDE.md and the Report back section.`;
@@ -874,7 +893,7 @@ export interface Api {
   /** Interrupts the running handoff session; nothing it produced is written. */
   handoffCancel(): Promise<void>;
   /** "Make build prompt" for these cards (their links come along as context); events like handoffStart's. */
-  taskStart(slug: string, ids: string[]): Promise<string>;
+  taskStart(slug: string, ids: string[], model?: string, revise?: TaskRevise): Promise<string>;
   /** Writes the task into the linked repo and queues its cards; returns the repo-relative path. */
   saveTask(slug: string, task: TaskSave): Promise<string>;
   listTasks(slug: string): Promise<SavedTask[]>;

@@ -382,8 +382,8 @@ pub fn handoff_cancel(state: State<AppState>) -> Result<()> {
 /// "Make build prompt": starts the one-shot session for these cards (and their links as context).
 /// Progress and the finished task arrive as `handoff-event`s tagged with the returned job id.
 #[tauri::command(async)]
-pub fn task_start(app: AppHandle, state: State<AppState>, slug: String, ids: Vec<String>) -> Result<String> {
-    crate::task::start(&app, &state, &slug, ids)
+pub fn task_start(app: AppHandle, state: State<AppState>, slug: String, ids: Vec<String>, model: Option<String>, revise: Option<crate::task::Revise>) -> Result<String> {
+    crate::task::start(&app, &state, &slug, ids, model, revise)
 }
 
 /// Writes the task into the linked repo and queues its cards. Returns the repo-relative path.

@@ -64,7 +64,7 @@ export const tauriApi: Api = {
   },
   handoffStart: (slug, mode, spec, gaps) => invoke("handoff_start", { slug, mode, spec, gaps: gaps ?? null }),
   handoffCancel: () => invoke("handoff_cancel"),
-  taskStart: (slug, ids) => invoke("task_start", { slug, ids }),
+  taskStart: (slug, ids, model, revise) => invoke("task_start", { slug, ids, model: model ?? null, revise: revise ?? null }),
   saveTask: (slug, task) => invoke("save_task", { slug, task }),
   listTasks: (slug) => invoke("list_tasks", { slug }),
   markTaskDone: (slug, file) => invoke("mark_task_done", { slug, file }),

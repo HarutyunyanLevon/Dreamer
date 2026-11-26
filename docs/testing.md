@@ -508,3 +508,10 @@ Manual:
 2. "Other…" shows a text box (Enter picks it); Skip greys the question and it is sent as `A: (skipped)` and not written to the notes. Ctrl+Enter sends. After Send the form is read-only and shows the choices.
 3. Click "? N" on the From Claude Code card (or "Answer with Claude" in its editor, or the /grill-me chip in its thread): a form with its open questions. Send: the item answers are filled and QUESTIONS.md gets `[x]` + `A:` lines; skipped items stay open. When none are left the reply is exactly "All open questions covered."
 4. An old thread with single questions still renders them (answered ones read-only with the chosen chip).
+## Build-prompt decisions in the dialog (branch `reliability`)
+Manual (browser mock: `npm run dev`):
+1. Make build prompt on a card (the mock returns 3 flags): the box shows "Question 1 of 3", chips with "Recommended" on the first.
+2. Pick a chip: jumps to question 2. Prev: back to 1 with the pick kept. Type an own decision on 2 and press Enter: jumps to 3 (Shift+Enter adds a newline). Skip 3: it stays open (dashed dot).
+3. Apply decisions: the flagged card's notes get the `**Q:**/**A:**` pairs (one Ctrl+Z removes them), the prompt text changes (mock: a "Decisions" section), a new task file is saved ("Saved …" toast), and the box reads "2 decided ✓ · 1 open" and stays open. Change an answer: Apply is enabled again.
+4. On question 3 pick `Include "<title>" in this build` and Apply: the prompt is rebuilt with that card in scope (new chips row), a fresh stepper starts with matching answers kept.
+5. Tasks → Review on a saved task: the dialog opens with its answers ("N decided ✓ ▸"). A task saved before this change (flags without choices, or none) still opens; a flag without choices shows its text and the own-decision box only.

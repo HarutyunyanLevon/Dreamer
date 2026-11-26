@@ -1,4 +1,4 @@
-import { DESIGN_DOCS, GAP_CHECKLIST, type Api, type ArtifactView, type Attachment, type Canvas, type Card, type CardRole, type ChangeEvent, type ChatThreadFile, type ChecklistItem, type DesignVersion, type Folder, type HandoffEvent, type HandoffEventBody, type MemoryEvent, type MemoryLogEntry, type MemoryView, type NewCard, type ProjectData, type ProjectSummary, type SavedTask, type SearchHit, type Settings, type TrashItem } from "./types";
+import { DESIGN_DOCS, GAP_CHECKLIST, type Api, type ArtifactView, type Attachment, type Canvas, type Card, type CardRole, type ChangeEvent, type ChatThreadFile, type ChecklistItem, type DesignVersion, type Folder, type HandoffEvent, type HandoffEventBody, type MemoryEvent, type MemoryLogEntry, type MemoryView, type NewCard, type ProjectData, type ProjectSummary, type SavedTask, type SearchHit, type TaskFlag, type Settings, type TrashItem } from "./types";
 
 /** Same rules as the Rust core: media paths stay under media/, clips need a url. */
 const noDesktop = async (): Promise<never> => {
@@ -166,6 +166,11 @@ export function createMockApi(): Api {
   const listeners = new Set<(e: ChangeEvent[]) => void>();
   const handoffListeners = new Set<(e: HandoffEvent) => void>();
   const mockTasks: SavedTask[] = [];
+  const mockFlags = (card: string, outside?: string): TaskFlag[] => [
+    { card_id: card, text: "Mock flag: no acceptance criteria could be written.", question: "What counts as done?", choices: ["Plays end to end", "Passes a unit test", "Looks right in a screenshot"], recommended: "Plays end to end" },
+    { card_id: card, text: "Mock flag: the controls are not named.", question: "Which input comes first?", choices: ["Keyboard", "Gamepad"], recommended: "Keyboard" },
+    ...(outside ? [{ card_id: card, text: "Mock flag: this needs a card outside the job.", question: "How should the missing dependency be handled?", choices: ["Stub it", "Leave it out"], recommended: "Stub it", needs_card_id: outside }] : []),
+  ];
   const memoryListeners = new Set<(e: MemoryEvent) => void>();
   const memories = new Map<string, string>();
   const memLogs = new Map<string, MemoryLogEntry[]>();
@@ -574,20 +579,26 @@ export function createMockApi(): Api {
       handoffCommit = undefined;
     },
     // Build prompts: a canned task after a short pause; saved tasks live in memory.
-    taskStart: async (slug, ids) => {
+    taskStart: async (slug, ids, model, revise) => {
       const p = need(slug);
+      if (revise) {
+        const job = `hmock${++seq}`;
+        const markdown = `${revise.markdown.trimEnd()}\n\n## Decisions\n\n${revise.decisions.map((d) => `- ${d.question} ${d.answer}`).join("\n")}\n`;
+        setTimeout(() => handoffListeners.forEach((l) => l({ job, type: "done", mode: "task", markdown, title: "Revised", card_ids: ids, flags: [], model: model ?? settings.model_export, version: "", kind: "build" })), 300);
+        return job;
+      }
       const cards = ids.map((id) => p.cards.get(id)).filter((c) => !!c);
       if (!cards.length) throw new Error("Nothing to build: pick at least one card.");
       const job = `hmock${++seq}`;
       const markdown = ["# Build: " + cards.map((c) => c.title).join(", "), "## Goal", "Mock task (browser preview).", "## What to build", ...cards.map((c) => `### ${c.title} (${c.id})` + "\n\n" + c.body), "## Acceptance criteria", "- TBD", "## Report back", "Update docs/design/STATUS.md."].join("\n\n") + "\n";
-      setTimeout(() => handoffListeners.forEach((l) => l({ job, type: "done", mode: "task", markdown, title: `Build ${cards[0].title}`, card_ids: ids, flags: [{ card_id: cards[0].id, text: "Mock flag: no acceptance criteria could be written." }], model: settings.model_export, version: "", kind: "build" })), 400);
+      setTimeout(() => handoffListeners.forEach((l) => l({ job, type: "done", mode: "task", markdown, title: `Build ${cards[0].title}`, card_ids: ids, flags: mockFlags(cards[0].id, [...p.cards.values()].find((c) => !ids.includes(c.id))?.id), model: model ?? settings.model_export, version: "", kind: "build" })), 400);
       return job;
     },
     saveTask: async (slug, t) => {
       const p = need(slug);
       if (!p.handoffTarget || p.handoffConfirmed !== p.handoffTarget) throw new Error("No repo is linked for this project. Use Link repo… first.");
       const file = `docs/design/tasks/${new Date().toISOString().slice(0, 10)}-${t.title.toLowerCase().replace(/[^a-z0-9]+/g, "-")}.md`;
-      mockTasks.push({ file, title: t.title, id: `t${++seq}`, kind: t.kind, cards: t.card_ids, created: new Date().toISOString(), version: t.version });
+      mockTasks.push({ file, title: t.title, id: `t${++seq}`, kind: t.kind, cards: t.card_ids, created: new Date().toISOString(), version: t.version, markdown: t.markdown, flags: t.flags, flag_answers: t.flag_answers });
       t.card_ids.forEach((id) => {
         const c = p.cards.get(id);
         if (c) c.build = { ...c.build, status: "queued", task: file };

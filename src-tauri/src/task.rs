@@ -23,6 +23,54 @@ pub struct Flag {
     #[serde(default)]
     pub card_id: Option<String>,
     pub text: String,
+    /// A short answerable question, its 2-4 choices and the recommended one (old tasks have none).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub question: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub choices: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recommended: Option<String>,
+    /// The flag is "this needs card X, which is outside the job".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub needs_card_id: Option<String>,
+}
+
+/// Drops what doesn't hold: an unknown card, fewer than 2 choices, a recommendation that isn't a choice.
+fn clean_flag(f: Flag, in_job: &[String], build: &[String], known: &BTreeMap<String, String>) -> Option<Flag> {
+    let text = f.text.trim().to_string();
+    if text.is_empty() {
+        return None;
+    }
+    let mut choices: Vec<String> = Vec::new();
+    for c in f.choices.unwrap_or_default().into_iter().map(|c| c.trim().to_string()) {
+        if !c.is_empty() && !choices.contains(&c) && choices.len() < 4 {
+            choices.push(c);
+        }
+    }
+    let choices = (choices.len() >= 2).then_some(choices);
+    let recommended = f.recommended.map(|r| r.trim().to_string()).filter(|r| choices.as_ref().is_some_and(|c| c.contains(r)));
+    Some(Flag {
+        card_id: f.card_id.filter(|c| in_job.contains(c)),
+        text,
+        question: f.question.map(|q| q.trim().to_string()).filter(|q| !q.is_empty()),
+        choices,
+        recommended,
+        needs_card_id: f.needs_card_id.filter(|c| known.contains_key(c) && !build.contains(c)),
+    })
+}
+
+/// One answered flag, for a revise run.
+#[derive(Deserialize, Clone, Debug)]
+pub struct Decision {
+    pub question: String,
+    pub answer: String,
+}
+
+/// "Apply decisions": rewrite this prompt so it reflects the answers.
+#[derive(Deserialize, Clone, Debug)]
+pub struct Revise {
+    pub markdown: String,
+    pub decisions: Vec<Decision>,
 }
 
 pub struct TaskOut {
@@ -106,7 +154,8 @@ fn dedup(ids: Vec<String>) -> Vec<String> {
 }
 
 /// Starts the one-shot session for these cards. Progress arrives as `handoff-event`s with the job id.
-pub fn start(app: &AppHandle, state: &AppState, slug: &str, ids: Vec<String>) -> Result<String> {
+/// `model`: None = the export model. `revise`: rewrite that prompt for the decisions instead of writing a new one.
+pub fn start(app: &AppHandle, state: &AppState, slug: &str, ids: Vec<String>, model: Option<String>, revise: Option<Revise>) -> Result<String> {
     crate::storage::check_slug(slug)?;
     if handoff::lock_job(state)?.is_some() {
         return Err(AppError::Invalid("A handoff session is already running. Wait for it or cancel it first.".into()));
@@ -114,7 +163,7 @@ pub fn start(app: &AppHandle, state: &AppState, slug: &str, ids: Vec<String>) ->
     let (data, frames, model, dir, memory, texts) = {
         let ws = state.ws.lock().map_err(|_| AppError::Invalid("workspace lock poisoned".into()))?;
         let data = ws.load_project(slug)?;
-        let model = ws.get_settings().map(|s| s.model_export).unwrap_or_else(|_| crate::model::DEFAULT_MODEL_EXPORT.into());
+        let model = model.filter(|m| !m.trim().is_empty()).unwrap_or_else(|| ws.get_settings().map(|s| s.model_export).unwrap_or_else(|_| crate::model::DEFAULT_MODEL_EXPORT.into()));
         let mut texts = BTreeMap::new();
         for c in data.cards.iter().filter(|c| build::is_dirty(c)) {
             if let Ok(t) = ws.built_texts(slug, &c.meta.id) {
@@ -137,6 +186,8 @@ pub fn start(app: &AppHandle, state: &AppState, slug: &str, ids: Vec<String>) ->
         .filter(|o| o.meta.links.iter().any(|l| to_build.contains(&l.to)) || data.cards.iter().any(|c| to_build.contains(&c.meta.id) && c.meta.links.iter().any(|l| l.to == o.meta.id)))
         .map(|o| o.meta.id.clone())
         .collect();
+    // A revise works on text whose diffs are already inserted: no placeholders to check.
+    let texts = if revise.is_some() { BTreeMap::new() } else { texts };
     let diffs: BTreeMap<String, String> = texts.into_iter().filter(|(id, _)| to_build.contains(id)).map(|(id, (snap, now))| (id, line_diff(snap.as_deref().unwrap_or(""), &now))).collect();
 
     let spec = ScopeSpec { scope: Scope::Selection { ids: to_build.clone() }, stages: vec![Stage::Mist, Stage::Reverie, Stage::Lucid, Stage::Dream, Stage::Built], include_stickies: true, version: None };
@@ -146,7 +197,10 @@ pub fn start(app: &AppHandle, state: &AppState, slug: &str, ids: Vec<String>) ->
     let latest = handoff::next_revision(&dir, &ddir) - 1;
     let design = (latest > 0 && handoff::revision_dir(&dir, &ddir, latest).is_dir()).then(|| (ddir.clone(), latest));
     let repo = data.meta.handoff_target.clone().filter(|t| !t.trim().is_empty());
-    let prompt = task_prompt(&data, &frames, &to_build, &context, &diffs, &ver_title, design.is_some(), repo.as_deref().map(Path::new), memory.as_deref());
+    let prompt = match &revise {
+        Some(r) => revise_prompt(r, &to_build),
+        None => task_prompt(&data, &frames, &to_build, &context, &diffs, &ver_title, design.is_some(), repo.as_deref().map(Path::new), memory.as_deref()),
+    };
 
     let mut cards = to_build.clone();
     cards.extend(context);
@@ -167,9 +221,19 @@ pub fn start(app: &AppHandle, state: &AppState, slug: &str, ids: Vec<String>) ->
         *handoff::lock_job(state)? = None;
         return Err(e);
     }
-    crate::sidecar::write_line(state, &json!({ "type": "oneshot_start", "job": id, "mode": "task", "prompt": prompt, "model": model }));
+    crate::sidecar::write_line(state, &json!({ "type": "oneshot_start", "job": id, "mode": if revise.is_some() { "revise" } else { "task" }, "prompt": prompt, "model": model }));
     handoff::emit(app, &id, json!({ "type": "progress", "step": "reading", "read": 0, "total": 0 }));
     Ok(id)
+}
+
+fn revise_prompt(r: &Revise, build_ids: &[String]) -> String {
+    let qa: Vec<String> = r.decisions.iter().map(|d| format!("Q: {}\nA: {}", d.question.trim(), d.answer.trim())).collect();
+    format!(
+        "Revise this build prompt so it reflects these decisions. Change only the lines and acceptance criteria they affect, remove statements they contradict, keep everything else byte-identical, return the full prompt.\n\nDecisions:\n{}\n\nThe build prompt:\n<<<PROMPT\n{}\nPROMPT>>>\n\nCall write_task once: markdown = the full revised prompt, meta.title = a short imperative title, meta.card_ids = {}, meta.flags = [].\n",
+        qa.join("\n\n"),
+        r.markdown.trim_end(),
+        serde_json::to_string(build_ids).unwrap_or_default()
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -249,7 +313,7 @@ pub fn run_tool(state: &AppState, tool: &str, job_id: &str, input: Value) -> Res
                 return Err(AppError::Invalid(format!("meta.card_ids must be exactly the cards to build: {}", t.build.join(", "))));
             }
             let flags: Vec<Flag> = serde_json::from_value(meta.get("flags").cloned().unwrap_or_else(|| json!([]))).map_err(|e| AppError::Invalid(format!("meta.flags must be a list of {{card_id?, text}}: {e}")))?;
-            let flags = flags.into_iter().filter(|f| !f.text.trim().is_empty()).map(|f| Flag { card_id: f.card_id.filter(|c| ctx_cards.contains(c)), text: f.text.trim().to_string() }).collect();
+            let flags = flags.into_iter().filter_map(|f| clean_flag(f, &ctx_cards, &t.build, &titles)).collect();
             let mut md = md;
             for id in t.diffs.keys() {
                 let ph = placeholder(id);
@@ -286,6 +350,11 @@ pub struct TaskSave {
     pub kind: String,
     #[serde(default)]
     pub version: String,
+    #[serde(default)]
+    pub flags: Vec<Flag>,
+    /// Flag index -> the user's decision.
+    #[serde(default)]
+    pub flag_answers: BTreeMap<String, String>,
 }
 
 #[derive(Serialize, Debug, PartialEq)]
@@ -299,6 +368,10 @@ pub struct TaskInfo {
     pub created: String,
     pub version: String,
     pub done: Option<String>,
+    /// The task body (without frontmatter), for reopening it in the build dialog.
+    pub markdown: String,
+    pub flags: Vec<Flag>,
+    pub flag_answers: BTreeMap<String, String>,
 }
 
 pub(crate) fn confirmed_repo(ws: &Workspace, slug: &str) -> Result<PathBuf> {
@@ -355,8 +428,12 @@ pub fn save(state: &AppState, slug: &str, t: TaskSave) -> Result<String> {
         kind: &'a str,
         cards: &'a [String],
         created: &'a str,
+        #[serde(skip_serializing_if = "<[Flag]>::is_empty")]
+        flags: &'a [Flag],
+        #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+        flag_answers: &'a BTreeMap<String, String>,
     }
-    let head = serde_yaml::to_string(&Head { dreamer_task: 1, id: format!("t{}", ulid::Ulid::generate()), version: &t.version, kind: &t.kind, cards: &t.card_ids, created: &created }).map_err(|e| AppError::Invalid(e.to_string()))?;
+    let head = serde_yaml::to_string(&Head { dreamer_task: 1, id: format!("t{}", ulid::Ulid::generate()), version: &t.version, kind: &t.kind, cards: &t.card_ids, created: &created, flags: &t.flags, flag_answers: &t.flag_answers }).map_err(|e| AppError::Invalid(e.to_string()))?;
     let text = format!("---\n{head}---\n\n{}\n", t.markdown.trim_end());
     atomic_write(&dir.join(&name), text.as_bytes())?;
     let rel = format!("{}/{name}", build::TASKS_REL);
@@ -388,6 +465,9 @@ pub fn list(state: &AppState, slug: &str) -> Result<Vec<TaskInfo>> {
                 created: s("created"),
                 version: s("version"),
                 done: y.get("done").and_then(|v| v.as_str()).map(String::from),
+                markdown: rest.trim_start_matches('\n').to_string(),
+                flags: y.get("flags").cloned().and_then(|v| serde_yaml::from_value(v).ok()).unwrap_or_default(),
+                flag_answers: y.get("flag_answers").cloned().and_then(|v| serde_yaml::from_value(v).ok()).unwrap_or_default(),
             })
         })
         .collect();
@@ -481,5 +561,18 @@ mod tests {
         assert_eq!(reference("docs/design/tasks/x.md"), "Implement docs/design/tasks/x.md. Follow CLAUDE.md and the Report back section.");
         assert!(file_name_ok("docs/design/tasks/../x.md").is_err());
         assert!(file_name_ok("docs/design/tasks/a.md").is_ok());
+    }
+
+    #[test]
+    fn flags_are_cleaned_and_old_ones_still_load() {
+        let old: Flag = serde_json::from_str(r#"{"card_id":"a","text":"thin"}"#).unwrap();
+        assert!(old.question.is_none() && old.choices.is_none());
+        let known: BTreeMap<String, String> = [("a".into(), "A".into()), ("x".into(), "X".into())].into();
+        let job = vec!["a".to_string()];
+        let f = |choices: &[&str], rec: &str, needs: &str| Flag { card_id: Some("a".into()), text: " t ".into(), question: Some("Q?".into()), choices: Some(choices.iter().map(|s| s.to_string()).collect()), recommended: Some(rec.into()), needs_card_id: Some(needs.into()) };
+        let ok = clean_flag(f(&["One", "Two", "Two"], "Two", "x"), &job, &job, &known).unwrap();
+        assert_eq!((ok.text.as_str(), ok.choices.unwrap().len(), ok.recommended.as_deref(), ok.needs_card_id.as_deref()), ("t", 2, Some("Two"), Some("x")));
+        let bad = clean_flag(f(&["Only"], "Nope", "a"), &job, &job, &known).unwrap();
+        assert!(bad.choices.is_none() && bad.recommended.is_none() && bad.needs_card_id.is_none(), "1 choice, unknown pick, in-job card");
     }
 }
