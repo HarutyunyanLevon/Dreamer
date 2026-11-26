@@ -13,19 +13,7 @@ import { useCallback, useEffect, useRef, type ElementType, type HTMLAttributes, 
  *   the containing area scrolls), but scroll never crosses from one panel to another.
  */
 
-export const WHEEL_BOUNDARY_ATTR = "data-wheel-boundary";
-
-/** Marks an element (panel root, popup, modal backdrop) as a wheel boundary. */
-export function useWheelBoundary(ref: RefObject<HTMLElement | null>) {
-  useEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    el.setAttribute(WHEEL_BOUNDARY_ATTR, "");
-    const stop = (e: WheelEvent) => e.stopPropagation();
-    el.addEventListener("wheel", stop, { passive: true });
-    return () => el.removeEventListener("wheel", stop);
-  }, [ref]);
-}
+const WHEEL_BOUNDARY_ATTR = "data-wheel-boundary";
 
 type ScrollAreaProps = HTMLAttributes<HTMLElement> & {
   as?: "div" | "ul" | "ol" | "nav" | "pre" | "section";
@@ -151,7 +139,7 @@ export function useDragScroll(ref: RefObject<HTMLElement | null>) {
 }
 
 /** True when `el` can still scroll in the wheel's direction (so the wheel belongs to it). */
-export function canScroll(el: Element, dx: number, dy: number): boolean {
+function canScroll(el: Element, dx: number, dy: number): boolean {
   const s = getComputedStyle(el);
   if (dy !== 0 && /(auto|scroll)/.test(s.overflowY) && el.scrollHeight > el.clientHeight + 1) {
     if (dy < 0 ? el.scrollTop > 0 : el.scrollTop + el.clientHeight < el.scrollHeight - 1) return true;

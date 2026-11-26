@@ -1,5 +1,5 @@
 //! The organize pipeline: /organize as a few small model calls orchestrated here, instead of one
-//! agent turn (list_tree -> propose_organize) that a 9B local model could not finish reliably.
+//! agent turn (list_tree -> propose_organize) that could not finish reliably.
 //!
 //! 1. Digest: a compact list of the in-scope cards (alias, title, tags, a ~120-char snippet,
 //!    links). Pinned cards are listed but stay put.
@@ -12,15 +12,11 @@
 //! 5. Plan: the existing organize plan format (create_frame, place, retag), validated by
 //!    organize::propose_organize, so the preview / Apply / Discard UI works as before.
 //!
-//! Local steps call Ollama's /api/chat with a JSON-schema format (structured output). "Redo with
-//! Claude" / "Finish with Claude" run the same steps on Claude through the sidecar's one-shot
-//! completion (no tools). Each step has its own watchdog; the chat shows progress. A batch that
+//! Each step calls Claude through the sidecar's one-shot completion (no tools). Each step has its own watchdog; the chat shows progress. A batch that
 //! still fails after its retry leaves its cards unplaced: the plan is shown as partial, listing
 //! them, and nothing escalates by itself.
 
-use crate::ollama::{ChatLimits, LlmError};
 use crate::organize::{CardBox, Rect};
-use crate::router::Backend;
 use crate::state::AppState;
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -28,6 +24,21 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager};
+
+/// Why a structured call failed: Claude went silent (a stall) or it errored / returned nonsense.
+#[derive(Debug, Clone, PartialEq)]
+enum LlmError {
+    Stalled(String),
+    Failed(String),
+}
+
+impl std::fmt::Display for LlmError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LlmError::Stalled(m) | LlmError::Failed(m) => f.write_str(m),
+        }
+    }
+}
 
 const BATCH: usize = 12;
 const SNIPPET: usize = 120;
@@ -42,15 +53,11 @@ pub struct Request {
     /// The cards the plan works on (project, a frame's cards, or the selection).
     pub scope: crate::organize::Scope,
     pub instruction: String,
-    /// A previous plan: "/organize revise" (its groups guide the new ones) or "Retry rest locally"
-    /// / "Finish with Claude" (`rest`: only its unplaced cards are assigned, into its groups).
+    /// A previous plan: "/organize revise" (its groups guide the new ones) or an unfinished plan
+    /// (`rest`: only its unplaced cards are assigned, into its groups).
     pub prior: Option<Value>,
     pub rest: bool,
-    pub backend: Backend,
-    /// The local variant (dreamer-…) or the Claude model.
     pub model: String,
-    /// Shown in the chat (the plain Ollama name for a local run).
-    pub shown_model: String,
 }
 
 #[derive(Clone, Debug)]
@@ -118,20 +125,16 @@ impl Ctx<'_> {
         emit(self.app, json!({ "type": "step", "id": self.req.turn, "step": step }));
     }
 
-    /// One structured model call on the request's backend.
-    fn call(&self, system: &str, user: &str, schema: &Value, limits: ChatLimits) -> Result<Value, LlmError> {
+    /// One structured Claude call.
+    fn call(&self, system: &str, user: &str, schema: &Value) -> Result<Value, LlmError> {
         if self.cancel.load(Ordering::SeqCst) {
             return Err(LlmError::Failed("stopped".into()));
         }
         let t0 = Instant::now();
-        let out = match self.req.backend {
-            Backend::Local => crate::ollama::chat_json(&self.req.model, system, user, schema, 0.2, &limits, &self.cancel),
-            Backend::Claude => claude_json(self.app, &self.req.model, system, user, schema),
-        };
+        let out = claude_json(self.app, &self.req.model, system, user, schema);
         crate::sidecar_log::line(&format!(
-            "organize call turn={} backend={:?} est_prompt_tokens={} ms={} ok={}{}",
+            "organize call turn={} est_prompt_tokens={} ms={} ok={}{}",
             self.req.turn,
-            self.req.backend,
             (system.len() + user.len()) / 3,
             t0.elapsed().as_millis(),
             out.is_ok(),
@@ -245,7 +248,7 @@ fn make_groups(cx: &mut Ctx, cards: &[DCard], tags: &BTreeMap<String, usize>) ->
     let mut errors: Vec<String> = Vec::new();
     for attempt in 0..2 {
         let msg = if errors.is_empty() { user.clone() } else { format!("{user}\n\nYour previous answer had these problems; fix them:\n- {}", errors.join("\n- ")) };
-        let v = match cx.call(GROUPS_SYSTEM, &msg, &groups_schema(), ChatLimits::default()) {
+        let v = match cx.call(GROUPS_SYSTEM, &msg, &groups_schema()) {
             Ok(v) => v,
             Err(e @ LlmError::Stalled(_)) => return Err(e),
             Err(e) if attempt == 0 => {
@@ -371,7 +374,7 @@ fn assign_batch(cx: &mut Ctx, batch: &[&DCard], groups: &[Group], plan: &TagPlan
     let mut errors: Vec<String> = Vec::new();
     for attempt in 0..2 {
         let msg = if errors.is_empty() { user.clone() } else { format!("{user}\n\nYour previous answer had these problems; answer again for every card:\n- {}", errors.join("\n- ")) };
-        match cx.call(ASSIGN_SYSTEM, &msg, &schema, ChatLimits::default()) {
+        match cx.call(ASSIGN_SYSTEM, &msg, &schema) {
             Ok(v) => {
                 let (ok, errs) = check_batch(&v, batch, groups, vocab);
                 for (k, a) in ok {
@@ -437,26 +440,21 @@ pub fn spawn(app: AppHandle, req: Request) {
             return;
         }
         let ms = cx.started.elapsed().as_millis() as u64;
-        let backend = if req.backend == Backend::Local { "local" } else { "claude" };
         match outcome {
             Ok((plan, text)) => {
                 let partial = plan.get("partial").and_then(Value::as_bool).unwrap_or(false);
                 emit(&app, json!({ "type": "organize_proposal", "id": req.turn, "plan": plan }));
-                emit(&app, json!({ "type": "message_done", "id": req.turn, "text": text, "isError": false, "backend": backend, "model": req.shown_model, "durationMs": ms, "endReason": if partial { "partial" } else { "done" } }));
-                crate::sidecar_log::line(&format!("turn_end turn={} backend={backend} model={} reason={} kind=organize dur_ms={ms}", req.turn, req.model, if partial { "partial" } else { "done" }));
+                emit(&app, json!({ "type": "message_done", "id": req.turn, "text": text, "isError": false, "model": req.model, "durationMs": ms, "endReason": if partial { "partial" } else { "done" } }));
+                crate::sidecar_log::line(&format!("turn_end turn={} model={} reason={} kind=organize dur_ms={ms}", req.turn, req.model, if partial { "partial" } else { "done" }));
             }
             Err(e) => {
-                let (reason, fallback) = match &e {
-                    LlmError::Stalled(_) => ("stalled", "stalled"),
-                    LlmError::Failed(_) => ("error", "error"),
+                let reason = match &e {
+                    LlmError::Stalled(_) => "stalled",
+                    LlmError::Failed(_) => "error",
                 };
                 let text = format!("Organize could not finish: {e}.");
-                if req.backend == Backend::Local {
-                    emit(&app, json!({ "type": "message_done", "id": req.turn, "text": text, "isError": true, "backend": "local", "model": req.shown_model, "fallback": fallback, "endReason": reason, "durationMs": ms }));
-                } else {
-                    emit(&app, json!({ "type": "error", "id": req.turn, "message": text, "endReason": reason }));
-                }
-                crate::sidecar_log::line(&format!("turn_end turn={} backend={backend} model={} reason={reason} kind=organize dur_ms={ms} error=\"{e}\"", req.turn, req.model));
+                emit(&app, json!({ "type": "error", "id": req.turn, "message": text, "endReason": reason }));
+                crate::sidecar_log::line(&format!("turn_end turn={} model={} reason={reason} kind=organize dur_ms={ms} error=\"{e}\"", req.turn, req.model));
             }
         }
     });
@@ -583,7 +581,6 @@ fn run(cx: &mut Ctx) -> Result<(Value, String), LlmError> {
             "groups": groups,
             "tagPlan": plan,
             "assign": assigned,
-            "backend": if req.backend == Backend::Local { "local" } else { "claude" },
             "problems": problems,
         },
     });

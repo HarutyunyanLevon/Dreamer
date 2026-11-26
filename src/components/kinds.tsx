@@ -3,24 +3,21 @@ import type { Card, CardKind, ChecklistItem, ClipAttachment, ImageAttachment } f
 import { useMediaUrl } from "../util/media";
 import { IconClip } from "./Icons";
 
-/** Pastel set shared by stickies and frames; CSS tints each toward the theme accent (`.tint-<key>`). */
+/** Pastel set for frame tints; CSS tints each toward the theme accent (`.tint-<key>`). */
 export const SWATCHES = ["butter", "peach", "rose", "lilac", "sky", "mint"] as const;
 export type Swatch = (typeof SWATCHES)[number];
 export const SWATCH_LABEL: Record<Swatch, string> = { butter: "Butter", peach: "Peach", rose: "Rose", lilac: "Lilac", sky: "Sky", mint: "Mint" };
 export const swatchOf = (c: string | undefined, fallback: Swatch | null = "butter"): Swatch | null =>
   (SWATCHES as readonly string[]).includes(c ?? "") ? (c as Swatch) : fallback;
 
-export const KIND_LABEL: Record<CardKind, string> = { card: "Card", sticky: "Sticky", label: "Label", checklist: "Checklist", image: "Image", clip: "Clip", artifact: "Artifact" };
+export const KIND_LABEL: Record<CardKind, string> = { card: "Card", checklist: "Checklist", image: "Image", clip: "Clip", artifact: "Artifact" };
 /** Kinds "Convert to" moves between (title, body and attachments carry over). */
-export const CONVERTIBLE: CardKind[] = ["card", "sticky", "checklist"];
+export const CONVERTIBLE: CardKind[] = ["card", "checklist"];
 /** Stage filter, stage visuals and the Mist shader apply only to these. */
 export const hasStage = (c: Pick<Card, "kind">) => c.kind === "card";
 
-export type LabelSize = "s" | "m" | "l";
-export const labelSize = (c: Card): LabelSize => (c.fields.size === "s" || c.fields.size === "l" ? c.fields.size : "m");
-
 export const TECH_TITLE = "Tech & constraints";
-/** The card the handoff gap interview writes non-tech answers into (role "decisions"). */
+/** The card that collects the user's project-wide answers (role "decisions"). */
 export const DECISIONS_TITLE = "Project decisions";
 export const TECH_TEMPLATE = [
   "Engine",

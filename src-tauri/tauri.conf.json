@@ -22,8 +22,7 @@
     "shortDescription": "A canvas for growing game ideas",
     "copyright": "© 2026 Levon Harutyunyan",
     "resources": {
-      "sidecar-dist/": "sidecar/",
-      "../docs/skills/dreamer-cards/SKILL.md": "skills/dreamer-cards/SKILL.md"
+      "sidecar-dist/": "sidecar/"
     },
     "windows": {
       "nsis": {

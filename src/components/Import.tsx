@@ -14,10 +14,6 @@ let opener: Opener | null = null;
 /** Opens the import preview (paste, drop, menu, drop folder). `at`: world point for the first card. */
 export const openImport: Opener = (text, o) => opener?.(text, o);
 
-let hotkeyOpener: (() => void) | null = null;
-/** Opens the global hotkeys dialog. */
-export const openHotkeys = () => hotkeyOpener?.();
-
 /** A file picker for "Import bundle…" (menus call this). */
 export function pickBundle(at?: [number, number]) {
   const input = document.createElement("input");
@@ -49,17 +45,14 @@ export function ImportHost({ ws }: { ws: Workspace }) {
   const [last, setLast] = useState<Last | null>(null);
   const [hidden, setHidden] = useState(false);
   const [offers, setOffers] = useState<ImportOffer[]>([]);
-  const [hotkeys, setHotkeys] = useState(false);
   const snoozed = useRef<Set<string>>(new Set());
   const wsRef = useRef(ws);
   wsRef.current = ws;
 
   useEffect(() => {
     opener = (text, o) => setOpen({ text, ...o });
-    hotkeyOpener = () => setHotkeys(true);
     return () => {
       opener = null;
-      hotkeyOpener = null;
     };
   }, []);
 
@@ -119,7 +112,6 @@ export function ImportHost({ ws }: { ws: Workspace }) {
 
   return (
     <>
-      {hotkeys && <HotkeysDialog onClose={() => setHotkeys(false)} />}
       {open && <ImportDialog ws={ws} open={open} onClose={() => setOpen(null)} onDone={done} />}
       {offer && !open && (
         <div className="toast import-offer" role="status">
@@ -220,7 +212,7 @@ function ImportDialog({ ws, open, onClose, onDone }: { ws: Workspace; open: Open
               <li key={c.ref}>
                 <span className={`import-badge ${c.action}`}>{BADGE[c.action]}</span>
                 <span className="import-title">{c.title}</span>
-                <span className="helper">{STAGE_WORD[c.stage] ?? c.stage}{c.frame ? ` · ${c.frame}` : ""}{c.has_build ? " · build info" : ""}</span>
+                <span className="helper">{STAGE_WORD[c.stage] ?? c.stage}{c.frame ? ` · ${c.frame}` : ""}</span>
               </li>
             ))}
           </ul>
@@ -237,47 +229,6 @@ function ImportDialog({ ws, open, onClose, onDone }: { ws: Workspace; open: Open
         <button type="button" className="btn primary" disabled={!plan || busy || plan.cards.length === 0} onClick={() => void run()}>
           Import {plan ? plan.cards.length : ""} card{plan?.cards.length === 1 ? "" : "s"}
         </button>
-      </div>
-    </Modal>
-  );
-}
-
-/** Settings for the two global shortcuts, with the registration error when one failed. */
-export function HotkeysDialog({ onClose }: { onClose: () => void }) {
-  const [keys, setKeys] = useState<[string, string]>(["", ""]);
-  const [errs, setErrs] = useState<[string | null, string | null]>([null, null]);
-  const [saving, setSaving] = useState(false);
-  useEffect(() => {
-    void api.getSettings().then((s) => setKeys([s.hotkey, s.clipboard_hotkey]));
-    void api.hotkeyStatus().then(setErrs);
-  }, []);
-  const save = async () => {
-    setSaving(true);
-    try {
-      await api.updateSettings({ hotkey: keys[0], clipboard_hotkey: keys[1] });
-      setErrs(await api.hotkeyStatus());
-    } catch (e) {
-      setErrs([String(e), null]);
-    } finally {
-      setSaving(false);
-    }
-  };
-  const row = (i: 0 | 1, label: string) => (
-    <label className="hotkey-row">
-      {label}
-      <input value={keys[i]} aria-invalid={errs[i] ? true : undefined} onChange={(e) => setKeys(i === 0 ? [e.target.value, keys[1]] : [keys[0], e.target.value])} placeholder="Ctrl+Alt+Shift+V" />
-      {errs[i] && <span className="capture-error" role="alert">Couldn’t register this shortcut: {errs[i]}</span>}
-    </label>
-  );
-  return (
-    <Modal onClose={onClose} label="Global hotkeys" size="sm">
-      <div className="modal-head"><h3>Global hotkeys</h3></div>
-      {row(0, "Quick capture")}
-      {row(1, "Clipboard to Inbox")}
-      <p className="helper">Write them like Ctrl+Alt+Shift+V. They work while Dreamer sits in the tray.</p>
-      <div className="modal-foot">
-        <button type="button" className="btn" onClick={onClose}>Close</button>
-        <button type="button" className="btn primary" disabled={saving} onClick={() => void save()}>Save</button>
       </div>
     </Modal>
   );

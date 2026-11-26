@@ -32,7 +32,7 @@ export interface ShaderParams {
   scale: number;
 }
 
-export interface UiTokens {
+interface UiTokens {
   ink: string;
   body: string;
   muted: string;

@@ -17,7 +17,7 @@ function channel(v: number): number {
   return s <= 0.03928 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
 }
 
-export function luminance([r, g, b]: RGB): number {
+function luminance([r, g, b]: RGB): number {
   return 0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b);
 }
 
@@ -33,7 +33,7 @@ export function over(fg: RGB, bg: RGB, alpha: number): RGB {
   return [0, 1, 2].map((i) => Math.round(fg[i] * alpha + bg[i] * (1 - alpha))) as RGB;
 }
 
-export function rgbToHex([r, g, b]: RGB): string {
+function rgbToHex([r, g, b]: RGB): string {
   return "#" + [r, g, b].map((v) => Math.round(v).toString(16).padStart(2, "0")).join("");
 }
 

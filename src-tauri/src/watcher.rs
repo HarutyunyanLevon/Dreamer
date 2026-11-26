@@ -1,4 +1,4 @@
-//! Watches the workspace folder so external edits (Claude Code, git, an editor) show up live.
+//! Watches the workspace folder so external edits (git, an editor) show up live.
 
 use notify::RecursiveMode;
 use notify_debouncer_mini::{new_debouncer, DebounceEventResult, Debouncer};
@@ -9,7 +9,7 @@ use std::time::Duration;
 
 #[derive(Serialize, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ChangeEvent {
-    /// "project" | "settings" | "themes"
+    /// "project" | "settings" | "memory" | "artifact"
     pub scope: String,
     pub project: Option<String>,
 }
@@ -45,34 +45,17 @@ pub fn classify(root: &Path, path: &Path) -> Option<ChangeEvent> {
     }
     match first.as_str() {
         "workspace.json" => Some(ChangeEvent { scope: "settings".into(), project: None }),
-        "themes" => Some(ChangeEvent { scope: "themes".into(), project: None }),
         "projects" => Some(ChangeEvent { scope: "project".into(), project: parts.get(1).cloned() }),
         _ => None,
     }
 }
 
-/// `QUESTIONS.md` (scope "questions") or `STATUS.md` (scope "status") of a project's handoff repo,
-/// if `path` is one of them.
-fn question_event(targets: &[(String, PathBuf)], path: &Path) -> Option<ChangeEvent> {
-    let scope = match path.file_name()?.to_str()? {
-        "QUESTIONS.md" => "questions",
-        "STATUS.md" => "status",
-        _ => return None,
-    };
-    targets
-        .iter()
-        .find(|(_, file)| path.parent() == file.parent())
-        .map(|(slug, _)| ChangeEvent { scope: scope.into(), project: Some(slug.clone()) })
-}
-
-/// Start watching `root`, plus the `QUESTIONS.md` files in `questions` (project slug, file path;
-/// they live in other repos). `on_change` receives de-duplicated events, at most one burst per ~250ms.
-pub fn start(root: PathBuf, questions: Vec<(String, PathBuf)>, on_change: impl Fn(Vec<ChangeEvent>) + Send + 'static) -> Result<WatchHandle, String> {
+/// Start watching `root`. `on_change` receives de-duplicated events, at most one burst per ~250ms.
+pub fn start(root: PathBuf, on_change: impl Fn(Vec<ChangeEvent>) + Send + 'static) -> Result<WatchHandle, String> {
     let watch_root = root.clone();
-    let targets = questions.clone();
     let mut debouncer = new_debouncer(Duration::from_millis(250), move |res: DebounceEventResult| {
         if let Ok(events) = res {
-            let set: HashSet<ChangeEvent> = events.iter().filter_map(|e| classify(&root, &e.path).or_else(|| question_event(&targets, &e.path))).collect();
+            let set: HashSet<ChangeEvent> = events.iter().filter_map(|e| classify(&root, &e.path)).collect();
             if !set.is_empty() {
                 on_change(set.into_iter().collect());
             }
@@ -80,14 +63,6 @@ pub fn start(root: PathBuf, questions: Vec<(String, PathBuf)>, on_change: impl F
     })
     .map_err(|e| e.to_string())?;
     debouncer.watcher().watch(&watch_root, RecursiveMode::Recursive).map_err(|e| e.to_string())?;
-    for (_, file) in &questions {
-        // The folder (not the file) so a rewrite by rename is seen; a missing folder is skipped.
-        if let Some(dir) = file.parent().filter(|d| d.is_dir()) {
-            if let Err(e) = debouncer.watcher().watch(dir, RecursiveMode::NonRecursive) {
-                eprintln!("[dreamer] cannot watch {}: {e}", dir.display());
-            }
-        }
-    }
     Ok(debouncer)
 }
 
@@ -102,7 +77,6 @@ mod tests {
         assert_eq!(ev("/w/projects/fish/cards/01A.md"), Some(ChangeEvent { scope: "project".into(), project: Some("fish".into()) }));
         assert_eq!(ev("/w/inbox/canvas.json"), None, "the layout-1 Inbox folder is gone");
         assert_eq!(ev("/w/workspace.json"), Some(ChangeEvent { scope: "settings".into(), project: None }));
-        assert_eq!(ev("/w/themes/mine.json").unwrap().scope, "themes");
         assert_eq!(ev("/w/projects/fish/cards/.01A.md.XYZ.tmp"), None);
         assert_eq!(ev("/w/.git/index"), None);
         assert_eq!(ev("/w/projects/fish/.git/HEAD"), None);
@@ -122,23 +96,13 @@ mod tests {
     }
 
     #[test]
-    fn repo_files_map_to_their_project_by_folder() {
-        let t = vec![("fish".to_string(), PathBuf::from("/r/docs/design/QUESTIONS.md"))];
-        let ev = |p: &str| question_event(&t, Path::new(p)).map(|e| (e.scope, e.project));
-        assert_eq!(ev("/r/docs/design/STATUS.md"), Some(("status".into(), Some("fish".into()))));
-        assert_eq!(ev("/r/docs/design/QUESTIONS.md"), Some(("questions".into(), Some("fish".into()))));
-        assert_eq!(ev("/r/docs/design/OTHER.md"), None);
-        assert_eq!(ev("/elsewhere/STATUS.md"), None);
-    }
-
-    #[test]
     fn real_watcher_reports_an_external_file_change() {
         use std::sync::mpsc::channel;
         let dir = tempfile::TempDir::new().unwrap();
         let root = dir.path().canonicalize().unwrap();
         std::fs::create_dir_all(root.join("projects/ideas/cards")).unwrap();
         let (tx, rx) = channel();
-        let _w = start(root.clone(), Vec::new(), move |events| {
+        let _w = start(root.clone(), move |events| {
             let _ = tx.send(events);
         })
         .unwrap();

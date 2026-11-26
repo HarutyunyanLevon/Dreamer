@@ -2,7 +2,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import type { ActivityStep, TokenUsage } from "../api/claude";
 
 /** Idle this long (no step, usage, text or thinking event) and the status line warns. */
-export const STALL_MS = 45_000;
+const STALL_MS = 45_000;
 
 /** 640 · 1.2k · 12.3k · 123k · 1.2M */
 export function fmtTokens(n: number): string {
@@ -20,19 +20,19 @@ export function modelLabel(id?: string): string | undefined {
 }
 
 /** mm:ss */
-export function fmtClock(ms: number): string {
+function fmtClock(ms: number): string {
   const s = Math.max(0, Math.floor(ms / 1000));
   return `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
 }
 
 /** 18s · 2m 05s */
-export function fmtDuration(ms: number): string {
+function fmtDuration(ms: number): string {
   const s = Math.max(0, Math.round(ms / 1000));
   return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, "0")}s`;
 }
 
 /** Re-renders every `ms` while `active`; returns the current time. */
-export function useNow(active: boolean, ms = 1000): number {
+function useNow(active: boolean, ms = 1000): number {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     if (!active) return;
@@ -123,7 +123,7 @@ export function StepList({ steps, now, calls }: { steps: ActivityStep[]; now: nu
 }
 
 /** What the status line names as happening now. */
-export function currentLabel(steps: ActivityStep[] | undefined, writing: boolean, anyEvent: boolean): string {
+function currentLabel(steps: ActivityStep[] | undefined, writing: boolean, anyEvent: boolean): string {
   const running = steps?.filter((s) => s.status === "running") ?? [];
   const last = running[running.length - 1];
   if (last) return last.kind === "thinking" ? "Thinking…" : last.label;

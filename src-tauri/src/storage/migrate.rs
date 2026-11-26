@@ -3,7 +3,8 @@
 //! ordinary project, a project's open version becomes its canvas (other versions go to
 //! `archive/versions/<title>/` as they are), and every folder becomes a frame. Every step can run
 //! again after a crash: the original root canvas is kept in `canvases/.layout1-root.json` until
-//! the project is done, and files are copied before originals are removed.
+//! the project is done, and files are copied before originals are removed. Step f (`strip_cards`)
+//! also runs on workspaces already at layout 2.
 
 use super::*;
 use serde::Deserialize;
@@ -249,6 +250,13 @@ impl<'a> Tree<'a> {
     }
 }
 
+/// A version title as a folder name (letters, digits, '-', '_', '.'; spaces become '-').
+fn dir_name(title: &str) -> String {
+    let s: String = title.trim().chars().map(|c| if c.is_alphanumeric() || matches!(c, '-' | '_' | '.') { c } else { '-' }).collect();
+    let s = s.trim_matches(['-', '.']).chars().take(60).collect::<String>();
+    if s.is_empty() { "version".into() } else { s }
+}
+
 fn free_name(taken: &HashSet<String>, base: &str) -> String {
     (1..).map(|n| if n == 1 { base.to_string() } else { format!("{base}-{n}") }).find(|n| !taken.contains(&n.to_lowercase())).unwrap()
 }
@@ -317,7 +325,7 @@ fn migrate_project(dir: &Path, log: &mut Vec<String>) -> std::result::Result<(),
     let mut media = Vec::new();
     walk_files(&dir.join("media"), &mut media);
     for v in versions.iter().filter(|v| Some(v.id.as_str()) != open.map(|o| o.id.as_str())) {
-        let name = free_name(&used, &crate::handoff::dir_name(&v.name()));
+        let name = free_name(&used, &dir_name(&v.name()));
         used.insert(name.to_lowercase());
         let adir = dir.join("archive").join("versions").join(&name);
         let sub = tree.subtree(&v.id);
@@ -407,12 +415,99 @@ fn migrate_project(dir: &Path, log: &mut Vec<String>) -> std::result::Result<(),
     Ok(())
 }
 
+/// Step f (idempotent; marked by `"stripped": true` in workspace.json): features that left the app
+/// become plain cards. A sticky becomes a Mist card (its body is kept, its colour dropped); a
+/// label becomes a Mist card titled with its text; the Claude Code questions card becomes a plain
+/// checklist (role cleared, import bookkeeping dropped); build blocks and snapshots (`*.built.md`) go.
+fn strip_cards(root: &Path, log: &mut Vec<String>) -> std::result::Result<(), String> {
+    let wpath = root.join("workspace.json");
+    let mut settings = read_value(&wpath).unwrap_or_else(|| json!({}));
+    if settings.get("stripped").and_then(Value::as_bool) == Some(true) {
+        return Ok(());
+    }
+    let mut changed = 0;
+    for pdir in fs::read_dir(root.join("projects")).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.is_dir()) {
+        for f in fs::read_dir(pdir.join("cards")).into_iter().flatten().flatten().map(|e| e.path()) {
+            let name = f.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            if name.ends_with(".built.md") {
+                remove_any(&f)?;
+            } else if name.ends_with(".md") && !name.starts_with('.') {
+                if let Ok(text) = fs::read_to_string(&f) {
+                    if let Some(out) = strip_card_text(&text) {
+                        atomic_write(&f, out.as_bytes()).map_err(|e| e.to_string())?;
+                        changed += 1;
+                    }
+                }
+            }
+        }
+    }
+    log.push(format!("step f: {changed} cards converted"));
+    settings["stripped"] = json!(true);
+    write_value(&wpath, &settings)
+}
+
+/// The card file's text after step f, or None when nothing changes.
+fn strip_card_text(text: &str) -> Option<String> {
+    let text = text.trim_start_matches('\u{feff}').replace("\r\n", "\n");
+    let rest = text.strip_prefix("---\n")?;
+    let (fm, body) = match rest.find("\n---\n") {
+        Some(i) => (&rest[..i], &rest[i + 5..]),
+        None => (rest.strip_suffix("\n---")?, ""),
+    };
+    let mut y: serde_yaml::Value = serde_yaml::from_str(fm).ok()?;
+    let m = y.as_mapping_mut()?;
+    let key = |k: &str| serde_yaml::Value::String(k.into());
+    let kind = m.get(key("kind")).and_then(|v| v.as_str()).unwrap_or_default().trim().to_lowercase();
+    let mut changed = false;
+    if kind == "sticky" || kind == "label" {
+        m.remove(key("kind"));
+        m.remove(key("color"));
+        m.insert(key("stage"), key("mist"));
+        if kind == "label" {
+            if let Some(serde_yaml::Value::Mapping(f)) = m.get_mut(key("fields")) {
+                f.remove(key("size"));
+            }
+        }
+        if kind == "label" && m.get(key("title")).and_then(|v| v.as_str()).is_none_or(|t| t.trim().is_empty()) {
+            let first = body.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("Untitled");
+            m.insert(key("title"), key(first));
+        }
+        changed = true;
+    }
+    if m.get(key("role")).and_then(|v| v.as_str()) == Some("cc-questions") {
+        m.remove(key("role"));
+        changed = true;
+    }
+    changed |= m.remove(key("dismissed_sources")).is_some();
+    // The card's build block (what Claude Code built, drift hash): the stage stays, the tracking goes.
+    changed |= m.remove(key("build")).is_some();
+    // The long-paste "Split into cards" offer is gone with the local model.
+    if let Some(serde_yaml::Value::Mapping(f)) = m.get_mut(key("fields")) {
+        changed |= f.remove(key("split_offer")).is_some();
+    }
+    if let Some(serde_yaml::Value::Sequence(items)) = m.get_mut(key("items")) {
+        for it in items {
+            if let Some(im) = it.as_mapping_mut() {
+                changed |= im.remove(key("source")).is_some();
+            }
+        }
+    }
+    if !changed {
+        return None;
+    }
+    let mut out = String::from("---\n");
+    out.push_str(&serde_yaml::to_string(&y).ok()?);
+    out.push_str("---\n");
+    out.push_str(body);
+    Some(out)
+}
+
 /// Runs the migration unless workspace.json already says layout 2. Err = the read-only banner text.
 pub(super) fn run(root: &Path) -> std::result::Result<(), String> {
     let wpath = root.join("workspace.json");
     let settings = read_value(&wpath).unwrap_or_else(|| json!({}));
     if settings.get("layout").and_then(Value::as_u64) == Some(LAYOUT) {
-        return Ok(());
+        return strip_cards(root, &mut Vec::new());
     }
     let stamp = chrono::Local::now().format("%Y%m%d-%H%M").to_string();
     let backup = (1..).map(|n| root.join(if n == 1 { format!(".backup-{stamp}") } else { format!(".backup-{stamp}-{n}") })).find(|p| !p.exists()).unwrap();
@@ -421,7 +516,7 @@ pub(super) fn run(root: &Path) -> std::result::Result<(), String> {
         return Err(format!("Migration failed, your data is untouched: could not back up the workspace to {} ({e})", backup.display()));
     }
     let mut log = vec![format!("{} layout 2 migration; backup in {}", now(), backup.display())];
-    let res = migrate_all(root, settings, &mut log);
+    let res = migrate_all(root, settings, &mut log).and_then(|()| strip_cards(root, &mut log));
     if let Err(e) = &res {
         log.push(format!("FAILED: {e}"));
     }
@@ -669,5 +764,76 @@ mod tests {
         assert!(!root.read_dir().unwrap().flatten().any(|e| e.file_name().to_string_lossy().starts_with(".backup-")), "the partial backup is removed");
         assert!(ws.create_project("New").is_err(), "read-only");
         assert!(ws.list_projects().is_ok(), "reads still work");
+    }
+
+    #[test]
+    fn step_f_converts_stickies_labels_and_the_questions_card_once() {
+        let (_d, root) = fixture();
+        let cards = root.join("projects/game/cards");
+        fs::create_dir_all(&cards).unwrap();
+        let w = |name: &str, text: &str| fs::write(cards.join(name), text).unwrap();
+        w("S.md", "---
+title: Note
+kind: sticky
+color: butter
+---
+remember this
+");
+        w("L.md", "---
+title: Combat
+kind: label
+fields:
+  size: l
+---
+");
+        w("Q.md", "---
+title: From Claude Code
+kind: checklist
+role: cc-questions
+dismissed_sources: ['- [ ] x']
+items:
+- {id: a, text: q, question: true, source: '- [ ] q'}
+---
+");
+        w("B.md", "---
+title: Built one
+stage: built
+build: {status: built}
+fields:
+  size: big
+---
+body
+");
+        w("P.md", "---
+title: Plain
+stage: lucid
+---
+body
+");
+        w("S.built.md", "snapshot");
+        let mut log = Vec::new();
+        strip_cards(&root, &mut log).unwrap();
+        let read = |n: &str| fs::read_to_string(cards.join(n)).unwrap();
+        let (s, l, q, b) = (read("S.md"), read("L.md"), read("Q.md"), read("B.md"));
+        assert!(!s.contains("sticky") && !s.contains("color") && s.contains("stage: mist") && s.contains("remember this"), "{s}");
+        assert!(!l.contains("label") && !l.contains("size") && l.contains("title: Combat") && l.contains("stage: mist"), "{l}");
+        assert!(!q.contains("cc-questions") && !q.contains("dismissed_sources") && !q.contains("source:") && q.contains("kind: checklist"), "{q}");
+        assert!(!b.contains("build:") && b.contains("stage: built") && b.contains("size: big"), "a plain card keeps its own fields: {b}");
+        assert_eq!(read("P.md"), "---
+title: Plain
+stage: lucid
+---
+body
+", "untouched cards are not rewritten");
+        assert!(!cards.join("S.built.md").exists());
+        // Marked done: a second run changes nothing, even for a file that would qualify.
+        w("S2.md", "---
+title: Later
+kind: sticky
+---
+");
+        strip_cards(&root, &mut log).unwrap();
+        assert!(read("S2.md").contains("sticky"));
+        assert_eq!(read_value(&root.join("workspace.json")).unwrap()["stripped"], json!(true));
     }
 }

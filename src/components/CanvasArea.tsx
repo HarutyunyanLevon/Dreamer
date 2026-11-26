@@ -12,10 +12,9 @@ import { ScrollArea, wheelBelongsToContent } from "../ui/Scroll";
 import { dialogOpen } from "../util/useEscClose";
 import { branchGroup } from "./BranchCompare";
 import { CardEditor } from "./CardEditor";
-import { BuildBoard } from "./BuildBoard";
 import { MistLayer } from "./MistLayer";
 import { DEFAULT_FRAME_TITLE, FRAME_PAD, FrameView, centerInside, type FrameControls } from "./Frames";
-import { ChecklistBody, ClipBody, DECISIONS_TITLE, ImageBody, KIND_LABEL, TECH_TEMPLATE, TECH_TITLE, hasStage, labelSize, openQuestions, swatchOf } from "./kinds";
+import { ChecklistBody, ClipBody, DECISIONS_TITLE, ImageBody, KIND_LABEL, TECH_TEMPLATE, TECH_TITLE, hasStage, openQuestions } from "./kinds";
 import { IconCard, IconCheck, IconChecklist, IconClip, IconFit, IconFrame, IconImage, IconLink, IconMerge, IconMinus, IconPin, IconPlus, IconRedo, IconSparkle, IconTrash as IconTrashCan, IconUndo } from "./Icons";
 import { PromptModal, buildPrompt } from "./PromptModal";
 import { ContextMenu, type MenuSection } from "./ContextMenu";
@@ -27,7 +26,6 @@ import { TrashView } from "./TrashView";
 import { ProposalView } from "./ProposalView";
 import { DuskStrip, useDuskGlass } from "./DuskGlass";
 import { OrganizePreviewLayer, TidyNudge } from "./OrganizePlan";
-import { buildQueued, isPartial, needsRebuild } from "../util/build";
 import { NewArtifactDialog } from "./artifacts/NewArtifact";
 import { ArtifactFullView } from "./artifacts/ArtifactView";
 import { ArtifactCardBody, ArtifactHead } from "./artifacts/ArtifactCard";
@@ -53,8 +51,6 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
   const { data } = ws;
   const [filter, setFilter] = useState<Set<StageId>>(new Set(STAGES));
   const [editing, setEditing] = useState<string | null>(null);
-  const [editTab, setEditTab] = useState<"card" | "build">("card");
-  const [view, setView] = useState<"canvas" | "board">("canvas");
   /** A chat link asked for another card while the editor has unsaved edits (inline confirm). */
   const [switchAsk, setSwitchAsk] = useState<string | null>(null);
   const editorDirty = useRef(false);
@@ -158,7 +154,7 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
   const title = data?.meta.name ?? "";
 
   // The stage filter applies only to kind "card" (Tech included);
-  // stickies, labels, checklists, images and clips always show.
+  // checklists, images and clips always show.
   const visible = useMemo(() => (data?.cards ?? []).filter((c) => data?.canvas.cards[c.id] && (!hasStage(c) || filter.has(c.stage))), [data, filter]);
   // Viewport-cull: only render cards whose box intersects the visible area (plus margin), to hold 60fps at ~500 cards.
   const onScreen = useMemo(() => {
@@ -636,7 +632,7 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
   const frameCtlRef = useRef(frameCtl);
   frameCtlRef.current = frameCtl;
 
-  /** New sticky / label / checklist / Tech card at the centre of the view. */
+  /** New checklist / Tech card at the centre of the view. */
   const addKind = useCallback(
     async (kind: CardKind | "tech", at?: { x: number; y: number }) => {
       if (kind === "tech") {
@@ -648,8 +644,7 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
         await createAt({ title: TECH_TITLE, role: "tech", body: TECH_TEMPLATE }, at);
         return;
       }
-      const titles: Partial<Record<CardKind, string>> = { sticky: "Note", label: "Heading", checklist: "Checklist" };
-      await createAt({ kind, title: titles[kind] ?? "Untitled", ...(kind === "sticky" ? { color: "butter" } : {}) }, at);
+      await createAt({ kind, title: kind === "checklist" ? "Checklist" : "Untitled" }, at);
     },
     [data, ws, createAt],
   );
@@ -723,7 +718,6 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
       await ws.createCard({
         title: short ? first.trim() : `${first.trim().slice(0, 77).trimEnd()}…`,
         body: short ? rest.join("\n").trim() : t,
-        ...(t.length > 600 ? { fields: { split_offer: true } } : {}),
         ...at,
       });
     },
@@ -832,7 +826,6 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
         tags: c.tags,
         fields: c.fields,
         kind: c.kind,
-        color: c.color,
         items: c.items,
         attachments: c.attachments.map((a, i) => ({ ...a, id: `a${Date.now().toString(36)}${i}${Math.random().toString(36).slice(2, 6)}` })),
         links: c.links,
@@ -985,8 +978,6 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
   const addMenuSections: MenuSection[] = [
     {
       items: [
-        { label: "Sticky note", run: () => void addKind("sticky") },
-        { label: "Label (heading)", run: () => void addKind("label") },
         { label: "Checklist", run: () => void addKind("checklist") },
         { label: data?.cards.some((c) => c.role === "tech") ? "Tech & constraints (open)" : "Tech & constraints", run: () => void addKind("tech") },
       ],
@@ -1089,15 +1080,6 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
             <span className="proj-title">{title || "…"}</span>
           </span>
         </nav>
-        {data && (
-          <>
-            <span className="pill-sep" />
-            <div className="seg view-toggle" role="group" aria-label="View">
-              <button type="button" className={"filter" + (view === "canvas" ? " on" : "")} aria-pressed={view === "canvas"} onClick={() => setView("canvas")}>Canvas</button>
-              <button type="button" className={"filter" + (view === "board" ? " on" : "")} aria-pressed={view === "board"} onClick={() => setView("board")}>Board</button>
-            </div>
-          </>
-        )}
         <span className="pill-sep" />
         <div className="stage-filter" role="group" aria-label="Stage filter">
           {STAGES.map((s) => (
@@ -1164,16 +1146,6 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
       </div>
 
       {data && data.warnings.length > 0 && <Warnings data={data} />}
-      {data && view === "board" && (
-        <BuildBoard
-          ws={ws}
-          onOpen={(id) => {
-            setEditTab(data.cards.find((c) => c.id === id)?.build ? "build" : "card");
-            setEditing(id);
-          }}
-        />
-      )}
-
       {/* Bottom bar: zoom pill and Add toolbar in one grid spanning the free canvas area, so they can
           never overlap. Below ~680px of bar width the tool labels collapse to icons (container
           query in styles.css); every tool keeps an aria-label and a tooltip either way. */}
@@ -1193,10 +1165,10 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
         <button
           type="button"
           className="tool"
-          aria-label="Add a sticky, label, checklist or Tech card"
+          aria-label="Add a checklist or Tech card"
           aria-haspopup="menu"
           aria-expanded={!!addMenu}
-          title="Sticky, label, checklist, Tech & constraints"
+          title="Checklist, Tech & constraints"
           disabled={!data}
           onClick={(e) => {
             const r = e.currentTarget.getBoundingClientRect();
@@ -1323,9 +1295,8 @@ export function CanvasArea({ ws }: { ws: Workspace }) {
           key={editingCard.id}
           card={editingCard}
           ws={ws}
-          onClose={() => { setEditing(null); setSwitchAsk(null); setEditTab("card"); }}
+          onClose={() => { setEditing(null); setSwitchAsk(null); }}
           dirtyRef={editorDirty}
-          initialTab={editTab}
           switchTo={switchAsk && switchAsk !== editingCard.id ? { id: switchAsk, title: data?.cards.find((c) => c.id === switchAsk)?.title ?? "" } : null}
           onSwitch={(id) => { setSwitchAsk(null); setEditing(id); }}
           onStay={() => setSwitchAsk(null)}
@@ -1585,8 +1556,7 @@ const CardView = memo(function CardView({
   const kind = card.kind ?? "card";
   const staged = hasStage(card);
   const fixed = !autoH && pos.h !== undefined;
-  // Labels size to their text until resized; everything else starts at the default card width.
-  const style: CSSProperties = { left: pos.x, top: pos.y, width: pos.w ?? (kind === "label" ? undefined : CARD_W), height: autoH ? undefined : pos.h, zIndex: z };
+  const style: CSSProperties = { left: pos.x, top: pos.y, width: pos.w ?? CARD_W, height: autoH ? undefined : pos.h, zIndex: z };
   const menuBtn = (
     <button
       type="button"
@@ -1601,10 +1571,6 @@ const CardView = memo(function CardView({
       ⋯
     </button>
   );
-  // A sticky's colour is a swatch key; any other colour string (e.g. "#ffcc00" from Claude) is used as is.
-  const customTint = kind === "sticky" && card.color && !swatchOf(card.color, null) ? card.color : null;
-  const tint = kind === "sticky" && !customTint ? ` tint-${swatchOf(card.color)}` : "";
-  if (customTint) (style as Record<string, unknown>)["--tint"] = customTint;
   const open = openQuestions(card.items);
   const doneCount = (card.items ?? []).filter((i) => i.done).length;
   const ghost = !!card.ghost;
@@ -1612,7 +1578,7 @@ const CardView = memo(function CardView({
     <ArtifactHead card={card} menu={menuBtn} />
   ) : staged ? (
     <div className="card-head">
-      <span className={`dot dot-${card.stage}` + (needsRebuild(card) ? " dirty" : "") + (isPartial(card) ? " partial" : "")} aria-hidden="true" />
+      <span className={`dot dot-${card.stage}`} aria-hidden="true" />
       <span className="stage-name">{STAGE_LABEL[card.stage]}</span>
       {card.stage === "built" && <span className="built-check" aria-hidden="true"><IconCheck /></span>}
       {card.role === "tech" && <span className="tech-chip">{TECH_TITLE}</span>}
@@ -1653,7 +1619,7 @@ const CardView = memo(function CardView({
       )}
       {menuBtn}
     </div>
-  ) : kind === "label" && ghost ? null : (
+  ) : (
     menuBtn
   );
   const media =
@@ -1666,8 +1632,8 @@ const CardView = memo(function CardView({
     ) : null;
   const content = (
     <>
-      {(kind !== "sticky" || card.title) && <h3>{card.title}</h3>}
-      {kind !== "label" && card.attachments.length > 0 && <CardAttachments cardId={card.id} attachments={card.attachments} slug={active} onOpen={onAttachment} />}
+      <h3>{card.title}</h3>
+      {card.attachments.length > 0 && <CardAttachments cardId={card.id} attachments={card.attachments} slug={active} onOpen={onAttachment} />}
       {kind === "checklist" && (
         <ChecklistBody
           card={card}
@@ -1676,10 +1642,10 @@ const CardView = memo(function CardView({
           titleOf={ws.titleOf}
         />
       )}
-      {kind !== "label" && bodyHtml && <ScrollArea className="card-body md" dangerouslySetInnerHTML={{ __html: bodyHtml }} />}
+      {bodyHtml && <ScrollArea className="card-body md" dangerouslySetInnerHTML={{ __html: bodyHtml }} />}
     </>
   );
-  const tagRow = kind !== "label" && card.tags.length > 0 && <div className="tags">{card.tags.map((t) => <span key={t} className="tag">{t}</span>)}</div>;
+  const tagRow = card.tags.length > 0 && <div className="tags">{card.tags.map((t) => <span key={t} className="tag">{t}</span>)}</div>;
   const ghostActions = ghost && (
     <div className="ghost-actions">
       <button type="button" className="btn primary" title={card.merged_from?.length ? `Keep; the ${card.merged_from.length} original cards move to Trash` : undefined} onClick={(e) => { e.stopPropagation(); void ws.keepGhostCard(card.id); }}>Keep</button>
@@ -1695,8 +1661,6 @@ const CardView = memo(function CardView({
         `card kind-${kind}` +
         (staged ? ` stage-${card.stage}` : "") +
         (card.role === "tech" ? " role-tech" : "") +
-        (kind === "label" ? ` label-${labelSize(card)}` : "") +
-        tint +
         (card.ghost ? " ghost" : "") +
         (isLinkSource ? " link-source" : "") +
         (linking ? " linkable" : "") +
@@ -1711,7 +1675,7 @@ const CardView = memo(function CardView({
       onPointerUp={onPointerUp}
       onPointerCancel={onPointerCancel}
     >
-      {ghost && kind !== "label" && (
+      {ghost && (
         <div className="ghost-label"><span className="dusk-pill"><IconSparkle /> Claude suggests</span></div>
       )}
       {proposed && !ghost && (
@@ -1724,17 +1688,8 @@ const CardView = memo(function CardView({
       {!ghost ? (
         <>
           {head}
-          {needsRebuild(card) && <div className="build-note"><span className="rebuild-pill" title="Edited since it was built. Open the card's Build tab to see what changed.">Needs rebuild</span></div>}
           {media ?? content}
           {tagRow}
-          {buildQueued(card) && <div className={"build-bar" + (card.build?.status === "in-progress" ? " run" : "")} title={card.build?.status === "in-progress" ? "Claude Code is building this" : "Queued for Claude Code"} />}
-        </>
-      ) : kind === "label" ? (
-        <>
-          <span className="ghost-mark" title="Claude suggests" aria-label="Claude suggests"><IconSparkle /></span>
-          <div className="ghost-panel">{content}</div>
-          {menuBtn}
-          {ghostActions}
         </>
       ) : media ? (
         <>

@@ -26,7 +26,7 @@ function resizeFrame(s: Rect, dir: HandleDir, dx: number, dy: number): Rect {
 }
 
 /** A frame's tint: a swatch key gets its themed class; any other colour string is used as is. */
-export function frameTint(color: string | undefined): { className: string; style: CSSProperties } {
+function frameTint(color: string | undefined): { className: string; style: CSSProperties } {
   const sw = swatchOf(color, null);
   if (sw) return { className: ` tint-${sw}`, style: {} };
   return color ? { className: "", style: { ["--tint" as string]: color } } : { className: "", style: {} };

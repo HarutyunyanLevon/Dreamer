@@ -4,11 +4,6 @@
 //! * fast: a short message (< 200 chars) that is a simple action or lookup.
 //! * main: everything else.
 //!
-//! Then the tier picks a backend ([`backend`]): with local chat on, fast and main both run on the
-//! local model (Ollama) and only deep ("Think harder") goes to Claude, as do turns with web access
-//! and "Retry with Claude". Such a Claude turn in a local thread is an *escalation*: one turn, then
-//! the thread goes back to local. If Ollama isn't usable the turn falls back to Claude, visibly.
-//!
 //! Switching models loses the prompt cache, so a thread that went to main stays there until it has
 //! had [`FAST_STREAK_TO_DROP`] fast-type turns in a row. A pinned tier beats the router and leaves
 //! its state alone.
@@ -113,95 +108,9 @@ pub fn route(state: &mut RouterState, text: &str, think: bool, pin: Option<Tier>
     }
 }
 
-/// Where a turn runs.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Backend {
-    Local,
-    Claude,
-}
-
-/// Why a turn that would have been local went to Claude (shown under the reply).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Reason {
-    /// "Think harder" (or a pinned deep tier).
-    Think,
-    /// The globe: WebSearch / WebFetch run server-side at Anthropic, not through Ollama.
-    Web,
-    /// "Retry with Claude" on a failed local turn.
-    Retry,
-    /// Local chat is on but Ollama isn't usable right now.
-    Unavailable,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Route {
-    pub backend: Backend,
-    /// A one-turn Claude visit from a local thread: recap + last turns instead of the transcript.
-    pub escalated: bool,
-    pub reason: Option<Reason>,
-}
-
-/// Picks the backend for a turn whose tier is already decided. `local_on` = the setting,
-/// `local_ready` = Ollama answered and has the model.
-pub fn backend(tier: Tier, web: bool, retry: bool, local_on: bool, local_ready: bool) -> Route {
-    let claude = |escalated, reason| Route { backend: Backend::Claude, escalated, reason };
-    if !local_on {
-        return claude(false, None);
-    }
-    let reason = if retry {
-        Some(Reason::Retry)
-    } else if tier == Tier::Deep {
-        Some(Reason::Think)
-    } else if web {
-        Some(Reason::Web)
-    } else {
-        None
-    };
-    match (reason, local_ready) {
-        (Some(r), true) => claude(true, Some(r)),
-        // No local thread to escalate from: a plain Claude turn, as before local chat existed.
-        (Some(r), false) => claude(false, Some(r)),
-        (None, true) => Route { backend: Backend::Local, escalated: false, reason: None },
-        (None, false) => claude(false, Some(Reason::Unavailable)),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn fast_and_main_run_locally_deep_goes_to_claude() {
-        for tier in [Tier::Fast, Tier::Main] {
-            assert_eq!(backend(tier, false, false, true, true), Route { backend: Backend::Local, escalated: false, reason: None }, "{tier:?}");
-        }
-        assert_eq!(backend(Tier::Deep, false, false, true, true), Route { backend: Backend::Claude, escalated: true, reason: Some(Reason::Think) });
-        // A pinned deep tier is the same as Think.
-        let mut s = RouterState::default();
-        assert_eq!(backend(route(&mut s, "rename this", false, Some(Tier::Deep), true), false, false, true, true).reason, Some(Reason::Think));
-        // Think from the router: deep, Claude, and the thread's hysteresis is untouched.
-        let tier = route(&mut s, "rename this", true, None, true);
-        assert_eq!(backend(tier, false, false, true, true).backend, Backend::Claude);
-        assert_eq!(backend(route(&mut s, "rename this", false, None, true), false, false, true, true).backend, Backend::Local, "next turn back to local");
-    }
-
-    #[test]
-    fn web_and_retry_escalate_one_turn() {
-        assert_eq!(backend(Tier::Fast, true, false, true, true), Route { backend: Backend::Claude, escalated: true, reason: Some(Reason::Web) });
-        assert_eq!(backend(Tier::Main, false, true, true, true), Route { backend: Backend::Claude, escalated: true, reason: Some(Reason::Retry) });
-        assert_eq!(backend(Tier::Deep, true, true, true, true).reason, Some(Reason::Retry), "retry names itself first");
-    }
-
-    #[test]
-    fn local_off_or_unavailable_uses_claude_as_before() {
-        for tier in [Tier::Fast, Tier::Main, Tier::Deep] {
-            assert_eq!(backend(tier, false, false, false, true), Route { backend: Backend::Claude, escalated: false, reason: None }, "setting off: no note");
-        }
-        assert_eq!(backend(Tier::Main, false, false, true, false), Route { backend: Backend::Claude, escalated: false, reason: Some(Reason::Unavailable) }, "visible fallback");
-        assert_eq!(backend(Tier::Deep, false, false, true, false), Route { backend: Backend::Claude, escalated: false, reason: Some(Reason::Think) }, "no local thread to escalate from");
-    }
 
     #[test]
     fn classifies_simple_actions_and_lookups() {

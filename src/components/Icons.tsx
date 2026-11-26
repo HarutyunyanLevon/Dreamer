@@ -21,7 +21,6 @@ export const IconUndo = I(<><path d="M9 14 4 9l5-5" /><path d="M4 9h10.5a5.5 5.5
 export const IconRedo = I(<><path d="m15 14 5-5-5-5" /><path d="M20 9H9.5a5.5 5.5 0 0 0 0 11H13" /></>);
 export const IconFork = I(<><circle cx="6" cy="6" r="2.5" /><circle cx="6" cy="18" r="2.5" /><circle cx="18" cy="12" r="2.5" /><path d="M6 8.5V18M8.3 7A8 8 0 0 1 15.7 11" /></>);
 export const IconPin = I(<><path d="M9 4h6l-1 5 3 3v1H7v-1l3-3Z" /><path d="M12 13v7" /></>);
-export const IconPower = I(<><path d="M12 4v8" /><path d="M7.5 6.8a7 7 0 1 0 9 0" /></>);
 /** Frame: a dashed rectangle with a title tab. */
 export const IconFrame = I(<><path d="M4 8V6a2 2 0 0 1 2-2h4" /><rect x="4" y="8" width="16" height="12" rx="2" strokeDasharray="3 2.5" /></>);
 /** Design docs: a page with lines and a folded corner. */

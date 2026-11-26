@@ -3,9 +3,8 @@ import { api, type ProjectSummary } from "../api";
 import { type Workspace } from "../state/useWorkspace";
 import { Modal } from "../ui/Modal";
 import { useTheme } from "../theme/ThemeContext";
-import { IconDoc, IconFolder, IconPlus, IconPower, IconTrash } from "./Icons";
-import { ThemeEditor } from "./ThemeEditor";
-import { openHotkeys, pickBundle } from "./Import";
+import { IconDoc, IconFolder, IconPlus, IconTrash } from "./Icons";
+import { pickBundle } from "./Import";
 import { LinkRepoDialog } from "./LinkRepo";
 import { ScrollArea } from "../ui/Scroll";
 
@@ -16,9 +15,6 @@ interface Props {
   /** Resolves to null on success, or the error text to show under the name field. */
   onCreate: (name: string) => Promise<string | null>;
   onDelete: (slug: string) => void;
-  /** The active project's Design view (handoff pack versions) is open. */
-  designOpen: boolean;
-  onOpenDesign: () => void;
   /** The Memory modal is open for the active project. */
   memoryOpen: boolean;
   onOpenMemory: () => void;
@@ -27,7 +23,7 @@ interface Props {
   ws: Workspace;
 }
 
-export function Sidebar({ projects, active, onSelect, onCreate, onDelete, designOpen, onOpenDesign, memoryOpen, onOpenMemory, resize, ws }: Props) {
+export function Sidebar({ projects, active, onSelect, onCreate, onDelete, memoryOpen, onOpenMemory, resize, ws }: Props) {
   const [deleting, setDeleting] = useState<ProjectSummary | null>(null);
   const { themes, theme, setThemeId } = useTheme();
   const [linking, setLinking] = useState<string | null>(null);
@@ -35,7 +31,6 @@ export function Sidebar({ projects, active, onSelect, onCreate, onDelete, design
   const [name, setName] = useState("");
   const [createError, setCreateError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
-  const [editingTheme, setEditingTheme] = useState<{ initial: typeof theme; isNew: boolean } | null>(null);
   const input = useRef<HTMLInputElement>(null);
   /**
    * Set once this naming session is finished (submitted or cancelled). Enter, then the blur that
@@ -99,10 +94,7 @@ export function Sidebar({ projects, active, onSelect, onCreate, onDelete, design
               className={"side-row" + (p.slug === active ? " active" : "")}
               type="button"
               aria-current={p.slug === active ? "true" : undefined}
-              onClick={() => {
-                if (p.slug !== active) return onSelect(p.slug);
-                ws.setDesignOpen(false);
-              }}
+              onClick={() => p.slug !== active && onSelect(p.slug)}
             >
               <IconFolder />
               <span>{p.name}</span>
@@ -125,23 +117,6 @@ export function Sidebar({ projects, active, onSelect, onCreate, onDelete, design
               </button>
             )}
             {p.slug === active && (
-              <button
-                type="button"
-                className={"side-row side-sub" + (designOpen ? " active" : "")}
-                aria-current={designOpen ? "true" : undefined}
-                title="Design docs written from this project (handoff pack)"
-                onClick={onOpenDesign}
-              >
-                <IconDoc />
-                <span>Design</span>
-                {(p.open_questions ?? 0) > 0 && (
-                  <span className="badge badge-alert" title="Unanswered questions from Claude Code" aria-label={`${p.open_questions} unanswered question${p.open_questions === 1 ? "" : "s"} from Claude Code`}>
-                    {p.open_questions}?
-                  </span>
-                )}
-              </button>
-            )}
-            {p.slug === active && (
               <button type="button" className="side-row side-sub" title="Add cards from a .dreamer.md bundle (or paste one on the canvas)" onClick={() => pickBundle()}>
                 <IconDoc />
                 <span>Import bundle…</span>
@@ -151,7 +126,7 @@ export function Sidebar({ projects, active, onSelect, onCreate, onDelete, design
               <button
                 type="button"
                 className="side-row side-sub"
-                title={ws.data?.meta.handoff_target ? `Repo: ${ws.data.meta.handoff_target}. Pick another folder to change it.` : "Link a code repo: build status comes back from it, and Claude Code gets a list of your cards"}
+                title={ws.data?.meta.handoff_target ? `Repo: ${ws.data.meta.handoff_target}. Pick another folder to change it.` : "Link a code repo: the design pack is written into it"}
                 onClick={() => void api.pickFolder("Repo folder").then((path) => path && setLinking(path), (e) => ws.setError(String(e)))}
               >
                 <IconFolder />
@@ -183,10 +158,6 @@ export function Sidebar({ projects, active, onSelect, onCreate, onDelete, design
         </div>
         <div className="theme-name-row">
           <div className="theme-name">{theme.name}</div>
-          {!theme.builtin && (
-            <button type="button" className="chip" onClick={() => setEditingTheme({ initial: theme, isNew: false })}>Edit</button>
-          )}
-          <button type="button" className="chip" onClick={() => setEditingTheme({ initial: theme, isNew: true })}>New theme</button>
         </div>
       </div>
 
@@ -201,8 +172,6 @@ export function Sidebar({ projects, active, onSelect, onCreate, onDelete, design
           }}
         />
       )}
-
-      {editingTheme && <ThemeEditor initial={editingTheme.initial} isNew={editingTheme.isNew} onClose={() => setEditingTheme(null)} />}
 
       {naming ? (
         <div className="name-field">
@@ -245,23 +214,6 @@ export function Sidebar({ projects, active, onSelect, onCreate, onDelete, design
         </button>
       )}
 
-      {api.kind === "tauri" && (
-        <button type="button" className="side-quit" title="Global shortcuts: quick capture and Clipboard to Inbox" onClick={openHotkeys}>
-          <IconPlus />
-          Hotkeys…
-        </button>
-      )}
-      {api.kind === "tauri" && (
-        <button
-          type="button"
-          className="side-quit"
-          title="Quit Dreamer completely (closing the window keeps it in the tray)"
-          onClick={() => void api.quitApp()}
-        >
-          <IconPower />
-          Quit Dreamer
-        </button>
-      )}
     </aside>
   );
 }

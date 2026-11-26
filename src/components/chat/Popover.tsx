@@ -4,7 +4,7 @@ import { useEffect, useRef, type KeyboardEvent, type ReactNode } from "react";
 const ITEMS = '[role="menuitem"],[role="menuitemradio"],[role="menuitemcheckbox"]';
 
 /** Arrow / Home / End move focus between the menu's enabled items. */
-export function menuKeys(e: KeyboardEvent<HTMLElement>) {
+function menuKeys(e: KeyboardEvent<HTMLElement>) {
   const items = [...e.currentTarget.querySelectorAll<HTMLElement>(ITEMS)].filter((el) => !el.hasAttribute("disabled"));
   if (!items.length) return;
   const i = items.indexOf(document.activeElement as HTMLElement);

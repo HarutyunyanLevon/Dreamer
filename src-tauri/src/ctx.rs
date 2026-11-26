@@ -366,9 +366,6 @@ fn qa_lines(text: &str) -> Vec<(String, String)> {
     out
 }
 
-/// History a restarted local session gets (chars, newest kept): enough for a long grill, small for a 9B model.
-pub const RESTART_HISTORY_CHARS: usize = 12_000;
-
 /// Pairs kept in [`answered_block`] (the newest), and chars per question / answer.
 const ANSWERED_MAX: usize = 40;
 const ANSWERED_Q_CHARS: usize = 300;
@@ -414,21 +411,13 @@ pub fn answered_block(file: &Value, current: Option<(&str, &str)>, card_memory: 
 /// Characters kept per message in [`recent_turns`].
 const RECENT_LINE_CHARS: usize = 1_500;
 
-/// The last `n` messages of the thread as transcript lines, each capped (an escalated Claude turn
-/// gets these plus the local model's recap instead of the whole transcript). None when empty.
+/// The last `n` messages of the thread as transcript lines, each capped (an artifact request from
+/// a chat thread carries these). None when empty.
 pub fn recent_turns(file: &Value, n: usize) -> Option<String> {
     let lines = transcript_lines(file);
     let tail: Vec<String> = lines[lines.len().saturating_sub(n)..].iter().map(|l| cap_chars(l, RECENT_LINE_CHARS)).collect();
     (!tail.is_empty()).then(|| tail.join("
 "))
-}
-
-/// Local threads run with a 65,536-token context (ollama::NUM_CTX), so they are summarized by
-/// 40k at the latest, even when the setting is higher. Compaction is checked between turns, so one
-/// heavy turn (a list_tree of 30k chars, several tool rounds, the reply) must still fit after it.
-pub const LOCAL_COMPACT_MAX: u64 = 40_000;
-pub fn local_compact_tokens(setting: u64) -> u64 {
-    setting.min(LOCAL_COMPACT_MAX)
 }
 
 /// Whether the thread's last turn read enough input that it should be summarized first.
@@ -611,6 +600,5 @@ Claude: xxx"), "{r}");
         assert!(!r.contains("summary") && !r.contains("oops"), "no summary line, no errors");
         assert!(r.chars().count() < 1_600 + 30, "each line capped");
         assert_eq!(recent_turns(&json!({"messages": []}), 3), None);
-        assert_eq!((local_compact_tokens(30_000), local_compact_tokens(200_000)), (30_000, LOCAL_COMPACT_MAX));
     }
 }

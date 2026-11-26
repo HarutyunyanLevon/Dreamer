@@ -5,9 +5,9 @@ export const CARD_W = 236;
 /** Height estimate before a card has been measured (culling, link endpoints). */
 export const CARD_H = 150;
 /** Mirrors MIN_CARD_W / MIN_CARD_H in src-tauri/src/model.rs. */
-export const MIN_W = 160;
-export const MIN_H = 90;
-export const MAX_SIDE = 4000;
+const MIN_W = 160;
+const MIN_H = 90;
+const MAX_SIDE = 4000;
 
 export interface Rect {
   x: number;

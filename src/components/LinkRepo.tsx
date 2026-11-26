@@ -7,21 +7,20 @@ import { Modal } from "../ui/Modal";
 export function LinkRepoWrites() {
   return (
     <ul>
-      <li><code>.dreamer/link.json</code>: the open version's cards (id, title, stage, build status), so Claude Code can name them.</li>
-      <li><code>docs/design/STATUS.md</code>: created empty if missing. Claude Code writes build status there; Dreamer never edits it.</li>
+      <li><code>docs/design/</code>: the design docs (and their images), replaced each time you generate the pack.</li>
+      <li><code>CLAUDE.md</code>: only the block between the Dreamer markers; the rest of the file is left alone.</li>
     </ul>
   );
 }
 
-/** "Link repo…": pick the repo, confirm what Dreamer will write there, optionally git-ignore `.dreamer/`. */
+/** "Link repo…": pick the repo and confirm what Dreamer will write there. */
 export function LinkRepoDialog({ ws, slug, path, onClose }: { ws: Workspace; slug: string; path: string; onClose: () => void }) {
-  const [ignore, setIgnore] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const link = async () => {
     setBusy(true);
     try {
-      await api.linkRepo(slug, path, ignore);
+      await api.linkRepo(slug, path);
       await ws.refresh();
       ws.toast("Repo linked.");
       onClose();
@@ -36,7 +35,6 @@ export function LinkRepoDialog({ ws, slug, path, onClose }: { ws: Workspace; slu
         <p><strong>Link this repo?</strong></p>
         <code className="dialog-path">{path}</code>
         <LinkRepoWrites />
-        <label className="check-row"><input type="checkbox" checked={ignore} onChange={(e) => setIgnore(e.target.checked)} /> Add <code>.dreamer/</code> to the repo's .gitignore</label>
         {error && <p className="setup-error" role="alert">{error}</p>}
         <div className="editor-actions">
           <div className="side-spacer" />

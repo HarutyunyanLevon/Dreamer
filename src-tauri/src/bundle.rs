@@ -27,7 +27,6 @@ pub struct BCard {
     /// `to` is a ref of this bundle or an existing card id (checked when applied).
     pub links: Vec<Link>,
     pub fields: BTreeMap<String, Value>,
-    pub build: Option<Value>,
     pub body: String,
 }
 
@@ -68,12 +67,6 @@ fn split_front(t: &str) -> Option<(&str, &str)> {
     }
     let i = rest.find("\n---").filter(|i| rest[i + 4..].is_empty() || rest[i + 4..].starts_with('\n'))?;
     Some((&rest[..i], rest[i + 4..].trim_start_matches('\n')))
-}
-
-/// Is this a bundle: first non-blank line (after an optional fence) is `---` and the header has `dreamer_bundle`.
-pub fn detect(text: &str) -> bool {
-    let t = clean(text);
-    split_front(&t).is_some_and(|(h, _)| serde_yaml::from_str::<serde_yaml::Mapping>(h).is_ok_and(|m| m.contains_key("dreamer_bundle")))
 }
 
 fn s(v: &serde_yaml::Value) -> Option<String> {
@@ -170,7 +163,6 @@ pub fn parse(text: &str) -> Result<Bundle, String> {
             frame: None,
             links: vec![],
             fields: BTreeMap::new(),
-            build: None,
             body: body.trim_matches('\n').to_string(),
         };
         for (k, v) in &m {
@@ -185,10 +177,7 @@ pub fn parse(text: &str) -> Result<Bundle, String> {
                         "reverie" => Stage::Reverie,
                         "lucid" => Stage::Lucid,
                         "dream" => Stage::Dream,
-                        "built" => {
-                            c.build.get_or_insert_with(|| serde_json::json!({ "status": "built" }));
-                            Stage::Built
-                        }
+                        "built" => Stage::Built,
                         other => {
                             warnings.push(format!("{at}: unknown stage \"{other}\", using mist."));
                             Stage::Mist
@@ -216,12 +205,8 @@ pub fn parse(text: &str) -> Result<Bundle, String> {
                         c.fields = o.into_iter().collect();
                     }
                 }
-                "build" => {
-                    let b = to_json(v);
-                    if b.is_object() {
-                        c.build = Some(b);
-                    }
-                }
+                // Build status left Dreamer; bundles that still carry it are fine.
+                "build" => {}
                 other => warnings.push(format!("{at}: unknown key \"{other}\" ignored.")),
             }
         }
@@ -281,16 +266,14 @@ mod tests {
         assert_eq!(b.cards[0].links[0].label.as_deref(), Some("needs"));
         assert_eq!(b.cards[0].body, "Body one\n\n---\nmore");
         assert_eq!(b.cards[1].stage, Stage::Built);
-        assert!(b.cards[1].build.is_some());
         assert!(b.warnings.is_empty(), "{:?}", b.warnings);
     }
 
     #[test]
     fn crlf_bom_and_fences() {
         let t = format!("\u{feff}```dreamer\n{GOOD}```\n").replace('\n', "\r\n");
-        assert!(detect(&t));
         assert_eq!(parse(&t).unwrap().cards.len(), 2);
-        assert!(detect(&format!("\n\n```markdown\n{GOOD}\n```")));
+        assert_eq!(parse(&format!("\n\n```markdown\n{GOOD}\n```")).unwrap().cards.len(), 2);
     }
 
     #[test]
@@ -304,9 +287,8 @@ mod tests {
 
     #[test]
     fn detection_is_strict() {
-        assert!(!detect("hello\n---\ndreamer_bundle: 1\n---\n"));
-        assert!(!detect("---\ntitle: plain card\n---\nbody"));
-        assert!(!detect("# Heading"));
+        assert!(parse("hello\n---\ndreamer_bundle: 1\n---\n").is_err());
+        assert!(parse("---\ntitle: plain card\n---\nbody").is_err());
         assert!(parse("# Heading").is_err());
     }
 

@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
 import type { OrganizeLayout, OrganizeOp, OrganizePlanData, ProjectData } from "../api";
-import type { Backend } from "../api/claude";
 import type { ChatMessage } from "../state/useClaudeChat";
 import { simulateOrganize, type OrganizeSim, type Workspace } from "../state/useWorkspace";
 import { type Rect } from "./cardGeometry";
@@ -74,10 +73,10 @@ export function OrganizePlanCard({
   ws: Workspace;
   busy: boolean;
   onChange: (patch: Partial<NonNullable<ChatMessage["organize"]>>) => void;
-  onRedo: (backend: Backend) => void;
+  onRedo: () => void;
   onRevise: (text: string) => void;
-  /** A partial plan: place its unplaced cards (on Claude, or locally again). Never runs by itself. */
-  onFinish: (backend: Backend) => void;
+  /** A partial plan: place its unplaced cards. Never runs by itself. */
+  onFinish: () => void;
 }) {
   const org = message.organize!;
   const { plan, status, checked } = org;
@@ -101,7 +100,6 @@ export function OrganizePlanCard({
 
   const effective = sim?.effective ?? plan.ops.map(() => false);
   const nOn = effective.filter(Boolean).length;
-  const madeBy = message.backend ?? "claude";
 
   if (!open) {
     const what = status === "applied" ? "Applied" : status === "discarded" ? "Discarded" : "Replaced by a newer plan";
@@ -156,11 +154,8 @@ export function OrganizePlanCard({
             Not placed yet ({plan.unplaced.length}): {plan.unplaced.map((u) => u.title).join(", ")}. Applying lays them out below the frames.
           </p>
           <div className="organize-actions">
-            <button type="button" className="chip" disabled={busy || applying} title="Ask Claude to place only these cards into the plan's frames" onClick={() => onFinish("claude")}>
-              Finish with Claude
-            </button>
-            <button type="button" className="chip" disabled={busy || applying} title="Try the local model again for only these cards" onClick={() => onFinish("local")}>
-              Retry rest locally
+            <button type="button" className="chip" disabled={busy || applying} title="Ask Claude to place only these cards into the plan's frames" onClick={onFinish}>
+              Place the rest
             </button>
           </div>
         </div>
@@ -174,14 +169,9 @@ export function OrganizePlanCard({
           Discard
         </button>
         <div className="side-spacer" />
-        <button type="button" className="chip" disabled={busy || applying} title="Make this plan again with Claude" onClick={() => onRedo("claude")}>
-          Redo with Claude
+        <button type="button" className="chip" disabled={busy || applying} title="Make this plan again" onClick={onRedo}>
+          Redo
         </button>
-        {madeBy === "claude" && (
-          <button type="button" className="chip" disabled={busy || applying} title="Make this plan again on the local model" onClick={() => onRedo("local")}>
-            Redo locally
-          </button>
-        )}
       </div>
       <form
         className="organize-reply"
@@ -201,7 +191,7 @@ export function OrganizePlanCard({
   );
 }
 
-/** The text of a revision turn: the previous plan travels with it, so any backend can continue it. */
+/** The text of a revision turn: the previous plan travels with it, so a new turn can continue it. */
 export function reviseText(plan: OrganizePlanData, ask: string): string {
   const prev = JSON.stringify({ rationale: plan.rationale, ops: plan.ops });
   return `/organize revise (scope: ${plan.scope}): ${ask}\n\n[Previous plan]\n${prev.length > 8000 ? `${prev.slice(0, 8000)}…` : prev}`;

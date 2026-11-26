@@ -10,7 +10,7 @@ pub enum Stage {
     Reverie,
     Lucid,
     Dream,
-    /// Built in the repo (a `build` block in the frontmatter tracks what and whether it drifted).
+    /// Built in the repo; a plain stage the user sets by hand.
     Built,
 }
 
@@ -56,8 +56,6 @@ pub struct Link {
 pub enum CardKind {
     #[default]
     Card,
-    Sticky,
-    Label,
     Checklist,
     Image,
     Clip,
@@ -69,8 +67,6 @@ impl<'de> Deserialize<'de> for CardKind {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
         let s = String::deserialize(d)?;
         Ok(match s.trim().to_lowercase().as_str() {
-            "sticky" => CardKind::Sticky,
-            "label" => CardKind::Label,
             "checklist" => CardKind::Checklist,
             "image" => CardKind::Image,
             "clip" => CardKind::Clip,
@@ -84,9 +80,7 @@ impl<'de> Deserialize<'de> for CardKind {
 /// card, and the "Project decisions" card the handoff gap interview writes answers into.
 pub const ROLE_TECH: &str = "tech";
 pub const ROLE_DECISIONS: &str = "decisions";
-/// The checklist card holding questions Claude Code left in the repo's docs/design/QUESTIONS.md.
-pub const ROLE_CC_QUESTIONS: &str = "cc-questions";
-pub const ROLES: [&str; 3] = [ROLE_TECH, ROLE_DECISIONS, ROLE_CC_QUESTIONS];
+pub const ROLES: [&str; 2] = [ROLE_TECH, ROLE_DECISIONS];
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
 pub struct ChecklistItem {
@@ -101,9 +95,6 @@ pub struct ChecklistItem {
     pub question: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub answer: Option<String>,
-    /// The raw QUESTIONS.md line this item was imported from (cc-questions card).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source: Option<String>,
 }
 
 /// Something attached to a card. Paths are relative to the project dir and always under `media/`.
@@ -246,8 +237,6 @@ pub struct Frontmatter {
     pub kind: CardKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub color: Option<String>,
     #[serde(default)]
     pub stage: Stage,
     #[serde(default)]
@@ -268,9 +257,6 @@ pub struct Frontmatter {
     pub branch: Option<Value>,
     #[serde(default, deserialize_with = "lenient_list", skip_serializing_if = "Vec::is_empty")]
     pub items: Vec<ChecklistItem>,
-    /// QUESTIONS.md lines whose items were deleted from the cc-questions card: never re-imported.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub dismissed_sources: Vec<String>,
     /// Display order; the first image is the cover.
     #[serde(default, deserialize_with = "lenient_list")]
     pub attachments: Vec<Attachment>,
@@ -363,16 +349,12 @@ pub struct NewCard {
     pub merged_from: Option<Vec<String>>,
     pub kind: Option<CardKind>,
     pub role: Option<String>,
-    pub color: Option<String>,
     pub items: Option<Vec<ChecklistItem>>,
     pub attachments: Option<Vec<Attachment>>,
     pub x: Option<f64>,
     pub y: Option<f64>,
     #[serde(default)]
     pub import: Option<ImportRef>,
-    /// A bundle's build block, kept in the frontmatter as-is.
-    #[serde(default)]
-    pub build: Option<Value>,
 }
 
 #[derive(Deserialize, Debug, Default)]
@@ -387,10 +369,7 @@ pub struct CardPatch {
     pub kind: Option<CardKind>,
     /// `Some("")` clears it.
     pub role: Option<String>,
-    /// `Some("")` clears it.
-    pub color: Option<String>,
     pub items: Option<Vec<ChecklistItem>>,
-    pub dismissed_sources: Option<Vec<String>>,
     pub attachments: Option<Vec<Attachment>>,
 }
 
@@ -544,9 +523,6 @@ pub struct ProjectSummary {
     pub name: String,
     pub theme: Option<String>,
     pub card_count: usize,
-    /// Unanswered lines in the handoff repo's docs/design/QUESTIONS.md.
-    #[serde(default)]
-    pub open_questions: usize,
 }
 
 #[derive(Deserialize, Debug, Default)]
@@ -564,10 +540,6 @@ pub struct ProjectPatch {
 pub struct Settings {
     pub version: u32,
     pub theme: String,
-    pub hotkey: String,
-    /// "Clipboard to Inbox" global shortcut.
-    #[serde(default = "default_clip_hotkey")]
-    pub clipboard_hotkey: String,
     #[serde(default)]
     pub last_project: Option<String>,
     /// Left panel (projects) shown. Older files without the key show it.
@@ -582,15 +554,6 @@ pub struct Settings {
     /// Chat panel width in px (280-720).
     #[serde(default = "default_chat_w")]
     pub chat_w: u32,
-    /// The one-time "Dreamer is still running in the tray" notice has been seen.
-    #[serde(default)]
-    pub tray_notice_shown: bool,
-    /// Launch Dreamer when Windows starts (the real state is the autostart plugin's Run entry).
-    #[serde(default = "yes")]
-    pub start_with_windows: bool,
-    /// On a Windows-start launch, stay in the tray without opening the window.
-    #[serde(default = "yes")]
-    pub start_hidden: bool,
     /// Claude model for chat sessions (an alias like "sonnet" or a full model id).
     #[serde(default = "default_model_chat")]
     pub model_chat: String,
@@ -603,12 +566,9 @@ pub struct Settings {
     /// Chat model for turns with "Think" on (router "deep").
     #[serde(default = "default_model_deep")]
     pub model_deep: String,
-    /// Claude model for the handoff pack sessions (gap check and generation).
+    /// Claude model for the handoff pack session.
     #[serde(default = "default_model_export")]
     pub model_export: String,
-    /// Claude model for build runs (never the local model).
-    #[serde(default = "default_model_build")]
-    pub build_model: String,
     /// Claude model for one-shot thread summaries (auto-compact).
     #[serde(default = "default_model_memory")]
     pub model_memory: String,
@@ -618,18 +578,6 @@ pub struct Settings {
     /// Word cap of a project's memory.md.
     #[serde(default = "default_memory_cap")]
     pub memory_cap: u64,
-    /// Everyday chat turns (router fast and main) run on a local model through Ollama.
-    #[serde(default = "yes")]
-    pub local_chat: bool,
-    /// The Ollama model for local turns (Dreamer runs a 64k-context copy of it, see ollama.rs).
-    #[serde(default = "default_local_model")]
-    pub local_model: String,
-    /// The folder picked with "Locate ollama.exe…" (searched first); empty = none.
-    #[serde(default)]
-    pub ollama_path: String,
-    /// The cloud model was declined on a PC whose GPU is too small for a local one: chat stays on Claude.
-    #[serde(default)]
-    pub local_cloud_declined: bool,
     /// SpriteCook's remote MCP server (artifact images). The API key is in the OS credential store.
     #[serde(default = "default_spritecook_url")]
     pub spritecook_url: String,
@@ -652,8 +600,6 @@ fn default_chat_w() -> u32 {
 }
 pub const DEFAULT_MODEL_CHAT: &str = "sonnet";
 pub const DEFAULT_MODEL_EXPORT: &str = "opus";
-/// Build runs: Claude Code working in the repo. Claude only.
-pub const DEFAULT_MODEL_BUILD: &str = "sonnet";
 pub const DEFAULT_MODEL_FAST: &str = "haiku";
 pub const DEFAULT_MODEL_DEEP: &str = "opus";
 fn default_model_fast() -> String {
@@ -663,11 +609,6 @@ fn default_model_deep() -> String {
     DEFAULT_MODEL_DEEP.into()
 }
 pub const DEFAULT_MODEL_MEMORY: &str = "haiku";
-/// Qwen 3.5 MoE, 35B total / ~3B active, tools + vision (Ollama library, checked 2026-11).
-pub const DEFAULT_LOCAL_MODEL: &str = "qwen3.5:35b-a3b";
-fn default_local_model() -> String {
-    DEFAULT_LOCAL_MODEL.into()
-}
 pub const DEFAULT_SPRITECOOK_URL: &str = "https://api.spritecook.ai/mcp/";
 pub const DEFAULT_CREDIT_CAP: u32 = 4;
 fn default_spritecook_url() -> String {
@@ -692,40 +633,24 @@ fn default_model_chat() -> String {
 fn default_model_export() -> String {
     DEFAULT_MODEL_EXPORT.into()
 }
-fn default_model_build() -> String {
-    DEFAULT_MODEL_BUILD.into()
-}
-fn default_clip_hotkey() -> String {
-    "Ctrl+Alt+Shift+V".into()
-}
 impl Default for Settings {
     fn default() -> Self {
         Settings {
             version: 1,
             theme: "pearl-glow".into(),
-            hotkey: "Ctrl+Shift+Space".into(),
-            clipboard_hotkey: default_clip_hotkey(),
             last_project: None,
             show_projects: true,
             show_chat: true,
             side_w: default_side_w(),
             chat_w: default_chat_w(),
-            tray_notice_shown: false,
-            start_with_windows: true,
-            start_hidden: true,
             model_chat: default_model_chat(),
             model_router: true,
             model_fast: default_model_fast(),
             model_deep: default_model_deep(),
             model_export: default_model_export(),
-            build_model: default_model_build(),
             model_memory: default_model_memory(),
             compact_tokens: default_compact_tokens(),
             memory_cap: default_memory_cap(),
-            local_chat: true,
-            local_model: default_local_model(),
-            ollama_path: String::new(),
-            local_cloud_declined: false,
             spritecook_url: default_spritecook_url(),
             credit_cap: DEFAULT_CREDIT_CAP,
             extra: BTreeMap::new(),
@@ -736,17 +661,12 @@ impl Default for Settings {
 #[derive(Deserialize, Debug, Default)]
 pub struct SettingsPatch {
     pub theme: Option<String>,
-    pub hotkey: Option<String>,
-    pub clipboard_hotkey: Option<String>,
     /// Empty string clears it.
     pub last_project: Option<String>,
     pub show_projects: Option<bool>,
     pub show_chat: Option<bool>,
     pub side_w: Option<u32>,
     pub chat_w: Option<u32>,
-    pub tray_notice_shown: Option<bool>,
-    pub start_with_windows: Option<bool>,
-    pub start_hidden: Option<bool>,
     /// Empty string restores the default.
     pub model_chat: Option<String>,
     pub model_router: Option<bool>,
@@ -756,20 +676,12 @@ pub struct SettingsPatch {
     pub model_deep: Option<String>,
     /// Empty string restores the default.
     pub model_export: Option<String>,
-    /// Empty string restores the default; a local (Ollama) model name is refused.
-    pub build_model: Option<String>,
     /// Empty string restores the default.
     pub model_memory: Option<String>,
     /// 0 restores the default.
     pub compact_tokens: Option<u64>,
     /// 0 restores the default.
     pub memory_cap: Option<u64>,
-    pub local_chat: Option<bool>,
-    /// Empty string restores the default.
-    pub local_model: Option<String>,
-    /// Empty string clears it.
-    pub ollama_path: Option<String>,
-    pub local_cloud_declined: Option<bool>,
     /// Empty string restores the default; must be https.
     pub spritecook_url: Option<String>,
     /// 0 restores the default.
@@ -840,7 +752,6 @@ mod tests {
 
         let s = serde_json::to_value(Settings::default()).unwrap();
         assert_eq!(s["last_project"], serde_json::Value::Null);
-        assert_eq!(s["hotkey"], "Ctrl+Shift+Space");
 
         // What the UI sends.
         let n: NewCard = serde_json::from_value(json!({"title": "x", "stage": "lucid", "x": 1.5, "y": 2.0})).unwrap();

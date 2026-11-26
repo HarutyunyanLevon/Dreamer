@@ -1,16 +1,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { api, type Card, type Gap, type HandoffEvent, type HandoffRepoResult, type HandoffScope, type HandoffSpec, type ProjectData } from "../api";
+import { api, type Card, type HandoffEvent, type HandoffRepoResult, type HandoffScope, type HandoffSpec, type ProjectData } from "../api";
 import { type Workspace } from "../state/useWorkspace";
 import { STAGES, STAGE_LABEL, type StageId } from "../theme/types";
 import { LinkRepoWrites } from "./LinkRepo";
 import { Modal } from "../ui/Modal";
 import { CARD_H, CARD_W } from "./cardGeometry";
-import { DesignView } from "./DesignView";
 import { LiveActivity, StepList, applyJobEvent, newJobActivity, type JobActivity } from "./Activity";
 
 /**
- * The project handoff pack ("Summarize"): the export dialog, the gap check, the generation progress
- * panel and the Design view. One handoff session runs at a time (enforced in Rust too).
+ * The project handoff pack ("Summarize"): the export dialog and the generation progress panel.
+ * The pack is written into the linked repo folder, replacing the last one. One handoff session
+ * runs at a time (enforced in Rust too).
  */
 export function HandoffHost({ ws }: { ws: Workspace }) {
   const [dialog, setDialog] = useState<{ scope: HandoffScope; n: number } | null>(null);
@@ -25,7 +25,6 @@ export function HandoffHost({ ws }: { ws: Workspace }) {
     clearHandoff();
   }, [req, clearHandoff]);
 
-  const { refresh } = ws;
   useEffect(() => {
     let un: (() => void) | undefined;
     let gone = false;
@@ -35,7 +34,6 @@ export function HandoffHost({ ws }: { ws: Workspace }) {
         if (runJob.current !== e.job && runJob.current !== "pending") return;
         if (runJob.current === "pending") runJob.current = e.job;
         setRun((r) => (r ? reduceRun(r, e) : r));
-        if (e.type === "done" && e.mode === "generate") void refresh();
       })
       .then((u) => (gone ? u() : (un = u)))
       .catch(() => {});
@@ -43,17 +41,17 @@ export function HandoffHost({ ws }: { ws: Workspace }) {
       gone = true;
       un?.();
     };
-  }, [refresh]);
+  }, []);
 
   const generate = useCallback(
-    async (spec: HandoffSpec, gaps: Gap[] | null) => {
+    async (spec: HandoffSpec) => {
       const slug = ws.active;
       if (!slug) return;
       runJob.current = "pending";
       const images = countImages(ws.data, spec);
       setRun({ slug, activity: newJobActivity(), phase: "reading", read: 0, total: 0, viewed: 0, images, written: 0, doc: null, note: null, result: null, error: null });
       try {
-        runJob.current = await api.handoffStart(slug, "generate", spec, gaps ?? undefined);
+        runJob.current = await api.handoffStart(slug, spec);
         setDialog(null);
       } catch (e) {
         runJob.current = null;
@@ -92,14 +90,8 @@ export function HandoffHost({ ws }: { ws: Workspace }) {
             runJob.current = null;
             setRun(null);
           }}
-          onOpen={() => {
-            runJob.current = null;
-            setRun(null);
-            if (ws.active === run.slug) ws.setDesignOpen(true);
-          }}
         />
       )}
-      {ws.designOpen && ws.active && <DesignView ws={ws} onClose={() => ws.setDesignOpen(false)} onNewVersion={() => setDialog({ scope: { kind: "project" }, n: Date.now() })} />}
     </>
   );
 }
@@ -110,7 +102,7 @@ const ALL_STAGES: StageId[] = [...STAGES];
 const LINK_DEPTH = 2;
 
 /** The cards a spec covers. The core resolves the scope again when it runs; this is the preview. */
-export function cardsInScope(data: ProjectData, spec: HandoffSpec): Card[] {
+function cardsInScope(data: ProjectData, spec: HandoffSpec): Card[] {
   const live = data.cards.filter((c) => !c.ghost);
   const byId = new Map(live.map((c) => [c.id, c]));
   let base = new Set<string>();
@@ -142,7 +134,6 @@ export function cardsInScope(data: ProjectData, spec: HandoffSpec): Card[] {
   return live.filter((c) => {
     if (c.role === "tech" || c.role === "decisions") return true;
     if (!base.has(c.id)) return false;
-    if (c.kind === "sticky") return spec.include_stickies;
     if (c.kind === "card") return spec.stages.includes(c.stage);
     if (c.kind === "artifact") return false; // artifacts go in through approval, not as cards
     return true;
@@ -158,8 +149,6 @@ const frameTitle = (t: string) => t.trim() || "Untitled frame";
 
 // ---------- the export dialog ----------
 
-type GapState = { status: "idle" } | { status: "running"; job: string | null; activity: JobActivity } | { status: "done"; gaps: Gap[] } | { status: "error"; message: string };
-
 function HandoffDialog({
   ws,
   data,
@@ -173,7 +162,7 @@ function HandoffDialog({
   initial: HandoffScope;
   busy: boolean;
   onClose: () => void;
-  onGenerate: (spec: HandoffSpec, gaps: Gap[] | null) => Promise<void>;
+  onGenerate: (spec: HandoffSpec) => Promise<void>;
 }) {
   const slug = data.slug;
   // The selection and the "from here" card are fixed when the dialog opens.
@@ -183,14 +172,10 @@ function HandoffDialog({
   const [kind, setKind] = useState<HandoffScope["kind"]>(initial.kind);
   const [frameIds, setFrameIds] = useState<Set<string>>(() => new Set(initial.kind === "frames" ? initial.ids : []));
   const [stages, setStages] = useState<Set<StageId>>(() => new Set(ALL_STAGES));
-  const [stickies, setStickies] = useState(false);
   const [model, setModel] = useState<string | null>(null);
-  const [gap, setGap] = useState<GapState>({ status: "idle" });
   const [confirming, setConfirming] = useState<null | (() => void)>(null);
-  const [ignoreDreamer, setIgnoreDreamer] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
-  const gapJob = useRef<string | null>(null);
 
   useEffect(() => {
     api.getSettings().then((s) => setModel(s.model_export)).catch(() => setModel("?"));
@@ -198,59 +183,9 @@ function HandoffDialog({
 
   const scope: HandoffScope =
     kind === "project" ? { kind } : kind === "selection" ? { kind, ids: selection } : kind === "frames" ? { kind, ids: [...frameIds] } : { kind: "card", id: fromCard?.id ?? "" };
-  const spec: HandoffSpec = { scope, stages: ALL_STAGES.filter((s) => stages.has(s)), include_stickies: stickies };
+  const spec: HandoffSpec = { scope, stages: ALL_STAGES.filter((s) => stages.has(s)) };
   const inScope = cardsInScope(data, spec);
   const target = data.meta.handoff_target ?? null;
-
-  // Gap check events (its own job id; the progress panel only follows generation).
-  useEffect(() => {
-    let un: (() => void) | undefined;
-    let gone = false;
-    api
-      .onHandoffEvent((e: HandoffEvent) => {
-        if (!gapJob.current || (gapJob.current !== e.job && gapJob.current !== "pending")) return;
-        if (gapJob.current === "pending") gapJob.current = e.job;
-        setGap((g) => (g.status === "running" ? { ...g, activity: applyJobEvent(g.activity, e) } : g));
-        if (e.type === "gaps") setGap({ status: "done", gaps: e.gaps });
-        else if (e.type === "error") {
-          gapJob.current = null;
-          setGap({ status: "error", message: e.message });
-        } else if (e.type === "done") gapJob.current = null;
-      })
-      .then((u) => (gone ? u() : (un = u)))
-      .catch(() => {});
-    return () => {
-      gone = true;
-      un?.();
-    };
-  }, []);
-
-  // Closing the dialog during a gap check cancels it.
-  const close = () => {
-    if (gap.status === "running") void api.handoffCancel().catch(() => {});
-    gapJob.current = null;
-    onClose();
-  };
-
-  const runGapCheck = async () => {
-    setError(null);
-    gapJob.current = "pending";
-    setGap({ status: "running", job: null, activity: newJobActivity() });
-    try {
-      const job = await api.handoffStart(slug, "gaps", spec);
-      if (gapJob.current === "pending") gapJob.current = job;
-    } catch (e) {
-      gapJob.current = null;
-      setGap({ status: "idle" });
-      setError(String(e));
-    }
-  };
-
-  const cancelGapCheck = () => {
-    gapJob.current = null;
-    setGap({ status: "idle" });
-    void api.handoffCancel().catch(() => {});
-  };
 
   /** Generation, behind the first-use confirm when a repo folder is set. */
   const generate = () => {
@@ -258,7 +193,7 @@ function HandoffDialog({
       setError(null);
       setStarting(true);
       try {
-        await onGenerate(spec, gap.status === "done" ? gap.gaps : null);
+        await onGenerate(spec);
       } catch (e) {
         setError(String(e));
       } finally {
@@ -269,7 +204,7 @@ function HandoffDialog({
       setConfirming(() => async () => {
         setConfirming(null);
         try {
-          await api.linkRepo(slug, target, ignoreDreamer);
+          await api.linkRepo(slug, target);
           await ws.refresh();
           await go();
         } catch (e) {
@@ -301,19 +236,7 @@ function HandoffDialog({
     }
   };
 
-  const fillWithGrill = (gaps: Gap[]) => {
-    const open = gaps.filter((g) => g.status !== "ok");
-    const text = [
-      "/grill-me handoff: interview me about these gaps from the handoff gap check, in this order:",
-      ...open.map((g) => `- ${g.item} [${g.status}]: ${g.note}`),
-    ].join("\n");
-    close();
-    ws.setContextCard(null);
-    ws.requestChat({ thread: null, send: true, quiet: true, text, display: `/grill-me on ${open.length} gap${open.length === 1 ? "" : "s"}` });
-  };
-
-  const running = gap.status === "running";
-  const locked = running || starting || busy;
+  const locked = starting || busy;
   const scopeEmpty = (kind === "frames" && frameIds.size === 0) || inScope.length === 0;
   const scopeOptions: { kind: HandoffScope["kind"]; label: string; disabled?: string }[] = [
     { kind: "project", label: "Whole project" },
@@ -323,9 +246,9 @@ function HandoffDialog({
   if (fromCard) scopeOptions.push({ kind: "card", label: `From “${fromCard.title}”` });
 
   return (
-    <Modal onClose={close} label="Summarize: handoff pack" size="md" className="handoff-dialog">
+    <Modal onClose={onClose} label="Summarize: handoff pack" size="md" className="handoff-dialog">
       <h3 className="dialog-title">Summarize into a handoff pack</h3>
-      <p className="chat-sub handoff-lede">Claude turns the cards into design docs, a roadmap and a CLAUDE.md that Claude Code can build from. Each run is saved as a new version.</p>
+      <p className="chat-sub handoff-lede">Claude turns the cards into design docs, a roadmap and a CLAUDE.md that Claude Code can build from. The pack is written into your repo folder and replaced each time.</p>
 
       <fieldset className="handoff-group" disabled={locked}>
         <legend>Scope</legend>
@@ -391,10 +314,6 @@ function HandoffDialog({
             </button>
           ))}
         </div>
-        <label className="handoff-check">
-          <input type="checkbox" checked={stickies} onChange={(e) => setStickies(e.target.checked)} />
-          Include stickies
-        </label>
         <p className="chat-sub" aria-live="polite">
           {inScope.length} card{inScope.length === 1 ? "" : "s"} in scope. Mist cards go in as unconfirmed ideas; the Tech &amp; constraints and Project decisions cards are always included.
         </p>
@@ -403,36 +322,22 @@ function HandoffDialog({
       <fieldset className="handoff-group" disabled={locked}>
         <legend>Repo folder</legend>
         <div className="handoff-target">
-          <code className="dialog-path" title={target ?? undefined}>{target ?? "None: the pack is saved in the project only"}</code>
+          <code className="dialog-path" title={target ?? undefined}>{target ?? "None: choose the repo the pack is written into"}</code>
           <button type="button" className="btn" onClick={() => void pickTarget()}>{target ? "Change…" : "Choose…"}</button>
           {target && <button type="button" className="btn" onClick={() => void clearTarget()}>Clear</button>}
         </div>
-        {target && <p className="chat-sub">Also copied to docs/design/ in this folder, with the Dreamer block of its CLAUDE.md updated.</p>}
+        <p className="chat-sub">The pack is written to docs/design/ in this folder, replacing the last one, and the Dreamer block of its CLAUDE.md is updated.</p>
       </fieldset>
 
       <p className="chat-sub">Model: <strong>{model ?? "…"}</strong> (change it under Claude › Models, “Handoff pack”).</p>
 
-      {gap.status === "running" && (
-        <div className="handoff-activity scroll scroll-y">
-          <div className="search-trace-head">Checking the cards for gaps</div>
-          <LiveActivity steps={gap.activity.steps} usage={gap.activity.usage} startedAt={gap.activity.startedAt} lastEventAt={gap.activity.lastEventAt} />
-        </div>
-      )}
-      {gap.status === "error" && <p className="setup-error" role="alert">Gap check failed: {gap.message}</p>}
-      {gap.status === "done" && <GapList gaps={gap.gaps} />}
       {error && <p className="setup-error" role="alert">{error}</p>}
 
       {confirming ? (
         <div className="handoff-confirm" role="alertdialog" aria-label="Write into the repo folder?">
           <p><strong>Write into this folder?</strong></p>
           <code className="dialog-path">{target}</code>
-          <ul>
-            <li><code>docs/design/</code>: the pack's docs and assets are replaced; other files there are left alone.</li>
-            <li><code>docs/design/QUESTIONS.md</code>: created if missing, never overwritten.</li>
-            <li><code>CLAUDE.md</code>: only the part between the Dreamer markers is replaced (the file is created, or the block appended, if needed).</li>
-          </ul>
           <LinkRepoWrites />
-          <label className="check-row"><input type="checkbox" checked={ignoreDreamer} onChange={(e) => setIgnoreDreamer(e.target.checked)} /> Add <code>.dreamer/</code> to the repo's .gitignore</label>
           <div className="editor-actions">
             <div className="side-spacer" />
             <button type="button" className="btn" onClick={() => setConfirming(null)}>Cancel</button>
@@ -441,52 +346,15 @@ function HandoffDialog({
         </div>
       ) : (
         <div className="editor-actions handoff-actions">
-          {gap.status === "done" && gap.gaps.some((g) => g.status !== "ok") && (
-            <button type="button" className="btn" disabled={locked} onClick={() => fillWithGrill(gap.gaps)} title="Answer the thin and missing items in the project chat">
-              Fill with grill-me
-            </button>
-          )}
           <div className="side-spacer" />
-          <button type="button" className="btn" onClick={close}>Close</button>
-          {running ? (
-            <button type="button" className="btn" onClick={cancelGapCheck}>Cancel check</button>
-          ) : gap.status === "done" ? (
-            <>
-              <button type="button" className="btn" disabled={locked || scopeEmpty} onClick={() => void runGapCheck()}>Check again</button>
-              <button type="button" className="btn primary" disabled={locked || scopeEmpty} onClick={generate} title="Undecided points become TBDs in 04-open-questions.md">
-                {gap.gaps.some((g) => g.status !== "ok") ? "Generate anyway" : "Generate"}
-              </button>
-            </>
-          ) : (
-            <>
-              <button type="button" className="btn" disabled={locked || scopeEmpty} onClick={generate} title="Write the docs now; undecided points become TBDs">Generate anyway</button>
-              <button type="button" className="btn primary" disabled={locked || scopeEmpty} onClick={() => void runGapCheck()}>Run gap check</button>
-            </>
-          )}
+          <button type="button" className="btn" onClick={onClose}>Close</button>
+          <button type="button" className="btn primary" disabled={locked || scopeEmpty || !target} onClick={generate} title={target ? "Undecided points become TBDs in 04-open-questions.md" : "Choose the repo folder first"}>
+            Generate
+          </button>
         </div>
       )}
       {busy && <p className="chat-sub">A handoff pack is being written. Wait for it, or cancel it in its panel.</p>}
     </Modal>
-  );
-}
-
-const GAP_LABEL: Record<Gap["status"], string> = { ok: "OK", thin: "Thin", missing: "Missing" };
-
-function GapList({ gaps }: { gaps: Gap[] }) {
-  const open = gaps.filter((g) => g.status !== "ok").length;
-  return (
-    <div className="gap-list" aria-label="Gap check result">
-      <div className="search-trace-head">{open ? `${open} of ${gaps.length} items need attention` : "Every item is covered"}</div>
-      <ul>
-        {gaps.map((g) => (
-          <li key={g.item} className={`gap gap-${g.status}`}>
-            <span className={`gap-badge gap-${g.status}`}>{GAP_LABEL[g.status]}</span>
-            <span className="gap-item">{g.item}</span>
-            {g.note && <span className="gap-note">{g.note}</span>}
-          </li>
-        ))}
-      </ul>
-    </div>
   );
 }
 
@@ -503,7 +371,7 @@ interface RunState {
   written: number;
   doc: string | null;
   note: string | null;
-  result: { version: number; label?: string; designDir?: string; dir: string; warnings: string[]; repo: HandoffRepoResult | null } | null;
+  result: HandoffRepoResult | null;
   error: string | null;
 }
 
@@ -518,7 +386,7 @@ function reduceRun(prev: RunState, e: HandoffEvent): RunState {
     case "note":
       return { ...r, note: e.note || r.note };
     case "done":
-      return e.mode === "generate" ? { ...r, phase: "done", result: { version: e.version, label: e.label, designDir: e.design_dir, dir: e.dir, warnings: e.warnings, repo: e.repo } } : r;
+      return { ...r, phase: "done", result: { path: e.path, files: e.files, warnings: e.warnings } };
     case "error":
       return { ...r, error: e.message };
     default:
@@ -540,7 +408,7 @@ function phaseLabel(run: RunState): string {
   }
 }
 
-function HandoffProgress({ run, onCancel, onClose, onOpen }: { run: RunState; onCancel: () => void; onClose: () => void; onOpen: () => void }) {
+function HandoffProgress({ run, onCancel, onClose }: { run: RunState; onCancel: () => void; onClose: () => void }) {
   const a = run.activity;
   const r = run.result;
   const stepRunning = a.steps.some((s) => s.status === "running");
@@ -548,7 +416,7 @@ function HandoffProgress({ run, onCancel, onClose, onOpen }: { run: RunState; on
     <section className="glass handoff-progress" aria-label="Handoff pack progress" aria-live="polite" data-wheel-boundary="">
       <div className="handoff-progress-head">
         <div className="orb small" aria-hidden="true" />
-        <strong>{r ? `Design ${r.label ?? `v${r.version}`} is ready` : run.error ? "The handoff pack failed" : "Writing the handoff pack"}</strong>
+        <strong>{r ? "The design pack is ready" : run.error ? "The handoff pack failed" : "Writing the handoff pack"}</strong>
       </div>
       {!r && !run.error && (
         <div className="handoff-activity scroll scroll-y">
@@ -563,9 +431,8 @@ function HandoffProgress({ run, onCancel, onClose, onOpen }: { run: RunState; on
       {run.error && <p className="setup-error" role="alert">{run.error} Nothing was written.</p>}
       {r && (
         <div className="handoff-result">
-          <p className="chat-sub">Saved in the project under {r.designDir ? `design/${r.designDir}/r${r.version}` : `design/v${r.version}`}.</p>
-          {r.repo && (r.repo.error ? <p className="setup-error">Copying to {r.repo.path} failed: {r.repo.error}</p> : <p className="chat-sub">Copied to {r.repo.path} (docs/design/ and CLAUDE.md).</p>)}
-          {[...r.warnings, ...(r.repo?.warnings ?? [])].map((w) => (
+          <p className="chat-sub">Written into {r.path}: {r.files.length} file{r.files.length === 1 ? "" : "s"} in docs/design/ and the Dreamer block of CLAUDE.md. Claude Code takes it from there.</p>
+          {r.warnings.map((w) => (
             <p key={w} className="chat-sub">{w}</p>
           ))}
         </div>
@@ -573,10 +440,7 @@ function HandoffProgress({ run, onCancel, onClose, onOpen }: { run: RunState; on
       <div className="editor-actions">
         <div className="side-spacer" />
         {r ? (
-          <>
-            <button type="button" className="btn" onClick={onClose}>Close</button>
-            <button type="button" className="btn primary" onClick={onOpen}>Open</button>
-          </>
+          <button type="button" className="btn primary" onClick={onClose}>Close</button>
         ) : run.error ? (
           <button type="button" className="btn" onClick={onClose}>Close</button>
         ) : (

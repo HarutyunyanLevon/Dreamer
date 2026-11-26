@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { proposalPatch } from "../components/ProposalView";
-import { api, type Attachment, type BuildBlock, type Canvas, type Card, type CardKind, type CardPatch, type EditProposal, type Frame, type HandoffScope, type Link, type NewCard, type OrganizeLayout, type OrganizePlanData, type Pos, type ProjectData, type ProjectSummary, type SavedTask } from "../api";
+import { api, type Attachment, type Canvas, type Card, type CardKind, type CardPatch, type EditProposal, type Frame, type HandoffScope, type Link, type NewCard, type OrganizeLayout, type OrganizePlanData, type Pos, type ProjectData, type ProjectSummary } from "../api";
 import { CARD_H, CARD_W } from "../components/cardGeometry";
 import { DECISIONS_TITLE, TECH_TEMPLATE, TECH_TITLE, parseItem } from "../components/kinds";
 import type { NewArtifact } from "../api";
@@ -195,14 +195,6 @@ export interface HandoffRequest {
   n: number;
 }
 
-/** Opens "Make build prompt" for the cards a scope covers (a card, a selection, a frame). */
-export interface TaskRequest {
-  scope: HandoffScope;
-  n: number;
-  /** Reopen this saved task in the build dialog instead of writing a new one. */
-  saved?: SavedTask;
-}
-
 interface UndoEntry {
   label: string;
   undo: () => Promise<void>;
@@ -237,9 +229,6 @@ export function useWorkspace() {
   const chatSeq = useRef(0);
   const [handoffRequest, setHandoffRequest] = useState<HandoffRequest | null>(null);
   const handoffSeq = useRef(0);
-  const [taskRequest, setTaskRequest] = useState<TaskRequest | null>(null);
-  /** The Design view (handoff pack reader) is open for the active project. */
-  const [designOpen, setDesignOpen] = useState(false);
   /** The Memory modal is open for the active project. */
   const [memoryOpen, setMemoryOpen] = useState(false);
   const activeRef = useRef<string | null>(null);
@@ -760,49 +749,6 @@ export function useWorkspace() {
     [run, pushUndo],
   );
 
-  /** "Mark as built now" / "Clear needs rebuild": one undo step puts the build block, snapshot and stage back. */
-  const markBuiltNow = useCallback(
-    async (id: string) => {
-      const slug = activeRef.current!;
-      const before = dataRef.current?.cards.find((c) => c.id === id);
-      if (!before) return;
-      const prevBuild = before.build ?? null;
-      const prevStage = before.stage;
-      const prevSnapshot = (await api.buildTexts(slug, id).catch(() => null))?.snapshot ?? null;
-      const updated = await run(() => api.markBuiltNow(slug, id));
-      if (updated) {
-        pushUndo({
-          label: "mark as built",
-          undo: async () => void (await api.restoreBuild(slug, id, prevBuild, prevSnapshot, prevStage)),
-          redo: async () => void (await api.markBuiltNow(slug, id)),
-        });
-      }
-      return updated;
-    },
-    [run, pushUndo],
-  );
-
-  /** Build board moves: the card's build block becomes `next` (snapshot and stage kept); one undo step. */
-  const setBuildBlock = useCallback(
-    async (id: string, next: BuildBlock | null, label: string) => {
-      const slug = activeRef.current!;
-      const before = dataRef.current?.cards.find((c) => c.id === id);
-      if (!before) return;
-      const prev = before.build ?? null;
-      const snapshot = (await api.buildTexts(slug, id).catch(() => null))?.snapshot ?? null;
-      const updated = await run(() => api.restoreBuild(slug, id, next, snapshot, before.stage));
-      if (updated) {
-        pushUndo({
-          label,
-          undo: async () => void (await api.restoreBuild(slug, id, prev, snapshot, before.stage)),
-          redo: async () => void (await api.restoreBuild(slug, id, next, snapshot, before.stage)),
-        });
-      }
-      return updated;
-    },
-    [run, pushUndo],
-  );
-
   const updateCard = useCallback(
     async (id: string, patch: CardPatch) => {
       const slug = activeRef.current!;
@@ -920,8 +866,7 @@ export function useWorkspace() {
   );
 
   /**
-   * Deletes checklist items. Answered questions go to Project decisions first (same undo step);
-   * a deleted cc-questions item's QUESTIONS.md line is remembered so it is never re-imported.
+   * Deletes checklist items. Answered questions go to Project decisions first (same undo step).
    */
   const deleteChecklistItems = useCallback(
     async (cardId: string, ids: string[]) => {
@@ -931,8 +876,6 @@ export function useWorkspace() {
       const gone = (card.items ?? []).filter((i) => drop.has(i.id));
       if (!gone.length) return;
       const patch: CardPatch = { items: (card.items ?? []).filter((i) => !drop.has(i.id)) };
-      const sources = gone.flatMap((i) => (i.source ? [i.source] : []));
-      if (sources.length) patch.dismissed_sources = [...(card.dismissed_sources ?? []), ...sources];
       const answered = gone.filter((i) => i.question && i.answer?.trim());
       if (!answered.length) return void (await updateCard(cardId, patch));
       const text = answered.map((i) => `**Q:** ${parseItem(i.text).body}\n**A:** ${i.answer!.trim()}`).join("\n\n");
@@ -1118,8 +1061,7 @@ export function useWorkspace() {
   const startChecklistGrill = useCallback(
     (cardId: string) => {
       const card = dataRef.current?.cards.find((c) => c.id === cardId);
-      const gone = new Set(card?.dismissed_sources ?? []);
-      const open = (card?.items ?? []).filter((i) => i.question && !i.answer?.trim() && !(i.source && gone.has(i.source)));
+      const open = (card?.items ?? []).filter((i) => i.question && !i.answer?.trim());
       if (!card || !open.length) return;
       const lines = open.map((i) => {
         const p = parseItem(i.text);
@@ -1351,11 +1293,6 @@ export function useWorkspace() {
     handoffRequest,
     openHandoff: (scope: HandoffScope) => setHandoffRequest({ scope, n: ++handoffSeq.current }),
     clearHandoff: () => setHandoffRequest(null),
-    taskRequest,
-    openTask: (scope: HandoffScope, saved?: SavedTask) => setTaskRequest({ scope, n: ++handoffSeq.current, saved }),
-    clearTask: () => setTaskRequest(null),
-    designOpen,
-    setDesignOpen,
     memoryOpen,
     setMemoryOpen,
     /**
@@ -1377,8 +1314,6 @@ export function useWorkspace() {
     setProjectTheme: (themeId: string | null) => run(() => api.updateProject(activeRef.current!, { theme: themeId ?? "" })),
     createCard,
     updateCard,
-    markBuiltNow,
-    setBuildBlock,
     deleteCard,
     deleteCards,
     loseCard,

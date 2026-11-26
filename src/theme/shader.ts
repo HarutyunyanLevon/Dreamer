@@ -2,7 +2,7 @@ import { hexToRgb, type RGB } from "./color";
 import type { ShaderParams } from "./types";
 
 /** The approved D2 fragment shader, verbatim. */
-export const FRAGMENT_SRC = `precision highp float;
+const FRAGMENT_SRC = `precision highp float;
 uniform vec2 R; uniform float T, FALL;
 uniform vec3 C0,C1,C2,C3,C4; uniform float IRI,FREQ,SH,MIST,SHP;
 float h(vec2 p){return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453);}

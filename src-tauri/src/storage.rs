@@ -11,7 +11,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-pub mod build;
 mod import;
 mod migrate;
 pub use import::{ImportOffer, ImportPlan, ImportResult, Target};
@@ -222,7 +221,7 @@ impl Workspace {
     /// fails the workspace opens read-only (see `read_only`).
     pub fn open(root: impl Into<PathBuf>) -> Result<Self> {
         let ws = Workspace { root: root.into() };
-        for d in [ws.root.clone(), ws.root.join("projects"), ws.root.join("themes")] {
+        for d in [ws.root.clone(), ws.root.join("projects")] {
             fs::create_dir_all(&d).map_err(|e| AppError::io(format!("create {}", d.display()), e))?;
         }
         if let Ok(mut ro) = READ_ONLY.lock() {
@@ -302,18 +301,6 @@ impl Workspace {
             }
             s.theme = t;
         }
-        if let Some(h) = patch.hotkey {
-            if h.trim().is_empty() {
-                return Err(AppError::Invalid("hotkey cannot be empty".into()));
-            }
-            s.hotkey = h;
-        }
-        if let Some(h) = patch.clipboard_hotkey {
-            if h.trim().is_empty() {
-                return Err(AppError::Invalid("hotkey cannot be empty".into()));
-            }
-            s.clipboard_hotkey = h;
-        }
         if let Some(p) = patch.last_project {
             s.last_project = if p.is_empty() { None } else { Some(p) };
         }
@@ -328,15 +315,6 @@ impl Workspace {
         }
         if let Some(v) = patch.chat_w {
             s.chat_w = v.clamp(crate::model::CHAT_W.0, crate::model::CHAT_W.2);
-        }
-        if let Some(v) = patch.tray_notice_shown {
-            s.tray_notice_shown = v;
-        }
-        if let Some(v) = patch.start_with_windows {
-            s.start_with_windows = v;
-        }
-        if let Some(v) = patch.start_hidden {
-            s.start_hidden = v;
         }
         let model = |m: String, default: &str| -> Result<String> {
             let m = m.trim();
@@ -360,13 +338,6 @@ impl Workspace {
         if let Some(m) = patch.model_export {
             s.model_export = model(m, crate::model::DEFAULT_MODEL_EXPORT)?;
         }
-        if let Some(m) = patch.build_model {
-            let m = model(m, crate::model::DEFAULT_MODEL_BUILD)?;
-            if m.contains(':') || m == s.local_model {
-                return Err(AppError::Invalid(format!("{m:?} looks like a local model: build runs use Claude only.")));
-            }
-            s.build_model = m;
-        }
         if let Some(m) = patch.model_memory {
             s.model_memory = model(m, crate::model::DEFAULT_MODEL_MEMORY)?;
         }
@@ -375,26 +346,6 @@ impl Workspace {
         }
         if let Some(n) = patch.memory_cap {
             s.memory_cap = if n == 0 { crate::memory::DEFAULT_CAP } else { n };
-        }
-        if let Some(v) = patch.local_chat {
-            s.local_chat = v;
-        }
-        if let Some(m) = patch.local_model {
-            let m = m.trim();
-            if !m.is_empty() && !crate::ollama::valid_model_name(m) {
-                return Err(AppError::Invalid(format!("{m:?} is not an Ollama model name")));
-            }
-            s.local_model = if m.is_empty() { crate::model::DEFAULT_LOCAL_MODEL.into() } else { m.into() };
-        }
-        if let Some(p) = patch.ollama_path {
-            let p = p.trim();
-            if p.len() > 1000 || p.chars().any(char::is_control) {
-                return Err(AppError::Invalid("not a folder path".into()));
-            }
-            s.ollama_path = p.into();
-        }
-        if let Some(v) = patch.local_cloud_declined {
-            s.local_cloud_declined = v;
         }
         if let Some(u) = patch.spritecook_url {
             let u = u.trim();
@@ -412,6 +363,14 @@ impl Workspace {
 
     // ----- projects -----
 
+    /// "Link repo…" confirmed: remember and confirm the folder the design pack is written into.
+    pub fn link_repo(&self, slug: &str, path: &str) -> Result<ProjectSummary> {
+        let path = path.trim();
+        self.update_project(slug, ProjectPatch { handoff_target: Some(path.into()), ..Default::default() })?;
+        self.update_project(slug, ProjectPatch { handoff_target_confirmed: Some(path.into()), ..Default::default() })
+    }
+
+
     fn card_count(dir: &Path) -> usize {
         fs::read_dir(dir.join("cards"))
             .map(|rd| rd.filter_map(|e| e.ok()).filter(|e| e.path().extension().is_some_and(|x| x == "md") && !e.file_name().to_string_lossy().ends_with(".built.md")).count())
@@ -427,7 +386,6 @@ impl Workspace {
                 name: meta.name,
                 theme: meta.theme,
                 card_count: Self::card_count(dir),
-                open_questions: meta.handoff_target.as_deref().map(|t| crate::questions::open_count(Path::new(t))).unwrap_or(0),
             },
             created,
         ))
@@ -870,10 +828,6 @@ impl Workspace {
         items
     }
 
-    fn clean_color(c: Option<String>) -> Option<String> {
-        c.map(|c| c.trim().to_string()).filter(|c| !c.is_empty())
-    }
-
     pub fn create_card(&self, slug: &str, new: NewCard) -> Result<Card> {
         let dir = self.existing_project_dir(slug)?;
         let role = Self::check_role(&dir, new.role, None)?;
@@ -887,9 +841,7 @@ impl Workspace {
                 title,
                 kind: new.kind.unwrap_or_default(),
                 role,
-                color: Self::clean_color(new.color),
                 items: Self::check_items(new.items.unwrap_or_default()),
-                dismissed_sources: Vec::new(),
                 attachments,
                 stage: new.stage.unwrap_or_default(),
                 tags: new.tags.unwrap_or_default(),
@@ -901,7 +853,7 @@ impl Workspace {
                 ghost: new.ghost.unwrap_or(false),
                 links: new.links.unwrap_or_default(),
                 branch: new.branch,
-                extra: new.merged_from.map(|ids| ("merged_from".to_string(), serde_json::json!(ids))).into_iter().chain(new.build.map(|b| ("build".to_string(), b))).collect(),
+                extra: new.merged_from.map(|ids| ("merged_from".to_string(), serde_json::json!(ids))).into_iter().collect(),
                 import: new.import,
             },
             body: norm_body(&new.body.unwrap_or_default()),
@@ -928,7 +880,6 @@ impl Workspace {
         let dir = self.existing_project_dir(slug)?;
         let path = Self::card_path(&dir, id)?;
         let mut card = Self::read_card_file(&path, id)?;
-        let was_built = card.meta.stage == Stage::Built;
         if let Some(t) = patch.title {
             let t = t.trim();
             card.meta.title = if t.is_empty() { "Untitled".into() } else { t.to_string() };
@@ -957,24 +908,14 @@ impl Workspace {
         if let Some(r) = patch.role {
             card.meta.role = Self::check_role(&dir, Some(r), Some(id))?;
         }
-        if let Some(c) = patch.color {
-            card.meta.color = Self::clean_color(Some(c));
-        }
         if let Some(i) = patch.items {
             card.meta.items = Self::check_items(i);
-        }
-        if let Some(d) = patch.dismissed_sources {
-            card.meta.dismissed_sources = d;
         }
         if let Some(a) = patch.attachments {
             card.meta.attachments = Self::check_attachments(a)?;
         }
-        build::on_save(&dir, &mut card, was_built)?;
         card.meta.updated = now();
         Self::write_card_file(&path, &card)?;
-        if card.meta.role.as_deref() == Some(crate::model::ROLE_CC_QUESTIONS) {
-            crate::questions::write_back(self, slug, &card.meta.items);
-        }
         Ok(card)
     }
 
@@ -1041,40 +982,6 @@ impl Workspace {
             c.meta.attachments = out;
             Ok(())
         })
-    }
-
-    // ----- custom themes -----
-
-    /// Every custom theme saved under the workspace's `themes/` folder. Invalid files are skipped
-    /// (lenient, like everything else hand-editable) rather than failing the whole list.
-    pub fn list_custom_themes(&self) -> Result<Vec<Value>> {
-        let dir = self.root.join("themes");
-        let mut out = Vec::new();
-        if let Ok(rd) = fs::read_dir(&dir) {
-            for entry in rd.filter_map(|e| e.ok()) {
-                let path = entry.path();
-                if path.extension().is_some_and(|x| x == "json") {
-                    if let Some(v) = fs::read_to_string(&path).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()) {
-                        out.push(v);
-                    }
-                }
-            }
-        }
-        Ok(out)
-    }
-
-    pub fn save_custom_theme(&self, id: &str, theme: Value) -> Result<()> {
-        check_slug(id)?;
-        write_json(&self.root.join("themes").join(format!("{id}.json")), &theme)
-    }
-
-    pub fn delete_custom_theme(&self, id: &str) -> Result<()> {
-        check_slug(id)?;
-        let path = self.root.join("themes").join(format!("{id}.json"));
-        if path.exists() {
-            fs::remove_file(&path).map_err(|e| AppError::io(format!("remove {}", path.display()), e))?;
-        }
-        Ok(())
     }
 
     // ----- media -----
@@ -1365,7 +1272,6 @@ mod tests {
     fn open_creates_layout_and_a_first_project() {
         let (_d, ws) = ws();
         assert!(ws.root.join("workspace.json").is_file());
-        assert!(ws.root.join("themes").is_dir());
         assert!(!ws.root.join("inbox").exists());
         let dir = ws.root.join("projects").join(P);
         for sub in ["cards", "media", "trash"] {
@@ -1402,17 +1308,6 @@ mod tests {
     }
 
     #[test]
-    fn tray_notice_is_remembered_once_seen() {
-        let (_d, ws) = ws();
-        assert!(!ws.get_settings().unwrap().tray_notice_shown, "new and older workspaces haven't seen it");
-        ws.update_settings(SettingsPatch { tray_notice_shown: Some(true), ..Default::default() }).unwrap();
-        assert!(Workspace::open(&ws.root).unwrap().get_settings().unwrap().tray_notice_shown, "persists across restarts");
-        // Other settings writes keep it.
-        ws.update_settings(SettingsPatch { theme: Some("gold-sky".into()), ..Default::default() }).unwrap();
-        assert!(ws.get_settings().unwrap().tray_notice_shown);
-    }
-
-    #[test]
     fn settings_roundtrip_and_corrupt_file_is_backed_up() {
         let (_d, ws) = ws();
         let s = ws.update_settings(SettingsPatch { theme: Some("gold-sky".into()), last_project: Some("fish".into()), ..Default::default() }).unwrap();
@@ -1420,7 +1315,6 @@ mod tests {
         assert_eq!(ws.get_settings().unwrap().last_project.as_deref(), Some("fish"));
         ws.update_settings(SettingsPatch { last_project: Some(String::new()), ..Default::default() }).unwrap();
         assert_eq!(ws.get_settings().unwrap().last_project, None);
-        assert_eq!(ws.get_settings().unwrap().hotkey, "Ctrl+Shift+Space");
         assert!(ws.update_settings(SettingsPatch { theme: Some("  ".into()), ..Default::default() }).is_err());
 
         fs::write(ws.root.join("workspace.json"), "{ not json").unwrap();
@@ -1646,7 +1540,7 @@ mod tests {
         let root = ws.root.canonicalize().unwrap();
         let ws = Workspace::open(&root).unwrap();
         let (tx, rx) = std::sync::mpsc::channel();
-        let _w = crate::watcher::start(root.clone(), Vec::new(), move |e| {
+        let _w = crate::watcher::start(root.clone(), move |e| {
             let _ = tx.send(e);
         })
         .unwrap();
@@ -1868,19 +1762,6 @@ mod tests {
     }
 
     #[test]
-    fn custom_themes_roundtrip_and_skip_bad_files() {
-        let (_d, ws) = ws();
-        ws.save_custom_theme("my-theme", json!({"id": "my-theme", "name": "Mine"})).unwrap();
-        fs::write(ws.root.join("themes/bad.json"), "not json").unwrap();
-        let list = ws.list_custom_themes().unwrap();
-        assert_eq!(list.len(), 1);
-        assert_eq!(list[0]["name"], "Mine");
-        ws.delete_custom_theme("my-theme").unwrap();
-        assert!(ws.list_custom_themes().unwrap().is_empty());
-        assert!(ws.save_custom_theme("Bad Id!", json!({})).is_err());
-    }
-
-    #[test]
     fn slugify_handles_odd_names() {
         assert_eq!(slugify("  Hello,   World!! "), "hello-world");
         assert_eq!(slugify("***"), "project");
@@ -1902,7 +1783,6 @@ mod tests {
                 P,
                 NewCard {
                     kind: Some(CardKind::Checklist),
-                    color: Some(" #ffcc00 ".into()),
                     items: Some(vec![
                         ChecklistItem { text: "a".into(), ..Default::default() },
                         ChecklistItem { id: "q".into(), text: "why?".into(), question: true, answer: Some("because".into()), ..Default::default() },
@@ -1912,7 +1792,6 @@ mod tests {
                 },
             )
             .unwrap();
-        assert_eq!(c.meta.color.as_deref(), Some("#ffcc00"));
         assert!(!c.meta.items[0].id.is_empty(), "missing item ids are filled");
         assert!(!c.meta.attachments[0].id().is_empty(), "missing attachment ids are filled");
         let back = ws.read_card(P, &c.meta.id).unwrap();
@@ -1930,8 +1809,8 @@ mod tests {
         // Escaping paths are refused.
         let err = ws.create_card(P, NewCard { attachments: Some(vec![img("", "../x.png")]), ..new_card("x") });
         assert!(matches!(err, Err(AppError::Invalid(_))));
-        let u = ws.update_card(P, &c.meta.id, CardPatch { kind: Some(CardKind::Sticky), color: Some(String::new()), ..Default::default() }).unwrap();
-        assert_eq!((u.meta.kind, u.meta.color.clone()), (CardKind::Sticky, None));
+        let u = ws.update_card(P, &c.meta.id, CardPatch { kind: Some(CardKind::Card), ..Default::default() }).unwrap();
+        assert_eq!(u.meta.kind, CardKind::Card);
         assert_eq!(u.meta.attachments.len(), 2, "untouched by a patch without attachments");
     }
 
@@ -2014,87 +1893,6 @@ mod tests {
         assert!(media(&r[3]), "mentioned in a live body");
         assert!(!media(&r[1]), "removed attachment");
         assert!(!media(&r[2]), "only used by a card that was in the Trash");
-    }
-
-    #[test]
-    fn design_questions_import_answer_and_write_back() {
-        use crate::model::ROLE_CC_QUESTIONS;
-        let (d, ws) = ws();
-        let p = ws.create_project("Fish").unwrap();
-        let repo = d.path().join("repo");
-        let qpath = crate::questions::questions_path(&repo);
-        fs::create_dir_all(qpath.parent().unwrap()).unwrap();
-        fs::write(&qpath, "# Q
-
-- [ ] Q (T-1): how many fish? — combat
-- [x] old
-- [ ] free text
-").unwrap();
-        let patch = ProjectPatch { handoff_target: Some(repo.display().to_string()), ..Default::default() };
-        ws.update_project(&p.slug, patch).unwrap();
-        assert_eq!(crate::questions::open_count(&repo), 2);
-        assert!(crate::questions::import(&ws, &p.slug).unwrap());
-        assert!(!crate::questions::import(&ws, &p.slug).unwrap(), "idempotent");
-        let card = ws.load_project(&p.slug).unwrap().cards.into_iter().find(|c| c.meta.role.as_deref() == Some(ROLE_CC_QUESTIONS)).unwrap();
-        assert_eq!((card.meta.title.as_str(), card.meta.kind), ("From Claude Code", CardKind::Checklist));
-        assert_eq!(card.meta.items.len(), 2);
-        assert!(card.meta.items.iter().all(|i| i.question && i.source.is_some()));
-        // Answer the first one: the file gets the checked line + answer, the card keeps the item.
-        let mut items = card.meta.items.clone();
-        items[0].answer = Some("about twelve".into());
-        ws.update_card(&p.slug, &card.meta.id, CardPatch { items: Some(items), ..Default::default() }).unwrap();
-        let text = fs::read_to_string(&qpath).unwrap();
-        assert_eq!(text, "# Q
-
-- [x] Q (T-1): how many fish? — combat
-  - A: about twelve
-- [x] old
-- [ ] free text
-");
-        assert!(crate::questions::is_own_write(&qpath));
-        assert_eq!(crate::questions::open_count(&repo), 1);
-        assert!(!crate::questions::import(&ws, &p.slug).unwrap(), "our own write adds nothing");
-        // A new question from Claude Code is appended to the same card.
-        fs::write(&qpath, format!("{text}- [ ] another
-")).unwrap();
-        assert!(crate::questions::import(&ws, &p.slug).unwrap());
-        let n = ws.load_project(&p.slug).unwrap().cards.iter().filter(|c| c.meta.role.as_deref() == Some(ROLE_CC_QUESTIONS)).map(|c| c.meta.items.len()).sum::<usize>();
-        assert_eq!(n, 3);
-    }
-
-    #[test]
-    fn dismissed_design_question_is_not_reimported() {
-        use crate::model::ROLE_CC_QUESTIONS;
-        let (d, ws) = ws();
-        let p = ws.create_project("Fish").unwrap();
-        let repo = d.path().join("repo");
-        let qpath = crate::questions::questions_path(&repo);
-        fs::create_dir_all(qpath.parent().unwrap()).unwrap();
-        fs::write(&qpath, "- [ ] one
-- [ ] two
-").unwrap();
-        ws.update_project(&p.slug, ProjectPatch { handoff_target: Some(repo.display().to_string()), ..Default::default() }).unwrap();
-        assert!(crate::questions::import(&ws, &p.slug).unwrap());
-        let card = ws.load_project(&p.slug).unwrap().cards.into_iter().find(|c| c.meta.role.as_deref() == Some(ROLE_CC_QUESTIONS)).unwrap();
-        // Delete "one" (unanswered): the source goes to dismissed_sources, QUESTIONS.md is untouched.
-        let (gone, kept): (Vec<_>, Vec<_>) = card.meta.items.iter().cloned().partition(|i| i.text == "one");
-        let patch = CardPatch { items: Some(kept), dismissed_sources: Some(vec![gone[0].source.clone().unwrap()]), ..Default::default() };
-        ws.update_card(&p.slug, &card.meta.id, patch).unwrap();
-        assert_eq!(fs::read_to_string(&qpath).unwrap(), "- [ ] one
-- [ ] two
-");
-        // QUESTIONS.md changes: the dismissed line stays out, a new one comes in.
-        fs::write(&qpath, "- [ ] one
-- [ ] two
-- [ ] three
-").unwrap();
-        assert!(crate::questions::import(&ws, &p.slug).unwrap());
-        assert!(!crate::questions::import(&ws, &p.slug).unwrap());
-        let card = ws.load_project(&p.slug).unwrap().cards.into_iter().find(|c| c.meta.role.as_deref() == Some(ROLE_CC_QUESTIONS)).unwrap();
-        assert_eq!(card.meta.items.iter().map(|i| i.text.as_str()).collect::<Vec<_>>(), vec!["two", "three"]);
-        // Undo (dismissed list cleared) lets it back in.
-        ws.update_card(&p.slug, &card.meta.id, CardPatch { dismissed_sources: Some(vec![]), ..Default::default() }).unwrap();
-        assert!(crate::questions::import(&ws, &p.slug).unwrap());
     }
 
     #[test]
@@ -2187,12 +1985,7 @@ mod tests {
         assert_eq!((s.model_router, s.model_fast.as_str(), s.model_deep.as_str()), (true, "haiku", "opus"));
         let s = ws.update_settings(SettingsPatch { model_router: Some(false), model_fast: Some("claude-haiku-4-5".into()), ..Default::default() }).unwrap();
         assert_eq!((s.model_router, s.model_fast.as_str()), (false, "claude-haiku-4-5"));
-        // Local chat: on by default with the Qwen MoE; an empty name restores it, a bad one is refused.
-        assert_eq!((s.local_chat, s.local_model.as_str()), (true, crate::model::DEFAULT_LOCAL_MODEL));
-        let s = ws.update_settings(SettingsPatch { local_chat: Some(false), local_model: Some("qwen3:30b-a3b-instruct-2507-q4_K_M".into()), ..Default::default() }).unwrap();
-        assert_eq!((s.local_chat, s.local_model.as_str()), (false, "qwen3:30b-a3b-instruct-2507-q4_K_M"));
-        assert_eq!(ws.update_settings(SettingsPatch { local_model: Some(" ".into()), ..Default::default() }).unwrap().local_model, crate::model::DEFAULT_LOCAL_MODEL);
-        assert!(ws.update_settings(SettingsPatch { local_model: Some("two words".into()), ..Default::default() }).is_err());
+        assert!(ws.update_settings(SettingsPatch { model_chat: Some("two words".into()), ..Default::default() }).is_err());
     }
 
     #[test]

@@ -14,7 +14,7 @@ const D2_SHADER: Omit<ShaderParams, "palette"> = {
 
 const STAGES_D2 = { mist: "#c9d3f5", reverie: "#8fa8f2", lucid: "#f0a0c0", dream: "#ffbf80", built: "#7fcfae" };
 
-export const PEARL_GLOW: Theme = {
+const PEARL_GLOW: Theme = {
   id: "pearl-glow",
   name: "Pearl glow",
   builtin: true,
@@ -33,7 +33,7 @@ export const PEARL_GLOW: Theme = {
   stages: STAGES_D2,
 };
 
-export const COOL_PEARL: Theme = {
+const COOL_PEARL: Theme = {
   id: "cool-pearl",
   name: "Cool pearl",
   builtin: true,
@@ -52,7 +52,7 @@ export const COOL_PEARL: Theme = {
   stages: { mist: "#bcd6ee", reverie: "#7fb2e0", lucid: "#a9a2ea", dream: "#ffc874", built: "#7fcfae" },
 };
 
-export const GOLD_SKY: Theme = {
+const GOLD_SKY: Theme = {
   id: "gold-sky",
   name: "Gold sky",
   builtin: true,
@@ -75,7 +75,7 @@ export const GOLD_SKY: Theme = {
   stages: { mist: "#bcd0dc", reverie: "#8fb0c9", lucid: "#e2b86a", dream: "#ffcf6e", built: "#7fcfae" },
 };
 
-export const IRIDESCENT: Theme = {
+const IRIDESCENT: Theme = {
   id: "iridescent",
   name: "Iridescent",
   builtin: true,

@@ -295,29 +295,6 @@ Manual:
 - [ ] Delete a project whose folder is open in Explorer (just viewing it). It should either work (Explorer doesn't lock), or refuse with the "in use" message and leave the project whole.
 - [ ] Restore a deleted project from the Recycle Bin: it reappears live.
 
-### 9. Quit and the Catch a thought popup
-Automated (`cargo test`: 58 passed):
-- `proc_guard::kill_all_ends_the_whole_tree`: node → detached node grandchild; both gone after `kill_all()`.
-- `dropping_the_guard_ends_the_tree_like_an_app_crash`: closing the job handle, which is what happens when dreamer.exe dies, ends both.
-- `plain_kill_leaves_the_grandchild_running`: why the guard exists.
-- `storage::tray_notice_is_remembered_once_seen`.
-
-Driven in the real app (all pass in the final runs). The popup was opened with the real global hotkey (Ctrl+Shift+Space sent as OS keyboard input) and driven in its own WebView:
-- Before the fix, calling `hide()` from the popup returned "window.hide not allowed … core:window:allow-hide" (root cause).
-- After: the hotkey opens it with focus in the field; X closes it, and the next open is empty; Esc closes it and discards the text; Enter closes it at once and creates exactly one new Inbox card with stage mist.
-- A real failure, with the throwaway Inbox's cards folder write-protected via `icacls` and restored afterwards: the popup stays open with the text and shows "Couldn't add it: write …\inbox\cards\….md: Access is denied. (os error 5)", and the card stays inside the window.
-- Giving another window OS focus closes it, and it reopens empty with the error gone.
-
-Main window: a real `WM_CLOSE` (what the X sends) on a fresh app keeps the window open and shows "Dreamer is still running in the tray" with "Quit Dreamer" and "Keep running in the tray". "Keep running" hides the window (`IsWindowVisible` false) and writes `tray_notice_shown: true`. Once seen, the next X hides straight away without the notice. Clicking the sidebar's 44px "Quit Dreamer" for real: four seconds later `Get-CimInstance` showed **no dreamer.exe and no node.exe at all** (the Tauri CLI, Vite and npm went too).
-
-Not covered in the app: the Claude sidecar was not running during the quit test. Starting it needs a real chat message to Claude, which I didn't send. The process-tree kill is covered by the guard tests above, which spawn the same shape (node starting another node). The tray icon menu itself (Show / Quit) is OS UI I can't click.
-
-Manual:
-- [ ] Send one chat message (that starts the sidecar and a Claude Code process), then tray › Quit, then in PowerShell `Get-Process dreamer, node, claude -ErrorAction SilentlyContinue`: nothing from Dreamer remains.
-- [ ] Same, but stop `npm run tauri dev` with Ctrl+C instead of quitting: no node/claude process is left.
-- [ ] First X on a fresh workspace shows the notice once; after "Keep running", tray › Show Dreamer brings the window back and X hides it without the notice.
-- [ ] Hotkey from another app (e.g. a browser): the popup gets focus, and clicking back into that app closes it.
-
 ### 10. Undo/Redo buttons
 Driven (9/9 pass): both buttons are curved-arrow icons with aria-labels and `aria-keyshortcuts`. With no history, both show `aria-disabled="true"` at opacity 0.32 with a not-allowed cursor, and the tooltips "Undo (Ctrl+Z): nothing to undo" / "Redo (Ctrl+Shift+Z): nothing to redo". A real click on the disabled Undo does nothing. After a real card drag, Undo is active at full opacity with the tooltip "Undo (Ctrl+Z)"; a real click on it moves the card back, Redo becomes active, and a real click on Redo re-applies the move. Close-up screenshots of both states were checked.
 
@@ -375,18 +352,6 @@ Browser (`npm run dev`, mock): any chat message plays a scripted turn; a message
 - **Errors:** kill the sidecar's node process mid-turn: the turn turns red with Retry right away. An `error` reply also has Retry.
 - **Handoff:** gap check and Generate show the same step list + status line (Read "…", Wrote 01-gdd.md, tokens, elapsed); the stall warning appears after 45 s idle; Cancel still works.
 
-## Start with Windows (release build only)
-
-1. Install the release build (NSIS), then sign out and back in.
-2. Dreamer is in the tray and no window opens. `Ctrl+Shift+Space` opens the capture popup.
-3. Tray menu "Show Dreamer" opens the window; no "still running in the tray" notice appears when you close it.
-4. Launch Dreamer from the Start menu or click its pinned taskbar icon: the existing window is shown and focused (no second instance in Task Manager).
-5. Settings: both toggles are on ("Start Dreamer when Windows starts" mirrors the real `HKCU\...\Run\Dreamer` entry). Turn the first off, sign out and in: Dreamer doesn't start.
-6. Turn "Start hidden in the tray" off, sign out and in: the window opens at sign-in.
-7. A normal launch (Start menu, double-click) always shows the window.
-8. Uninstall: `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\Dreamer` is gone.
-9. `tauri dev` never creates the Run entry on its own (the toggle still works there).
-
 ## Packaging 0.2.0 (installed app)
 
 Done this session:
@@ -400,30 +365,6 @@ Not run yet (the session's shell stopped accepting commands before the build):
 4. Icon is the pearl in the taskbar, Start menu, tray, Alt+Tab and on the installer exe.
 5. No desktop shortcut after install.
 6. Run the installer again while Dreamer runs: it closes Dreamer, updates, and the workspace (`%USERPROFILE%\Dreamer`) is intact.
-
-## Local chat model (Ollama)
-Automated: `cargo test` (router backend mapping, `ollama::tests` against a fake server, `recent_turns_for_an_escalation`, settings). Browser preview (`npm run dev`): `?ollama=missing|stopped|nomodel` previews the setup states; a message containing "fail" fails on the local model.
-
-Setup (Local model dialog, from the chat header chip):
-1. **Ollama missing:** see "Local model: in-app Ollama install" below (Dreamer now installs it).
-2. **Installed, not running** (quit Ollama from its tray icon): "installed but not running" with the path found; Start Ollama / Check again starts it (see below).
-3. **Too old** (Ollama < 0.14): "too old … Update Ollama".
-4. **Model missing:** "Download the model" shows a progress bar with GB done/total; Cancel stops it ("Download cancelled."); downloading again resumes. When done, `ollama list` shows both `qwen3.5:35b-a3b` and `dreamer-qwen3.5:35b-a3b`, and `ollama show dreamer-qwen3.5:35b-a3b` lists `num_ctx 65536`.
-5. **Ready:** "Ready: Ollama x.y, qwen3.5:35b-a3b · tools · images · 64k context"; the chip says "Local".
-6. Settings: set Local model to a pulled model without tools: the dialog says it lacks tool calls, and chat turns fall back to Claude with the note. An invalid name ("two words") is refused on Save.
-
-Chat:
-7. **Normal turn, zero Claude usage:** in a card's chat, "give me two related boss ideas as cards". Ghost cards appear; the badge reads `local · qwen3.5:35b-a3b`. sidecar.log: `route … backend=local model=dreamer-qwen3.5:35b-a3b`. Claude usage shows nothing new for the turn itself (the memory pass afterwards is still one Haiku call, by design). Ask it to link two cards: a dashed ghost link appears.
-8. **Think harder:** turn on Think and send. The step list shows "Recapped the thread (local model)", then Claude's steps; the badge reads `Claude · Opus · Think harder · ↑ … ↓ …`. Send a normal message next: it's local again, and the local model still knows the turns from before the Think turn (its session was resumed). The context meter didn't jump from the Claude turn.
-9. **Globe:** turn on web and ask for something to look up: one Claude turn (badge "· web"), "Save as clip" works; the next turn is local.
-10. **Retry with Claude:** make a local turn fail (`ollama stop <model>` during a reply, or a request the model fumbles). The reply shows "The local model couldn't answer." (or "gave no answer" / "A tool call by the local model failed.") with "Retry with Claude", and nothing is retried by itself. Click it: the failed pair is replaced by one Claude turn (badge "· retried with Claude"); the next turn is local.
-11. **Images:** with a model without vision (e.g. `qwen3:30b-a3b-instruct-2507-q4_K_M`), ask about a card's image: the reply says it can't see images and offers Retry with Claude, which then describes the image.
-12. **Ollama goes away:** quit Ollama, send a normal message: Claude answers, with an amber "Local model unavailable: Ollama is installed but not running… This reply used Claude." above the badge. Start Ollama, send again: local.
-13. **Old threads:** open a thread with Claude history from before this change and send a message: the first step is "Summarizing earlier messages…" (local model), then the local reply, which knows the gist of the earlier conversation.
-14. **Compaction:** set "Summarize a thread after" to 3000 and chat locally until the "Earlier messages summarized" divider appears; the summary was written locally. With the setting at 200000, a local thread still compacts by 64k.
-15. **Idle load:** wait more than 5 minutes, send a message: the first reply takes a few extra seconds (model load), then it's normal.
-16. **Local off:** Settings › untick "Chat on a local model": the chip says "Local off", and turns route fast/main/deep to Claude exactly as before (Claude badges, no notes).
-17. Reset chat on a thread that used both backends: the next local and Claude turns both start fresh.
 
 ## Artifacts (0.4.0)
 Automated: `cargo test` (`artifacts::tests`: create + folder; versions never overwritten, v2 starts as a copy of v1, meta.json credits and jobs; approved files kept; file-name checks; two themes, active switch, per-artifact theme and art-mode override, CSS tokens, bad input refused; sandboxed HTML bundle (CSP first, local files inlined including CSS `url()`, remote refs left, theme tokens); copy_asset; SpriteCook project id; chip count; handoff takes only approved versions + the style guide. Also `credentials` masking and the watcher's `artifact` scope). The sidecar was checked standalone: it starts and answers `spritecook_balance` with `no_key`; against a fake streamable-HTTP MCP server it runs initialize, keeps the session id, parses the SSE reply (`credits: 3696`) and closes the session. `npm run build` and `npm run check:themes` pass.
@@ -447,49 +388,6 @@ Done-when checks:
 12. **Ghost artifact:** /grill-me on a card about a character's look: Claude may propose a ghost artifact (brief only, Claude-suggests style). Dismiss: nothing spent. Keep: its first turn starts.
 13. Trash an artifact card and restore it: the previews come back. Empty the Trash with it inside: `artifacts/<id>/` is gone.
 
-## Local model: in-app Ollama install, GPU-based model, Check again
-Automated: `cargo test` — `ollama::tests::ollama_host_parsing`, `tiers_from_vram`, `cloud_models`, `exe_search_order`, `reg_output_parsing`, `port_taken_by_something_else`; `ollama_install::tests::bad_signature_is_refused_and_deleted` (injected verifier: the installer never runs and its folder is deleted), `signer_check`, `gpu_parsing`, `download_complete_interrupted_and_offline` (local fake server). Live, on Windows: `DREAMER_INSTALLER=<path to a downloaded OllamaSetup.exe> cargo test live_ -- --ignored --nocapture` checks that the real Authenticode verifier accepts it and rejects a one-byte-flipped copy (`HashMismatch`) and an unsigned file. It also prints the detected GPU.
-
-Browser preview (`npm run dev`): `?ollama=missing|stopped|nomodel|foreign`, `?gpu=24|16|8|2|none`, `?installer=badsig|offline`. For example: `?ollama=missing&gpu=16` runs the whole install, then the 9B download; `?ollama=missing&gpu=2` ends on the cloud screen; `?ollama=missing&installer=badsig` ends on the signature error.
-
-In the app, on a PC without Ollama (`ollama --version` not recognized, no `%LOCALAPPDATA%\Programs\Ollama`):
-1. **Install:** chip "Set up local" › "Install Ollama". The bar shows the ~1.9 GB installer download (GB done/total) and a Cancel button. Then come "Checking the installer's signature…", "Installing Ollama…" (no window, no UAC prompt) and "Starting Ollama…". Then the model for the GPU downloads with the usual bar, and the dialog ends on "Ready: …". No browser opens. Afterwards `%LOCALAPPDATA%\Programs\Ollama\ollama.exe` exists, `%TEMP%` has no `dreamer-ollama-*` folder left, and Settings › Local model shows the chosen model.
-2. **Cancel during download:** "Install cancelled."; the temp folder is gone; Install works again.
-3. **No internet** (Wi-Fi off) › Install: "No internet connection: Dreamer couldn't reach github.com…". **Interrupted** (Wi-Fi off mid-download): "The download was interrupted. Press Install again to retry."
-4. **Tampered installer:** can't be reproduced against the real URL; the tests above cover it. Expected: "The installer's signature didn't check out, so Dreamer didn't run it." and the file is deleted.
-5. **Installer exit code ≠ 0** (e.g. press Install while another Ollama installer is open): "The Ollama installer stopped with code N (…)".
-6. **Server doesn't start within 20 s:** "Ollama is installed, but its server didn't start within 20 s…".
-7. **Disk full** (temp drive nearly full): "The disk is full: …". During the model pull, Ollama's "no space left" becomes "The disk is full, so the model couldn't be downloaded…".
-8. **Recommendation:** with Ollama running and no model, the dialog shows "GPU: <name> · <N> GB  Recommended: <model> (<size> download)". The picker lists 35B-A3B (20+ GB), 9B (10+), 4B (6+) and gemma4:cloud. On the dev PC (RTX 4080 SUPER, 16 GB) it recommends `qwen3.5:9b`. Pick another model and press Download: it's saved as `local_model`. A model set in Settings beforehand is preselected, and the install doesn't replace it.
-9. **Weak or no GPU** (`?gpu=2`, or a PC with integrated graphics): recommended `gemma4:cloud`. "Use gemma4:cloud" leads to "Run `ollama signin` in a terminal…" with a "Copy the command" button; the clipboard then holds `ollama signin`. Run it, sign in, press Check again: "Ready: … gemma4:cloud (cloud) · tools · images", with no 64k line, and `ollama list` has no `dreamer-gemma4:cloud`. A local reply's badge reads `local · gemma4:cloud (cloud)`.
-10. **Cloud declined:** "No thanks, use Claude": the dialog says chat uses Claude. A chat turn answers on Claude with the amber "Local model unavailable: No local model on this PC…" note. Picking a model later clears it.
-11. **Check again starts Ollama:** quit Ollama from the tray and open the dialog: "installed but not running" plus the path. Check again (or Start Ollama) shows "Starting Ollama (up to 20 s)…" and ends with Ollama running.
-12. **Non-standard folder:** install Ollama in another folder, e.g. `D:\Tools\Ollama` (not on PATH). The dialog says "Ollama isn't installed."; click "Locate ollama.exe…" and pick it. Dreamer starts it from there, and after a restart that folder is still checked first (setting `ollama_path`). These are found without picking: scoop (`~\scoop\apps\ollama\current`), winget (`%LOCALAPPDATA%\Microsoft\WinGet\Packages\Ollama.Ollama_*`), the installer's registry InstallLocation, and a PATH set after Dreamer started (read from the registry).
-13. **OLLAMA_HOST:** set the user variable `OLLAMA_HOST=127.0.0.1:11500`, then restart Ollama and Dreamer. The dialog works, and local turns go to `http://127.0.0.1:11500` (sidecar.log and Claude Code's requests). `OLLAMA_HOST=http://0.0.0.0:11500` works the same. With `OLLAMA_HOST=https://x`, the dialog notes "OLLAMA_HOST is set to … so it looks for Ollama at 127.0.0.1:11434." and uses the default.
-14. **Port taken by something else** (e.g. `python -m http.server 11434` with Ollama stopped): "Another program is using 127.0.0.1:11434, and it isn't Ollama…".
-
-## Chat reliability harness (branch `reliability`)
-`npm run reliability` builds and runs the headless harness (`src-tauri/src/harness.rs`) against a temp copy of `%USERPROFILE%\Dreamer`: S1 short chat, S2 create_card, S3 /organize on a 37-card canvas, S4 send after unloading the model, S5 stop mid-turn then retry, S6 a thread that crosses local compaction (local ×10 each), S7 Claude smoke tests (×2 each, Haiku/Sonnet), S8 fault injection (×3 each: kill Ollama, late Rust tool reply, killed Claude Code child, silent / stalled / failing model servers via a fake Anthropic server). `--local` runs S1–S6 only (no Claude usage). Close GPU-heavy apps first: a game sharing the GPU makes the local model ~100× slower (see the report). Output: `%TEMP%\dreamer-reliability-<time>\summary.md`, `results.jsonl`, `logs\sidecar.log`.
-
-`npm run test:reliability` checks the chat's last-resort timer logic. `cargo test` covers the organize layout (no overlaps, pinned cards avoided, cards inside their frames), the batch validator and the card height estimate.
-
-Manual, in the app:
-1. Send a message, then stop Ollama from the tray while it answers: within ~90 s the reply ends with "The local model stopped responding…" and Retry with Claude (one automatic local retry first, shown as a step). No spinner stays.
-2. Stop a reply, send another message in the same thread at once: it answers normally (no wait behind the stopped one).
-3. /organize in a folder of 30+ cards: "Grouping…", "Assigning 1/3…", "Laying out…", then a plan with frames, a layout and retags, and no folder ops. Apply, then Undo.
-
-## Local grill reliability (branch `reliability`)
-Harness: `npm run reliability -- --scenarios S9 --runs 5 --project <slug> --card <card id>` grills that card (a copy in the temp workspace; a card in the Trash is restored in the copy only): `/grill-me`, then 5 answers (always the first choice), each appended to the card's notes as the chat panel does. A run passes when no turn has a failure note, each turn puts up exactly one question card, no question repeats (same words, Jaccard ≥ 0.8), and each turn's last model request contains the previous question and its answer (the sidecar keeps the last request of every local turn in `prompts/<turn>.json`). `--scenarios S10-repair,S10-double` (also in `--faults`) script a fake local model: a malformed ask_question then the fixed one (one question, no note, the fix hint was sent), or a malformed call then `Write` ("Retry with Claude", and the next turn's prompt still holds the first turn). sidecar.log has a `tool_call` line per call (name, args ≤ 300 chars, result, `guard=`, `error=`, position against ask_question), `local_call … messages= user_text_messages= other_tools=`, `turn_start … session=live|resume|fresh`, `turn_end_early`, `session_restart`.
-
-`cargo test`: `ctx::tests::answered_block_lists_pairs_current_and_memory`, `transcript_capped_keeps_the_newest`.
-
-Manual, in the app on the local model:
-1. Select a card, run `/grill-me`. Exactly one question card appears, with no note under it. Answer 5 times: each answer goes into the card's notes as **Q:**/**A:**, the next question comes, and none repeats an answered one. sidecar.log: one `ask_question` per turn (`turn_end_early … why=question`), `turn_start … session=live` with the same `sid` on every turn, and `send_message … answered=` growing.
-2. Answers stay on the card: during a plain card grill, no "Project decisions" card is created or changed.
-3. `/grill-me handoff` from the handoff gap check still records answers on the Tech / Project decisions cards.
-4. A local reply that produced text or a card and then had a failed step: a grey "One step failed · Details" line; Details lists the failed step; ⋯ › Retry with Claude works. A local reply with nothing usable keeps the red banner with Retry with Claude.
-5. After a red-banner local failure, send another message in the same thread: the model still knows the earlier messages (ask "what did I answer first?").
-
 ## Question checklists (branch `reliability`)
 `npm run test:checklist` (parseItem / grouping); `cargo test dismissed_design_question_is_not_reimported`. The browser preview's Fish-punk project has a seeded "From Claude Code" card.
 
@@ -508,14 +406,6 @@ Manual:
 2. "Other…" shows a text box (Enter picks it); Skip greys the question and it is sent as `A: (skipped)` and not written to the notes. Ctrl+Enter sends. After Send the form is read-only and shows the choices.
 3. Click "? N" on the From Claude Code card (or "Answer with Claude" in its editor, or the /grill-me chip in its thread): a form with its open questions. Send: the item answers are filled and QUESTIONS.md gets `[x]` + `A:` lines; skipped items stay open. When none are left the reply is exactly "All open questions covered."
 4. An old thread with single questions still renders them (answered ones read-only with the chosen chip).
-## Build-prompt decisions in the dialog (branch `reliability`)
-Manual (browser mock: `npm run dev`):
-1. Make build prompt on a card (the mock returns 3 flags): the box shows "Question 1 of 3", chips with "Recommended" on the first.
-2. Pick a chip: jumps to question 2. Prev: back to 1 with the pick kept. Type an own decision on 2 and press Enter: jumps to 3 (Shift+Enter adds a newline). Skip 3: it stays open (dashed dot).
-3. Apply decisions: the flagged card's notes get the `**Q:**/**A:**` pairs (one Ctrl+Z removes them), the prompt text changes (mock: a "Decisions" section), a new task file is saved ("Saved …" toast), and the box reads "2 decided ✓ · 1 open" and stays open. Change an answer: Apply is enabled again.
-4. On question 3 pick `Include "<title>" in this build` and Apply: the prompt is rebuilt with that card in scope (new chips row), a fresh stepper starts with matching answers kept.
-5. Tasks → Review on a saved task: the dialog opens with its answers ("N decided ✓ ▸"). A task saved before this change (flags without choices, or none) still opens; a flag without choices shows its text and the own-decision box only.
-
 ## Strip-down step 1: one canvas per project
 Automated: `cd src-tauri && cargo test migrate` (fixture with versions + nested folders + Inbox: one canvas each, frames with the right members, archive present, links intact; second run is a no-op; a re-run after a crash doesn't double frames; overlapping tiles go in a row; on Windows, a locked file makes the backup fail and leaves everything untouched and read-only). `cargo test bundle` covers `version` ignored / `folder` as frame. `npm run build`.
 
@@ -525,3 +415,13 @@ Manual migration check (Windows): copy a real layout-1 workspace somewhere, run 
 3. The old Inbox is the project "Inbox" (`projects/inbox-ideas`).
 4. Relaunch: no second backup, nothing changes.
 5. Lock a card file (e.g. open it with exclusive access) in a fresh layout-1 copy and launch: the top banner says "Read-only. Migration failed, your data is untouched: …" and edits fail; nothing on disk changed.
+
+## Strip-down step 2: removed features
+Automated: `cd src-tauri && cargo test` (all pass), `npx tsc --noEmit`, `npm run build`, `npm run test:reliability`, `npm run test:checklist`, `npm run check:themes`. New: `storage::migrate::tests::step_f_converts_stickies_labels_and_the_questions_card_once` (sticky/label/cc-questions/build-block conversion, idempotent), the handoff pack tests (`write_pack` replaces only its own files, twice in a row), bundle import ignoring a `build:` key.
+Manual (Windows, `npm run tauri dev`), checks that need the real window:
+1. Closing the window quits the app (no tray icon, no hotkey registered: Ctrl+Shift+Space does nothing).
+2. Open an older workspace with stickies, labels, a "From Claude Code" card and built cards: they open as plain Mist cards / a plain checklist, `built` cards keep their stage with no build badge, and `workspace.json` gets `"stripped": true`.
+3. Summarize: choose a repo folder, Generate; `docs/design/*.md`, `manifest.json`, `assets/` and the Dreamer block of `CLAUDE.md` appear, and a second run overwrites them. With no repo folder the Generate button stays disabled.
+4. The sidebar has Memory, Import bundle… and Link repo… only; the canvas menus have no gap check, scan, build prompt, sticky or label; Settings has no hotkey, autostart, local model or build model fields.
+5. A chat turn, /organize and /grill-me still run (Claude only); a stalled turn still offers Stop / Retry.
+Not run in this session: the live window (the Tauri window cannot be driven here) and any real Claude turn after the sidecar edit.

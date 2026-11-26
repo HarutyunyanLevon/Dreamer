@@ -20,8 +20,7 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 dunce = "1"
-tauri = { version = "2", features = ["tray-icon"] }
-tauri-plugin-global-shortcut = "2"
+tauri = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
@@ -41,10 +40,8 @@ tokio = { version = "1", features = ["macros"] }
 tauri-plugin-dialog = "2"
 # The SpriteCook API key lives in the OS credential store (Windows Credential Manager), never in the workspace.
 keyring = { version = "3", features = ["windows-native", "apple-native", "linux-native"] }
-arboard = { version = "3.7.0", default-features = false, features = ["image-data"] }
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
-tauri-plugin-autostart = "2"
 tauri-plugin-single-instance = "2"
 
 [target.'cfg(windows)'.dependencies]

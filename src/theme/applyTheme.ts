@@ -1,10 +1,10 @@
 import { hexToRgb, over, rgba, stageBorder } from "./color";
 import { BUILT_COLOR, SCROLL_THUMB_ALPHA, SCROLL_THUMB_HOVER_ALPHA, SCROLL_TRACK_ALPHA, STAGES, STAGE_CARD_ALPHA, type StageId, type Theme } from "./types";
 
-export const stageColor = (t: Theme, id: StageId) => t.stages[id] ?? BUILT_COLOR;
+const stageColor = (t: Theme, id: StageId) => t.stages[id] ?? BUILT_COLOR;
 
 /** A theme's tokens as CSS custom properties (used for :root and for scoped previews). */
-export function themeVars(t: Theme): Record<string, string> {
+function themeVars(t: Theme): Record<string, string> {
   const v: Record<string, string> = {
     "--ink": t.ui.ink,
     "--body": t.ui.body,

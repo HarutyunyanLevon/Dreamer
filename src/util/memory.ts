@@ -1,6 +1,6 @@
 /** Client-side view of a project's memory.md: six fixed sections of bullet lines (mirrors src-tauri/src/memory.rs). */
 export const MEMORY_SECTIONS = ["Pitch", "Pillars", "Decisions", "Rejected", "Glossary", "How to work with me"] as const;
-export type MemorySection = (typeof MEMORY_SECTIONS)[number];
+type MemorySection = (typeof MEMORY_SECTIONS)[number];
 export type MemoryLines = Record<MemorySection, string[]>;
 
 const PREFIXES = ["pitch", "pillar", "decision", "reject", "gloss", "how"];

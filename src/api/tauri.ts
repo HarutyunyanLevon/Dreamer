@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { Api, BuildEvent, BuildUpdate, ChangeEvent, HandoffEvent, MemoryEvent, ScanEvent } from "./types";
+import type { Api, ChangeEvent, HandoffEvent, MemoryEvent } from "./types";
 
 function mimeFor(rel: string): string {
   const ext = rel.split(".").pop()?.toLowerCase();
@@ -59,27 +59,9 @@ export const tauriApi: Api = {
     const b64 = await invoke<string>("read_media", { slug, rel });
     return `data:${mimeFor(rel)};base64,${b64}`;
   },
-  handoffStart: (slug, mode, spec, gaps) => invoke("handoff_start", { slug, mode, spec, gaps: gaps ?? null }),
+  handoffStart: (slug, spec) => invoke("handoff_start", { slug, spec }),
   handoffCancel: () => invoke("handoff_cancel"),
-  taskStart: (slug, ids, model, revise) => invoke("task_start", { slug, ids, model: model ?? null, revise: revise ?? null }),
-  saveTask: (slug, task) => invoke("save_task", { slug, task }),
-  listTasks: (slug) => invoke("list_tasks", { slug }),
-  markTaskDone: (slug, file) => invoke("mark_task_done", { slug, file }),
-  openTerminal: (slug, file) => invoke("open_terminal", { slug, file }),
   onHandoffEvent: (cb) => listen<HandoffEvent>("handoff-event", (e) => cb(e.payload)),
-  buildPreflight: (slug) => invoke("build_preflight", { slug }),
-  buildStart: (slug, tasks, dirty) => invoke("build_start", { slug, tasks, dirty }),
-  buildInterrupt: (run) => invoke("build_interrupt", { run }),
-  buildAnswer: (run, req, decision, reason) => invoke("build_answer", { run, req, decision, reason: reason ?? null }),
-  buildRuns: (slug) => invoke("build_runs", { slug }),
-  buildEvents: (slug, run) => invoke("build_events", { slug, run }),
-  buildFileDiff: (slug, run, file) => invoke("build_file_diff", { slug, run, file }),
-  buildAct: (slug, run, action) => invoke("build_act", { slug, run, action }),
-  buildOpenTerminal: (slug) => invoke("build_open_terminal", { slug }),
-  onBuildEvent: (cb) => listen<BuildEvent>("build-event", (e) => cb(e.payload)),
-  listDesignVersions: (slug) => invoke("list_design_versions", { slug }),
-  readDesignDoc: (slug, version, name, dir) => invoke("read_design_doc", { slug, version, name, dir: dir || null }),
-  openDesignFolder: (slug, version, dir) => invoke("open_design_folder", { slug, version, dir: dir || null }),
   openLogsFolder: () => invoke("open_logs_folder"),
   pickFolder: (title) => invoke("pick_folder", { title: title ?? null }),
   searchCards: (query, project, limit) => invoke("search_cards", { query, project: project ?? null, limit: limit ?? null }),
@@ -88,9 +70,6 @@ export const tauriApi: Api = {
   saveChat: (slug, thread, data) => invoke("save_chat", { slug, thread, data }),
   resetChat: (slug, thread) => invoke("reset_chat", { slug, thread }),
   listChats: (slug) => invoke("list_chats", { slug }),
-  listCustomThemes: () => invoke("list_custom_themes"),
-  saveCustomTheme: (id, theme) => invoke("save_custom_theme", { id, theme }),
-  deleteCustomTheme: (id) => invoke("delete_custom_theme", { id }),
   memoryGet: (slug) => invoke("memory_get", { slug }),
   memorySave: (slug, text, source) => invoke("memory_save", { slug, text, source }),
   memoryHistory: (slug) => invoke("memory_history", { slug }),
@@ -111,31 +90,13 @@ export const tauriApi: Api = {
   artifactHtml: (slug, id, version, head) => invoke("artifact_html", { slug, id, version, head: head ?? null }),
   spritecookKeyStatus: () => invoke("spritecook_key_status"),
   spritecookSetKey: (key) => invoke("spritecook_set_key", { key }),
-  quitApp: () => invoke("quit_app"),
-  autostartEnabled: () => invoke("autostart_enabled"),
-  setAutostart: (enabled) => invoke("set_autostart", { enabled }),
-  hideToTray: () => invoke("hide_to_tray"),
   parseBundle: (text, target) => invoke("parse_bundle", { text, target: target ?? null }),
   applyBundle: (text, target) => invoke("apply_bundle", { text, target: target ?? null }),
   undoBundle: (result) => invoke("undo_bundle", { result }),
   scanImports: () => invoke("scan_imports"),
-  scanStart: (slug, folder, max, model) => invoke("scan_start", { slug, folder, max, model }),
-  scanCancel: () => invoke("scan_cancel"),
-  onScanEvent: (cb) => listen<ScanEvent>("scan-event", (e) => cb(e.payload)),
-  skillStatus: () => invoke("skill_status"),
-  skillInstall: () => invoke("skill_install"),
-  skillRemove: () => invoke("skill_remove"),
   readImport: (path) => invoke("read_import", { path }),
   archiveImport: (path) => invoke("archive_import", { path }),
-  hotkeyStatus: () => invoke("hotkey_status"),
-  splitText: (text) => invoke("split_text", { text }),
-  onTrayNotice: (cb) => listen("tray-notice", () => cb()),
-  onBuildUpdate: (cb) => listen<BuildUpdate>("build-update", (e) => cb(e.payload)),
-  linkRepo: (slug, path, gitignore) => invoke("link_repo", { slug, path, gitignore }),
-  markBuiltNow: (slug, id) => invoke("mark_built_now", { slug, id }),
-  restoreBuild: (slug, id, build, snapshot, stage) => invoke("restore_build", { slug, id, build, snapshot, stage }),
-  buildTexts: (slug, id) => invoke("build_texts", { slug, id }),
-  openRepoFile: (slug, rel, reveal) => invoke("open_repo_file", { slug, rel, reveal }),
+  linkRepo: (slug, path) => invoke("link_repo", { slug, path }),
   onChange: async (cb) => {
     const un = await listen<ChangeEvent[]>("workspace-changed", (e) => cb(e.payload));
     return un;

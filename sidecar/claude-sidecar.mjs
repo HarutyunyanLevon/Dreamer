@@ -2,12 +2,7 @@
 // the user's locally installed, already-logged-in Claude Code — no API key.
 //
 // Protocol: newline-delimited JSON on stdin/stdout.
-//   in:  {type:"user_message", id, text, fullText, thread, resume?, model?, tier?, think?, retryModel?, web?, compact?,
-//         backend:"local"|"claude", escalated?, local?:{baseUrl, vision}, recap?:{transcript, model}}
-//        (backend "local" = this turn runs on a local model through Ollama's Anthropic-compatible API:
-//         its own session, keyed "<thread>#local", with Ollama env. escalated = a one-turn Claude visit
-//         from a local thread: a fresh session that is closed after the turn; recap = have the local
-//         model recap the thread first and put it in fullText's "{{RECAP}}" slot)
+//   in:  {type:"user_message", id, text, fullText, thread, resume?, model?, tier?, think?, retryModel?, web?, compact?}
 //        (model/tier chosen by the router in Rust; think = thinking budget on; retryModel = main model for
 //         one retry when a fast turn errors or comes back empty -> {type:"model_note", id, model, retried})
 //                                    -- text = the user's words plus only what changed since the last
@@ -22,17 +17,10 @@
 //        {type:"reset_thread", thread}                    -- "Reset chat": drop that thread's session
 //        {type:"interrupt", hard?}                        -- hard: also close the session (Retry after a stall)
 //        {type:"tool_response", reqId, result} | {type:"tool_response", reqId, error}
-//        {type:"oneshot_start", job, mode:"gaps"|"generate"|"task"|"revise", prompt, model}
+//        {type:"oneshot_start", job, prompt, model}
 //                                    -- a handoff pack session: its own one-turn query, not a chat
 //                                       thread; tools are handoff_* requests carrying the job id
 //        {type:"oneshot_cancel", job}                      -- interrupt it; Rust drops its output
-//        {type:"scan_start", job, cwd, prompt, model}   -- repo scan: Read/Glob/Grep in cwd, tools scan_* (list_cards,
-//                                       report_progress, emit_bundle); ends with scan_done {job, ok, error?}.
-//                                       Cancel with oneshot_cancel.
-//        {type:"build_start", run, cwd, prompt, model}  -- a build run's task: Claude Code itself in the repo
-//                                       (its CLAUDE.md and .claude settings), every tool call gated by Rust
-//                                       (tool_request build_permission). One session per task.
-//        {type:"build_cancel", run}                        -- Interrupt: stop it, kill its process
 //        {type:"memory_start", job, kind:"update"|"seed", prompt, model}
 //                                    -- a memory pass: one query, no history, no built-in tools; its one
 //                                       tool call (memory_update | memory_seed) comes back as memory_result
@@ -48,9 +36,7 @@
 //        {type:"thinking_delta", id|job, sid, text}      -- streamed thinking text of step `sid`
 //        {type:"usage", id|job, phase?, input, cacheRead, cacheCreate, output}  -- cumulative, after every
 //                                                          API call; phase "compact" = the thread summary
-//        {type:"compacted", id, summary, backend}        -- the thread was summarized before turn `id`
-//        message_done also carries backend, escalated and, for a local turn that failed, fallback:
-//         "error"|"empty"|"tool"|"vision" (the UI offers "Retry with Claude")
+//        {type:"compacted", id, summary}                 -- the thread was summarized before turn `id`
 //        {type:"tool_request", reqId, tool, input}      -- Rust must reply (create_card, search_cards,
 //                                                          read_card, list_cards, list_related, propose_link,
 //                                                          merge_cards, view_attachment, propose_edit,
@@ -64,14 +50,9 @@
 //        {type:"oneshot_done", job, ok, error?, cancelled?}  -- a handoff session ended
 //        {type:"memory_result", job, result}             -- the memory pass's tool input (first call only)
 //        {type:"memory_done", job, ok}                   -- the memory pass ended
-//        {type:"build_step"|"build_text"|"build_usage", run, ...}  -- a build run's activity
-//        {type:"build_done", run, ok, error?, cancelled?, stalled?} -- its task ended
 //        (remember / forget are chat tools: tool_request with the running turn id attached)
 import { createInterface } from "node:readline";
-import { writeFileSync } from "node:fs";
-import { join } from "node:path";
 import { spawn as spawnChild } from "node:child_process";
-import { createServer as createHttpServer, request as httpRequest } from "node:http";
 import { createSdkMcpServer, query as sdkQuery, tool } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod/v4";
 
@@ -80,13 +61,6 @@ import { z } from "zod/v4";
 const CLAUDE_EXE = process.env.DREAMER_CLAUDE_EXE || "";
 const query = (args) =>
   sdkQuery({ ...args, options: { ...(CLAUDE_EXE ? { pathToClaudeCodeExecutable: CLAUDE_EXE } : {}), ...args.options } });
-
-// ---- Fault injection for the reliability harness (scripts/reliability). Inert unless set. ----
-// DREAMER_FAKE_CLAUDE_URL: Claude sessions talk to this fake Anthropic server instead (stall tests,
-// no real usage). DREAMER_FAKE_LOCAL_URL: local sessions talk to it instead of Ollama.
-const FAKE_CLAUDE_URL = process.env.DREAMER_FAKE_CLAUDE_URL || "";
-const FAKE_LOCAL_URL = process.env.DREAMER_FAKE_LOCAL_URL || "";
-const claudeEnv = () => (FAKE_CLAUDE_URL ? { ...process.env, ANTHROPIC_BASE_URL: FAKE_CLAUDE_URL, ANTHROPIC_AUTH_TOKEN: "fake", ANTHROPIC_API_KEY: "" } : process.env);
 
 // ---- SpriteCook (artifact images), through its remote MCP server ----
 // URL from Settings, key from the OS credential store (both passed by the app at spawn). The key is
@@ -136,7 +110,7 @@ function onFatal(kind, e) {
   const t = current;
   if (t && !t.ended) {
     try {
-      failTurn(t, "error", `Claude's helper hit an internal error (${e?.message ?? e}). Retry to continue.`, { noRetry: true });
+      failTurn(t, "error", `Claude's helper hit an internal error (${e?.message ?? e}). Retry to continue.`);
     } catch (e2) {
       console.error(`[sidecar] could not fail the turn: ${e2?.stack ?? e2}`);
       current = null;
@@ -221,8 +195,7 @@ function turnGate(s, kind) {
   if (l.calls >= l.maxCalls || (kind === "read" && l.reads >= l.maxReads)) {
     l.hit = true;
     l.hits++;
-    // Seen live: a local model that got "limit reached" kept calling the same tool 6 more times,
-    // then hung. The third refused call ends the turn instead.
+    // A model that got "limit reached" can keep calling the same tool. The third refused call ends the turn instead.
     if (l.hits >= 3) {
       dlog(`limit_loop turn=${t.id} hits=${l.hits}`);
       // With something to show (a question, a ghost card, text) the turn simply ends there.
@@ -267,7 +240,7 @@ function chatTools(s) {
         .object({ id: z.string(), label: z.string().max(40).optional() })
         .optional()
         .describe("Propose a link from this existing card to the new one (shown as a ghost link the user keeps or dismisses)"),
-      kind: z.enum(["card", "sticky", "checklist"]).optional().describe("Object kind (default 'card'). Use 'checklist' with items for a list of points or questions."),
+      kind: z.enum(["card", "checklist"]).optional().describe("Object kind (default 'card'). Use 'checklist' with items for a list of points or questions."),
       items: z
         .array(z.object({ text: z.string(), question: z.boolean().optional().describe("true when the item is an open question") }))
         .optional()
@@ -300,10 +273,6 @@ function chatTools(s) {
     },
   );
 
-  const HANDOFF_ARG = z
-    .string()
-    .optional()
-    .describe("Only in the handoff gap interview: the exact checklist item this question is about. Omit otherwise.");
   /** Shows `qs` as one question form; ask_question and ask_questions both end here. */
   const askQuestions = (qs) => {
     {
@@ -311,14 +280,9 @@ function chatTools(s) {
       if (lim) return lim;
     }
     // turnId ties the form to the reply it belongs to, so the UI shows it once, as the question
-    // form, instead of also showing any streamed text for that turn. `item` tells the UI where the
-    // answer goes (handoff gap interview: Tech card or Project decisions card).
-    // Seen live: the local model fills handoff_item in a plain card grill, which sent the answer to
-    // the Project decisions card instead of the card. It counts only inside a gap interview; item_id
-    // likewise only inside a checklist grill.
-    const thread = threadOf(s.key);
-    const gap = gapThreads.has(thread);
-    const checklist = checklistThreads.has(thread);
+    // form, instead of also showing any streamed text for that turn. item_id counts only inside a
+    // checklist grill.
+    const checklist = checklistThreads.has(s.key);
     const questions = qs.map((q, i) => ({
       id: q.id || `q${i + 1}`,
       question: q.question,
@@ -326,7 +290,6 @@ function chatTools(s) {
       // A recommended value that is not one of the choices is dropped rather than failing the turn.
       ...(q.recommended && q.choices.includes(q.recommended) ? { recommended: q.recommended } : {}),
       ...(q.context ? { context: q.context } : {}),
-      ...(gap && q.handoff_item ? { item: q.handoff_item } : {}),
       ...(checklist && q.item_id ? { itemId: q.item_id } : {}),
     }));
     send({ type: "questions", id: `q${++reqSeq}`, turnId: tid(), questions });
@@ -349,7 +312,7 @@ function chatTools(s) {
     "ask_question",
     "Ask the user exactly one multiple-choice question. Prefer ask_questions. Present 2-5 short, neutral, concrete " +
       "choices. The question is shown to the user with buttons, so do not also write it as text.",
-    { question: z.string(), choices: z.array(z.string()).min(2).max(5), handoff_item: HANDOFF_ARG },
+    { question: z.string(), choices: z.array(z.string()).min(2).max(5) },
     async (args) => askQuestions([args]),
   );
   const askQuestionsTool = tool(
@@ -367,7 +330,6 @@ function chatTools(s) {
             recommended: z.string().optional().describe("Your recommended choice; must equal one of the choices"),
             context: z.string().optional().describe("Short background for the question, shown under it"),
             item_id: z.string().optional().describe("Only in /grill-me checklist: the [item_id] this question answers. Omit otherwise."),
-            handoff_item: HANDOFF_ARG,
           }),
         )
         .min(1)
@@ -461,11 +423,6 @@ function chatTools(s) {
       }
       try {
         const r = await requestTool("view_attachment", args);
-        const ls = s;
-        if (r.kind === "image" && ls?.local && !ls.vision) {
-          if (T()) T().visionBlocked = true;
-          return fail(new Error("the local model can't look at images. Tell the user in one sentence that this needs Claude (Retry with Claude) and answer from the text you have"));
-        }
         if (r.kind === "image") {
           return {
             content: [
@@ -726,13 +683,6 @@ const SYSTEM_PROMPT = [
     "tags including 'spec', a link to the selected card with label 'spec of', and a markdown body with one short " +
     "section per item, built only from the user's answers and the card's notes. Then reply with exactly: " +
     "Proposed a spec card.",
-  "/grill-me handoff: the message lists project gap items (from the handoff gap check) with notes. Interview the " +
-    "user about those items only, in the given order, with the same rules as /grill-me (" +
-    BATCH_RULE +
-    " Call ask_questions once, no other text). On every question set handoff_item to the exact item " +
-    "name. Ask one or two questions per item, enough to settle it. The app records each answer on the Tech card " +
-    "(for 'platform & tech') or on the 'Project decisions' card. Do not propose cards. When every listed item is " +
-    "settled, reply with exactly: Gaps covered. Generate the pack again from Summarize.",
   "/grill-me checklist: the message lists the card's open questions as `[item_id] question — context`. Work through " +
     "them in the given order, 3-4 per turn, calling ask_questions once per turn with no other text: one entry per " +
     "listed item with item_id set to its id, question = the item's question (rephrased only if needed to be " +
@@ -866,7 +816,6 @@ function toolLabel(name, input, r) {
       return a.query ? `Searched the web "${clip(a.query)}"` : "Searching the web";
     case "WebFetch":
       return a.url ? `Opened ${domainOf(a.url)}` : "Opening a page";
-    // Claude Code's own tools (build runs).
     case "Bash":
       return a.command ? `$ ${clip(a.command, 80)}` : "Running a command";
     case "Read":
@@ -899,8 +848,6 @@ function makeTracker(out, label = "") {
   let cur = null; // the API call in progress (or the last one)
   let thinkN = 0;
   let asked = false; // an ask_question succeeded in this turn
-  let realErrors = 0; // tool errors that were not a Dreamer guard (malformed args, unknown tool, a refused request)
-  let repaired = false; // a successful call came after a real error
   const usage = () => {
     const c = cur ?? zeroUsage();
     return { input: done.input + c.input, cacheRead: done.cacheRead + c.cacheRead, cacheCreate: done.cacheCreate + c.cacheCreate, output: done.output + c.output };
@@ -925,9 +872,7 @@ function makeTracker(out, label = "") {
     /** Each API call's own token counts, in order. */
     calls: callList,
     /** Tool calls of this turn that came back as errors (malformed input, failed request). */
-    toolErrors: () => realErrors,
     /** A successful tool call came after the turn's real tool error (the in-turn repair worked). */
-    repaired: () => repaired,
     /** ask_question succeeded in this turn (its result is recorded). */
     asked: () => asked,
     /** Tool calls still running (each keeps its own time limit in the watchdog). */
@@ -1019,8 +964,6 @@ function makeTracker(out, label = "") {
           const pos = asked ? "after_ask" : ask && !b.is_error ? "ask" : "before_ask";
           dlog(`${label} tool_call #${s.call} name=${s.tool} pos=${pos} guard=${guard ? "yes" : "no"} error=${b.is_error ? "yes" : "no"} args=${JSON.stringify(clip(JSON.stringify(s.input ?? {}), 300))} result=${JSON.stringify(clip(txt, 300))}`);
           if (ask && !b.is_error && !guard) asked = true;
-          if (b.is_error && !guard) realErrors++;
-          else if (realErrors > 0 && !guard) repaired = true;
           s.status = b.is_error ? "error" : "done";
           s.endedAt = Date.now();
           if (b.is_error) s.detail = clip(txt.replace(/^Error:\s*/, ""), 200);
@@ -1097,14 +1040,8 @@ const MAX_LIVE = 3;
 const AUTO_COMPACT_TOKENS = Number(process.env.DREAMER_COMPACT_TOKENS) || 60000;
 const sessions = new Map();
 let sessionSeq = 0;
-/** Threads in a handoff gap interview (ask_questions' handoff_item counts only there). */
-const gapThreads = new Set();
 /** Threads in a checklist grill (ask_questions' item_id counts only there). */
 const checklistThreads = new Set();
-const threadOf = (key) => String(key).replace(/#[^#]*$/, "");
-/** Claude Code's built-in tools: a local session never offers them (a 9B model hallucinates Write, Bash, Task…). */
-const BUILTIN_TOOLS = ["Agent", "Task", "Bash", "BashOutput", "KillShell", "Edit", "MultiEdit", "Write", "Read", "Glob", "Grep", "LS", "NotebookEdit", "NotebookRead", "TodoWrite", "WebFetch", "WebSearch", "ExitPlanMode", "SlashCommand", "Skill", "ListMcpResourcesTool", "ReadMcpResourceTool"];
-
 const WEB_TOOLS = ["WebSearch", "WebFetch"];
 
 const BASE_OPTIONS = {
@@ -1164,7 +1101,6 @@ function closeSession(s, why = "close") {
   }
   if (why !== "close") {
     dlog(`session_close session=${s.sid} key=${s.key} why=${why}`);
-    proxyAbort(s.sid);
     killChild(s);
   }
 }
@@ -1557,217 +1493,6 @@ async function sendBalance() {
 const THINK_BUDGET = 4000;
 const thinkingOption = (think) => (think ? { type: "enabled", budgetTokens: THINK_BUDGET } : { type: "disabled" });
 
-// ---- The local model's connection: a small rewriting proxy between Claude Code and Ollama ----
-//
-// Claude Code sends no `thinking` field when thinking is off, `max_tokens: 64000` and no
-// temperature (seen in a captured request). Ollama then runs Qwen 3.5 in thinking mode at its
-// default temperature 1.0: long hidden reasoning, turns that end with no text, slow answers. Every
-// local session talks to Ollama through this proxy, which turns thinking off, caps max_tokens,
-// sets sampling for tool use, logs each call's size (never content), and can cut a session's
-// connection when its turn stalls (Ollama stops generating when the client goes away).
-
-/** Sampling for tool use with Qwen 3.5 in non-thinking mode (its model card's recommendation). */
-const LOCAL_SAMPLING = { temperature: 0.7, top_p: 0.8, top_k: 20 };
-const LOCAL_MAX_TOKENS = 8192;
-const proxyConns = new Map(); // session sid -> Set of {up, res}
-let proxyPort = 0;
-let proxySeq = 0;
-const proxyServer = createHttpServer(onProxy);
-const proxyReady = new Promise((resolve) => {
-  proxyServer.on("error", (e) => {
-    console.error(`[sidecar] local proxy failed: ${e?.stack ?? e}`);
-    resolve();
-  });
-  proxyServer.listen(0, "127.0.0.1", () => {
-    proxyPort = proxyServer.address().port;
-    resolve();
-  });
-});
-proxyServer.unref?.();
-
-/** The proxy URL a session's Claude Code uses for `upstream` (Ollama, or a fake server in the harness). */
-const proxyUrl = (sid, upstream) => (proxyPort ? `http://127.0.0.1:${proxyPort}/p/${sid}/${Buffer.from(upstream).toString("base64url")}` : upstream);
-
-/** Estimated tokens of a request (chars / 3.5, the same rough rate the diagnostics use). */
-const estTokens = (chars) => Math.round(chars / 3.5);
-
-/** "choices: array of strings, 2-5 items (required); question: string (required)" from a JSON schema. */
-function schemaHint(schema) {
-  const req = new Set(schema?.required ?? []);
-  const type = (p) =>
-    p?.enum ? `one of ${p.enum.join(" | ")}` : p?.type === "array" ? `array of ${p.items?.type ?? "value"}s${p.minItems != null || p.maxItems != null ? `, ${p.minItems ?? 0}-${p.maxItems ?? "any"} items` : ""}` : (p?.type ?? "value");
-  return Object.entries(schema?.properties ?? {})
-    .map(([k, p]) => `${k}: ${type(p)}${req.has(k) ? " (required)" : ""}`)
-    .join("; ");
-}
-
-/**
- * The fix hint for a real failed call of a local model, or null: an unknown tool gets the list of
- * tools it can call, invalid args get the tool's expected args. Guards are not errors, so never here.
- */
-function repairHint(name, text, tools) {
-  if (!name || !tools.has(name) || /No such tool available/i.test(text)) return `Unknown tool ${name ?? "?"}. Available: ${[...tools.keys()].filter((n) => String(n).startsWith("mcp__dreamer__")).join(", ")}. Call one of these, or answer in text.`;
-  if (/InputValidationError|Invalid arguments|invalid_type|validation|-32602|expected/i.test(text)) return `Invalid args for ${name}. Expected: ${schemaHint(tools.get(name).input_schema)}. Call it again once with valid args.`;
-  return null;
-}
-
-/**
- * One in-turn repair for local models: each failed call (malformed args, unknown tool) goes back to
- * the model with a short fix hint. Rewritten in every request (Claude Code resends the history), so
- * the transcript itself is untouched. Claude turns never pass through this proxy.
- */
-function addRepairHints(body) {
-  const tools = new Map((body.tools ?? []).map((x) => [x?.name, x]));
-  const called = new Map();
-  for (const m of body.messages ?? []) {
-    if (!Array.isArray(m?.content)) continue;
-    for (const b of m.content) {
-      if (b?.type === "tool_use") called.set(b.id, b.name);
-      if (b?.type !== "tool_result" || !b.is_error) continue;
-      const hint = repairHint(called.get(b.tool_use_id), resultText(b.content), tools);
-      if (!hint) continue;
-      if (Array.isArray(b.content)) b.content.push({ type: "text", text: hint });
-      else b.content = `${b.content ?? ""}\n${hint}`;
-    }
-  }
-}
-
-function tuneLocalRequest(buf, sid) {
-  let body;
-  try {
-    body = JSON.parse(buf.toString("utf8"));
-  } catch {
-    return buf;
-  }
-  if (!body || typeof body !== "object") return buf;
-  addRepairHints(body);
-  body.thinking = { type: "disabled" };
-  for (const [k, v] of Object.entries(LOCAL_SAMPLING)) if (body[k] == null) body[k] = v;
-  body.max_tokens = Math.min(Number(body.max_tokens) || LOCAL_MAX_TOKENS, LOCAL_MAX_TOKENS);
-  const sys = JSON.stringify(body.system ?? "").length;
-  const tools = JSON.stringify(body.tools ?? []).length;
-  const msgs = JSON.stringify(body.messages ?? []).length;
-  const s = [...sessions.values()].find((x) => x.sid === sid);
-  const t = s?.turn && !s.turn.ended ? s.turn : null;
-  const est = estTokens(sys + tools + msgs);
-  if (t) t.diag.maxEstTokens = Math.max(t.diag.maxEstTokens ?? 0, est);
-  // How much of the thread the model actually receives: messages in this request, and how many are the user's own words.
-  const list = Array.isArray(body.messages) ? body.messages : [];
-  const userText = list.filter((m) => m?.role === "user" && (typeof m.content === "string" || (m.content ?? []).some((c) => c?.type === "text"))).length;
-  // Anything offered that is not Dreamer's own tool (a Claude Code built-in would show here).
-  const foreign = (body.tools ?? []).map((x) => x?.name).filter((n) => n && !String(n).startsWith("mcp__dreamer__"));
-  dlog(`local_call session=${sid} turn=${t?.id ?? "-"} est_prompt_tokens=${est} num_ctx=${t?.numCtx ?? "?"} system_chars=${sys} tools_chars=${tools} messages_chars=${msgs} tools=${body.tools?.length ?? 0} messages=${list.length} user_text_messages=${userText} other_tools=${foreign.join(",") || "none"}`);
-  // Harness only: keep the last request of each turn, so a test can check what the model saw.
-  if (process.env.DREAMER_DUMP_PROMPTS && t) {
-    try {
-      writeFileSync(join(process.env.DREAMER_DUMP_PROMPTS, `${t.id}.json`), JSON.stringify({ system: body.system, messages: list }));
-    } catch {
-      /* diagnostics only */
-    }
-  }
-  return Buffer.from(JSON.stringify(body));
-}
-
-function onProxy(req, res) {
-  const m = /^\/p\/([^/]+)\/([^/]+)(\/.*)?$/.exec(req.url ?? "");
-  if (!m) {
-    res.writeHead(404).end();
-    return;
-  }
-  const [, sid, enc, rest = "/"] = m;
-  let target;
-  try {
-    target = new URL(rest, Buffer.from(enc, "base64url").toString("utf8"));
-  } catch {
-    res.writeHead(400).end();
-    return;
-  }
-  const chunks = [];
-  req.on("data", (c) => chunks.push(c));
-  req.on("end", () => {
-    let body = Buffer.concat(chunks);
-    const isMessages = req.method === "POST" && /^\/v1\/messages(\?|$)/.test(rest);
-    if (isMessages) body = tuneLocalRequest(body, sid);
-    const headers = { ...req.headers, host: target.host, "content-length": String(body.length) };
-    delete headers["accept-encoding"];
-    const n = ++proxySeq;
-    const t0 = Date.now();
-    let bytes = 0;
-    let first = 0;
-    const up = httpRequest(target, { method: req.method, headers }, (ur) => {
-      res.writeHead(ur.statusCode ?? 502, ur.headers);
-      ur.on("data", (c) => {
-        if (!first) first = Date.now();
-        bytes += c.length;
-        res.write(c);
-      });
-      ur.on("end", () => {
-        res.end();
-        if (isMessages) dlog(`local_http #${n} session=${sid} status=${ur.statusCode} ttfb_ms=${first ? first - t0 : -1} ms=${Date.now() - t0} bytes=${bytes}`);
-      });
-      ur.on("error", () => res.destroy());
-    });
-    up.on("error", (e) => {
-      dlog(`local_http #${n} session=${sid} failed after ${Date.now() - t0}ms: ${e?.code ?? e?.message}`);
-      if (!res.headersSent) {
-        res.writeHead(502, { "content-type": "application/json" });
-        res.end(JSON.stringify({ type: "error", error: { type: "api_error", message: `The local model server did not answer (${e?.code ?? e?.message}).` } }));
-      } else res.destroy();
-    });
-    const conn = { up, res };
-    let set = proxyConns.get(sid);
-    if (!set) proxyConns.set(sid, (set = new Set()));
-    set.add(conn);
-    // Claude Code went away (closed, killed): stop the upstream generation too.
-    res.on("close", () => {
-      set.delete(conn);
-      up.destroy();
-    });
-    up.end(body);
-  });
-}
-
-/** Cuts every model connection of a session. */
-function proxyAbort(sid) {
-  const set = proxyConns.get(sid);
-  if (!set) return;
-  for (const { up, res } of set) {
-    up.destroy();
-    res.destroy();
-  }
-  proxyConns.delete(sid);
-}
-
-/**
- * Env for a Claude Code process that talks to Ollama instead of Anthropic (Ollama >= 0.14 serves the
- * Anthropic Messages API). Every model alias Claude Code might use for side calls points at the
- * local model, and non-essential traffic is off, so nothing from this process reaches Anthropic.
- * `baseUrl` is the session's proxy URL. Claude Code's own retries are cut to one: a local server
- * that is down or wedged should fail fast, and the turn gets one fresh local retry of its own.
- */
-function localEnv(baseUrl, model) {
-  return {
-    ...process.env,
-    ANTHROPIC_BASE_URL: baseUrl,
-    ANTHROPIC_AUTH_TOKEN: "ollama",
-    ANTHROPIC_API_KEY: "",
-    ANTHROPIC_MODEL: model,
-    ANTHROPIC_DEFAULT_OPUS_MODEL: model,
-    ANTHROPIC_DEFAULT_SONNET_MODEL: model,
-    ANTHROPIC_DEFAULT_HAIKU_MODEL: model,
-    ANTHROPIC_SMALL_FAST_MODEL: model,
-    CLAUDE_CODE_SUBAGENT_MODEL: model,
-    CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
-    CLAUDE_CODE_MAX_RETRIES: "1",
-    API_TIMEOUT_MS: "300000",
-    DISABLE_TELEMETRY: "1",
-    DISABLE_ERROR_REPORTING: "1",
-  };
-}
-
-/** Session key: one session per thread and backend (env is fixed per Claude Code process). */
-const sessionKey = (thread, backend, escalated) => `${thread}#${backend === "local" ? "local" : escalated ? "claude-x" : "claude"}`;
-
 /** Starts Claude Code ourselves (same command the SDK would run) so a stalled one can be killed by pid. */
 const spawner = (s) => (opts) => {
   const child = spawnChild(opts.command, opts.args, { cwd: opts.cwd, env: opts.env, signal: opts.signal, stdio: ["pipe", "pipe", "ignore"], windowsHide: true });
@@ -1779,27 +1504,24 @@ const spawner = (s) => (opts) => {
   return child;
 };
 
-/** `local` = {baseUrl, vision} for a local-model session, else null. `artifact` = {id, cap} for an artifact thread. */
-function openSession(key, resume, model, think = false, local = null, artifact = null) {
+/** `artifact` = {id, cap} for an artifact thread. */
+function openSession(key, resume, model, think = false, artifact = null) {
   evictIfNeeded();
   const turns = makeTurnQueue();
   const sid = `s${++sessionSeq}`;
-  const s = { sid, key, artifact: artifact ? { ...artifact } : null, local: local ? { ...local } : null, vision: !!local?.vision, q: null, turns, resume: resume || null, model: model || null, think: !!think, web: false, lastUsed: Date.now(), answered: false, pending: null, closed: false, busy: false, turn: null, tracker: null, child: null, sessionId: resume || null };
-  const upstream = local ? FAKE_LOCAL_URL || local.baseUrl : null;
+  const s = { sid, key, artifact: artifact ? { ...artifact } : null, q: null, turns, resume: resume || null, model: model || null, think: !!think, web: false, lastUsed: Date.now(), answered: false, pending: null, closed: false, busy: false, turn: null, tracker: null, child: null, sessionId: resume || null };
   s.q = query({
     prompt: turns,
     options: {
       ...BASE_OPTIONS,
-      // Local models get no web tools (WebSearch/WebFetch run server-side at Anthropic) and no
-      // thinking budget; a web or Think turn is routed to Claude instead.
-      ...(local ? { tools: [], disallowedTools: BUILTIN_TOOLS } : {}),
-      thinking: thinkingOption(local ? false : think),
+      thinking: thinkingOption(think),
       canUseTool: webGate(s),
       mcpServers: { dreamer: makeServer(s) },
       // Claude Code's own auto-compact is a % of the model's window (~800k+ on a 1M model, i.e. never).
       // Pin the window it computes against to a fixed budget, so it also compacts mid-turn.
       env: {
-        ...(local ? localEnv(proxyUrl(sid, upstream), model) : { ...claudeEnv(), CLAUDE_CODE_MAX_RETRIES: "2" }),
+        ...process.env,
+        CLAUDE_CODE_MAX_RETRIES: "2",
         CLAUDE_CODE_AUTO_COMPACT_WINDOW: String(AUTO_COMPACT_TOKENS),
         ENABLE_CLAUDEAI_MCP_SERVERS: "false",
       },
@@ -1835,25 +1557,22 @@ function openSession(key, resume, model, think = false, local = null, artifact =
 let current = null;
 
 /** Watchdog limits: the first model event (a model load plus reading a big context), then between events. */
-const FIRST_EVENT_MS = { local: Number(process.env.DREAMER_FIRST_EVENT_LOCAL_MS) || 90000, claude: Number(process.env.DREAMER_FIRST_EVENT_CLAUDE_MS) || 60000 };
+const FIRST_EVENT_MS = Number(process.env.DREAMER_FIRST_EVENT_CLAUDE_MS) || 60000;
 const IDLE_MS = Number(process.env.DREAMER_IDLE_MS) || 45000;
 /** A running tool keeps its own limit (a SpriteCook generation or a web fetch takes longer than a model pause). */
 const toolLimitMs = (name) => (SPRITECOOK_TOOLS.includes(name) ? 300000 : WEB_TOOLS.includes(name) ? 120000 : 60000);
-/** Budgets of the steps before the model runs: the thread summary (compaction) and an escalation's recap. */
-const SUMMARY_MS = { local: 150000, claude: 120000 };
-const RECAP_MS = 60000;
+/** Budget of the step before the model runs: the thread summary (compaction). */
+const SUMMARY_MS = 120000;
 const HEARTBEAT_MS = 10000;
-/** Tools whose success means the turn did its job even without text (no local retry after them: no duplicates). */
+/** Tools whose success means the turn did its job even without text. */
 const ACTION_TOOLS = new Set(["create_card", "ask_question", "ask_questions", "propose_link", "merge_cards", "propose_edit", "propose_organize", "remember", "forget", "escalate_artifact", "propose_artifact"]);
 
-function newTurn(msg, { local, artifact, model }) {
+function newTurn(msg, { artifact, model }) {
   const now = Date.now();
   return {
     id: msg.id,
-    local: !!local,
     artifact: !!artifact,
     model,
-    numCtx: Number(msg.local?.numCtx) || null,
     userText: msg.text,
     startedAt: now,
     phase: "prep",
@@ -1865,23 +1584,19 @@ function newTurn(msg, { local, artifact, model }) {
     ended: false,
     endReason: null,
     s: null,
-    attempt: 1,
     limits: makeLimits(msg.text, !!artifact),
     waits: new Map(),
     userWait: 0,
     text: "",
     questionAsked: false,
-    visionBlocked: false,
     escalatedArtifact: false,
     pendingFull: null,
-    retryFull: null,
     retryModel: null,
     retried: false,
     retriedFrom: null,
     tier: null,
     lastInput: null,
     prepQuery: null,
-    diag: { maxEstTokens: 0, sentChars: 0 },
   };
 }
 
@@ -1917,7 +1632,7 @@ function turnDeadline(t) {
       ? Math.max(t.prepUntil, t.lastAt + IDLE_MS)
       : t.firstModelAt
         ? t.lastAt + IDLE_MS
-        : t.modelStartedAt + (t.local ? FIRST_EVENT_MS.local : FIRST_EVENT_MS.claude);
+        : t.modelStartedAt + FIRST_EVENT_MS;
   for (const until of t.waits.values()) d = Math.max(d, until);
   const tr = t.s?.tracker?.turn === t ? t.s.tracker : null;
   for (const st of tr?.running() ?? []) d = Math.max(d, st.startedAt + toolLimitMs(st.tool));
@@ -1928,7 +1643,7 @@ const stallWhy = (t) =>
   t.phase === "prep"
     ? "the thread summary took too long"
     : !t.firstModelAt
-      ? `no reply from the ${t.local ? "local model" : "model"} within ${Math.round((t.local ? FIRST_EVENT_MS.local : FIRST_EVENT_MS.claude) / 1000)}s`
+      ? `no reply from the model within ${Math.round(FIRST_EVENT_MS / 1000)}s`
       : `no activity for ${Math.round(IDLE_MS / 1000)}s`;
 
 // The watchdog: one tick a second over the turn the UI waits for. A heartbeat (not activity) tells
@@ -1939,8 +1654,7 @@ setInterval(() => {
   const now = Date.now();
   if (now > turnDeadline(t)) {
     dlog(`turn_stall turn=${t.id} phase=${t.phase} why="${stallWhy(t)}" last=${t.lastType}@${t.lastAt - t.startedAt}ms`);
-    const msg = t.local ? `The local model stopped responding (${stallWhy(t)}).` : `Claude stopped responding (${stallWhy(t)}). Retry to send it again.`;
-    failTurn(t, "stalled", msg);
+    failTurn(t, "stalled", `Claude stopped responding (${stallWhy(t)}). Retry to send it again.`);
     return;
   }
   if (now - (t.aliveAt ?? t.startedAt) >= HEARTBEAT_MS) {
@@ -1955,8 +1669,8 @@ function logTurnEnd(t, reason) {
   const tools = (tr?.toolLog() ?? []).map((x) => `${x.tool}:${x.ms}ms:${x.status}`).join(",");
   const ttfe = t.firstModelAt ? t.firstModelAt - t.modelStartedAt : -1;
   dlog(
-    `turn_end turn=${t.id} backend=${t.local ? "local" : "claude"} model=${t.model ?? "-"} reason=${reason} attempt=${t.attempt} ` +
-      `est_prompt_tokens=${t.diag.maxEstTokens || estTokens(t.diag.sentChars)} num_ctx=${t.numCtx ?? "-"} ttfe_ms=${ttfe} ` +
+    `turn_end turn=${t.id} model=${t.model ?? "-"} reason=${reason} ` +
+      `ttfe_ms=${ttfe} ` +
       `last_event=${t.lastType}@${t.lastAt - t.startedAt}ms dur_ms=${Date.now() - t.startedAt} tools=[${tools}]`,
   );
 }
@@ -1976,29 +1690,20 @@ function markEnded(t, reason) {
 }
 
 /**
- * The turn failed (`reason`: error | empty | stalled | limit). A local turn that has not done
- * anything yet gets ONE automatic retry in a fresh local session; after that (or on Claude) it ends
- * with a clear reason. Never an automatic Claude call: "Retry with Claude" is the user's click.
+ * The turn failed (`reason`: error | empty | stalled | limit | tool). It ends with a clear reason;
+ * retrying is the user's click.
  */
-function failTurn(t, reason, message, { noRetry = false } = {}) {
+function failTurn(t, reason, message) {
   if (!t || t.ended) return;
   const s = t.s;
   const tr = s?.tracker?.turn === t ? s.tracker : null;
   // A second real tool error: the model is fine, its call is not. Keep the session and its history.
-  const keep = reason === "tool";
   if (s && !s.closed) {
-    if (keep) settle(s, t);
+    if (reason === "tool") settle(s, t);
     else closeSession(s, reason);
   }
-  if (t.local && !noRetry && !keep && t.attempt === 1 && (tr?.actions() ?? 0) === 0 && s) return localRetry(t, reason, s);
   tr?.finish(true);
-  const fallback = reason === "stalled" ? "stalled" : reason === "empty" ? "empty" : reason === "limit" || reason === "tool" ? "tool" : "error";
-  if (t.local) {
-    // The session id goes back too, so the thread's next turn resumes the session that has its history.
-    emit(t, { type: "message_done", text: message, isError: true, backend: "local", model: t.model ?? undefined, fallback, endReason: reason, attempt: t.attempt, ...(s?.sessionId && t.attempt === 1 ? { sessionId: s.sessionId } : {}), ...(t.attempt > 1 ? { localRetried: true } : {}), durationMs: Date.now() - t.startedAt });
-  } else {
-    emit(t, { type: "error", message, endReason: reason });
-  }
+  emit(t, { type: "error", message, endReason: reason });
   markEnded(t, reason);
 }
 
@@ -2022,44 +1727,6 @@ function endTurnEarly(s, t, why) {
   if (!s.closed) settle(s, t);
 }
 
-/** A local turn's second real tool error (malformed args, unknown tool) fails it: one repair per turn. */
-function checkRepairs(s, t) {
-  const tr = s.tracker?.turn === t ? s.tracker : null;
-  if (t.local && !t.ended && (tr?.toolErrors() ?? 0) >= 2) failTurn(t, "tool", "The local model made two invalid tool calls in a row.");
-}
-
-const RETRY_LABEL = { error: "it failed", empty: "it came back empty", stalled: "it stopped responding", limit: "it looped on tools" };
-
-/** The local turn's one automatic retry: a fresh session (no resume), the full context plus the last messages. */
-function localRetry(t, reason, old) {
-  dlog(`local_retry turn=${t.id} reason=${reason} after_ms=${Date.now() - t.startedAt}`);
-  t.attempt = 2;
-  t.text = "";
-  t.questionAsked = false;
-  t.visionBlocked = false;
-  t.waits.clear();
-  t.limits = makeLimits(t.userText, false);
-  t.phase = "model";
-  t.modelStartedAt = Date.now();
-  t.firstModelAt = 0;
-  emit(t, { type: "text_reset" });
-  const at = Date.now();
-  emit(t, { type: "step", step: { sid: "local_retry", kind: "tool", tool: "local_retry", label: `Retried locally in a fresh session (${RETRY_LABEL[reason] ?? reason})`, status: "done", startedAt: at, endedAt: at } });
-  emit(t, { type: "model_note", model: t.model, localRetry: true, reason });
-  let s;
-  try {
-    s = openSession(old.key, null, old.model, false, old.local, null);
-  } catch (e) {
-    return failTurn(t, "error", `The local model could not start again: ${e?.message ?? e}`, { noRetry: true });
-  }
-  s.web = false;
-  s.escalated = false;
-  attach(t, s);
-  const replay = t.retryFull ?? t.pendingFull;
-  s.pending = replay;
-  s.turns.push(replay);
-}
-
 /** A saved session that can't be resumed (deleted, expired): start the thread afresh and replay the turn. */
 function restartFresh(s) {
   const t = s.turn;
@@ -2068,18 +1735,16 @@ function restartFresh(s) {
   if (!t || t.ended || t.s !== s) return;
   let fresh;
   try {
-    fresh = openSession(s.key, null, s.model, s.think, s.local, s.artifact);
+    fresh = openSession(s.key, null, s.model, s.think, s.artifact);
   } catch (e) {
     console.error(`[sidecar] could not start a fresh session after a failed resume: ${e?.stack ?? e}`);
-    return failTurn(t, "error", `Claude could not start a new session: ${e?.message ?? e}`, { noRetry: true });
+    return failTurn(t, "error", `Claude could not start a new session: ${e?.message ?? e}`);
   }
   fresh.web = s.web;
-  fresh.escalated = s.escalated;
   attach(t, fresh);
-  // A fresh session knows nothing: replay the waiting turn with the full context (local: plus the
-  // thread's visible history, the same text the automatic local retry gets).
-  dlog(`session_restart_replay turn=${t.id} sent=${s.local && t.retryFull ? "retryText" : "fullText"}`);
-  const replay = (s.local ? t.retryFull : null) ?? t.pendingFull ?? s.pending;
+  // A fresh session knows nothing: replay the waiting turn with the full context.
+  dlog(`session_restart_replay turn=${t.id} sent=fullText`);
+  const replay = t.pendingFull ?? s.pending;
   fresh.pending = replay;
   fresh.turns.push(replay);
 }
@@ -2093,17 +1758,6 @@ function shouldRetryOnMain(t, msg) {
   const answer = (msg.subtype === "success" ? msg.result : t.text) ?? "";
   const empty = !String(answer).trim();
   return empty || (t.limits.hit && String(answer).trim().length < 40);
-}
-
-/** Why a local turn needs "Retry with Claude", or null when it went fine. */
-function localFallback(t, msg, text, tr) {
-  if (!t.local) return null;
-  if (msg.is_error) return "error";
-  if (t.visionBlocked) return "vision";
-  const errors = tr?.toolErrors() ?? 0;
-  if (errors >= 2 || (errors === 1 && !tr.repaired())) return "tool";
-  if (!t.questionAsked && !String(text ?? "").trim() && (tr?.actions() ?? 0) === 0) return "empty";
-  return null;
 }
 
 function retryOnMain(s, t) {
@@ -2142,22 +1796,15 @@ function checkSpritecook(s, init, t) {
 function finishTurn(s, t, msg) {
   const tr = s.tracker?.turn === t ? s.tracker : null;
   const text = t.questionAsked && !msg.is_error ? "" : msg.subtype === "success" ? msg.result : t.text;
-  const fallback = localFallback(t, msg, text, tr);
-  // A local error or empty reply that did nothing yet: one fresh local retry.
-  if (t.local && (fallback === "error" || fallback === "empty") && t.attempt === 1 && (tr?.actions() ?? 0) === 0) {
-    return failTurn(t, fallback, "");
-  }
   tr?.finish(msg.is_error);
   const usage = tr?.hasUsage() ? tr.usage() : fromApiUsage(msg.usage);
   dlog(`turn_done turn=${t.id} calls=${msg.num_turns} sum_input=${usage.input} sum_cacheRead=${usage.cacheRead} sum_cacheCreate=${usage.cacheCreate} output=${usage.output} lastCallContext=${tr?.contextTokens?.() ?? 0} answerChars=${String(text).length}`);
   const u = msg.usage ?? {};
   const contextTokens = (tr?.hasUsage() && tr.contextTokens()) || t.lastInput || (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0);
-  if (fallback) dlog(`local_fallback turn=${t.id} reason=${fallback}`);
-  const endReason = msg.is_error ? "error" : fallback === "empty" ? "empty" : "done";
-  const failedText = t.local && msg.is_error && !String(text ?? "").trim() ? `The local model failed${t.attempt > 1 ? " twice" : ""}${msg.subtype && msg.subtype !== "success" ? ` (${msg.subtype})` : ""}.` : text;
+  const endReason = msg.is_error ? "error" : "done";
   emit(t, {
     type: "message_done",
-    text: failedText,
+    text,
     sessionId: msg.session_id,
     isError: msg.is_error,
     inputTokens: contextTokens,
@@ -2167,12 +1814,7 @@ function finishTurn(s, t, msg) {
     // background calls (Haiku), so its first key is not reliably the answering model.
     model: s.model || Object.keys(msg.modelUsage ?? {})[0] || undefined,
     tier: t.tier ?? undefined,
-    backend: s.local ? "local" : "claude",
-    ...(s.escalated ? { escalated: true } : {}),
-    ...(fallback ? { fallback } : {}),
     endReason,
-    attempt: t.attempt,
-    ...(t.attempt > 1 ? { localRetried: true } : {}),
     ...(s.artifact ? { artifact: { id: s.artifact.id, credits: s.credits?.spent ?? 0, paidCalls: s.credits?.calls ?? 0, jobs: s.credits?.jobs ?? [], spritecook: s.spritecookOk !== false } } : {}),
     ...(t.retried ? { retried: true, retriedFrom: t.retriedFrom } : {}),
     contextTokens,
@@ -2180,8 +1822,6 @@ function finishTurn(s, t, msg) {
   });
   markEnded(t, endReason);
   s.web = false;
-  // An escalation is one turn: its session is not resumed, the thread goes back to local.
-  if (s.escalated) closeSession(s);
 }
 
 function pump(s) {
@@ -2220,7 +1860,6 @@ function pump(s) {
           }
           s.tracker.on(msg);
           if (msg.type === "user" && t.questionAsked && s.tracker.asked()) endTurnEarly(s, t, "question");
-          else if (msg.type === "user") checkRepairs(s, t);
         }
         if (msg.type === "stream_event" && msg.event?.type === "content_block_delta" && msg.event.delta?.type === "text_delta") {
           s.answered = true;
@@ -2268,7 +1907,7 @@ function pump(s) {
         const t = s.turn;
         if (t && !t.ended && t.s === s) {
           console.error(`[sidecar] Claude session ended without a result`);
-          failTurn(t, "error", t.local ? "The local model's session stopped without answering." : "Claude Code stopped without answering. Retry to start a new session.");
+          failTurn(t, "error", "Claude Code stopped without answering. Retry to start a new session.");
         }
       }
     } catch (e) {
@@ -2288,7 +1927,7 @@ function pump(s) {
     // Anything thrown by the recovery itself must not leave the turn pending.
     console.error(`[sidecar] pump failed: ${e?.stack ?? e}`);
     const t = s.turn;
-    if (t && !t.ended) failTurn(t, "error", `Claude stopped unexpectedly: ${e?.message ?? e}`, { noRetry: true });
+    if (t && !t.ended) failTurn(t, "error", `Claude stopped unexpectedly: ${e?.message ?? e}`);
   });
 }
 
@@ -2305,23 +1944,12 @@ const HANDOFF_BASE = [
   "Tools: list_cards lists the cards in scope (id, kind, title, stage, role, frame, unconfirmed, image and clip " +
     "counts); read_card returns one card in full (body, fields, checklist items, links, attachments with their " +
     "asset file names); view_attachment shows an image or returns a web clip's saved text. Only cards in scope can " +
-    "be read. Stage order: Mist (raw, unconfirmed) < Reverie < Lucid < Dream (settled) < Built (already built in the repo; list_cards says whether it is built, partly built or needs a rebuild because its design changed since). The card with role 'tech' " +
-    "is the Tech & constraints card; role 'decisions' is the Project decisions card (answers the user gave to " +
-    "close gaps; treat them as settled). When the task message includes the project memory (memory.md), it is a " +
+    "be read. Stage order: Mist (raw, unconfirmed) < Reverie < Lucid < Dream (settled) < Built (already built in the repo). The card with role 'tech' " +
+    "is the Tech & constraints card; role 'decisions' is the Project decisions card (answers the user gave; " +
+    "treat them as settled). When the task message includes the project memory (memory.md), it is a " +
     "primary source: its Decisions and Rejected lines are the user's own confirmed choices and are authoritative over " +
     "Mist cards; a rejected idea is never a feature.",
 ];
-
-const GAP_SYSTEM = [
-  ...HANDOFF_BASE,
-  "Job: gap check before the design docs are written. Read every card in scope with read_card (look at images " +
-    "only when a card's text depends on them). Then judge each checklist item from the task message: 'ok' = clearly " +
-    "decided in the cards; 'thin' = mentioned but vague, contradictory, or only in unconfirmed Mist cards; " +
-    "'missing' = not covered. 'platform & tech' is judged mainly from the Tech card. 'monetization' is ok when the " +
-    "cards say there is none. Call report_gaps exactly once, with one entry per checklist item, in order, using " +
-    "the exact item names; each note is one short sentence saying what is there or what is needed. Then end with " +
-    "one short sentence. Do not invent anything the cards do not say.",
-].join("\n\n");
 
 const GEN_SYSTEM = [
   ...HANDOFF_BASE,
@@ -2329,10 +1957,10 @@ const GEN_SYSTEM = [
     "list_cards; read_card on every card in scope; view_attachment on every image (and every clip that has an " +
     "excerpt); then write each doc with write_design_doc(name, markdown), one call per file. Call report_progress " +
     "with a short note when you move to a new phase. Use only these file names: 00-overview.md, 01-gdd.md, " +
-    "02-tech-design.md, 03-roadmap.md, 04-open-questions.md, 05-assets.md, CLAUDE.md, CHANGELOG.md.",
+    "02-tech-design.md, 03-roadmap.md, 04-open-questions.md, 05-assets.md, CLAUDE.md.",
   "Source of truth: the cards in scope. Never invent features, mechanics, numbers or story. Mist cards are " +
     "unconfirmed: never present them as decisions; collect them in a section 'Ideas under consideration' (in " +
-    "01-gdd.md, or the doc they fit best). Anything undecided, and every gap listed in the task message, becomes an " +
+    "01-gdd.md, or the doc they fit best). Anything undecided becomes an " +
     "explicit 'TBD:' item where it belongs and is listed in 04-open-questions.md (question, why it matters, which " +
     "cards touch it). When cards contradict each other, say so and list it as an open question.",
   "00-overview.md: one page: the pitch in two sentences, core experience, target player, pillars, what makes it " +
@@ -2340,7 +1968,7 @@ const GEN_SYSTEM = [
     "names as grouping hints for its sections, but reorganize when a clearer structure exists (core loop, " +
     "mechanics, progression, setting & tone, art direction, audio direction, UI, content). Cite card titles in " +
     "parentheses where a section rests on a card. A Built card is an existing feature: describe it as such and " +
-    "mark it 'Built' (or 'Built, needs rebuild' / 'Partly built' as list_cards says).",
+    "mark it 'Built'.",
   "Images: every image in scope must appear in the most relevant doc, embedded exactly as " +
     "![caption](assets/<file>) using the asset file name read_card gave, followed by 1-2 sentences on what it " +
     "shows and why it matters for the design (based on what you saw, not only the caption). Web clips: in " +
@@ -2354,62 +1982,15 @@ const GEN_SYSTEM = [
     "...). Each milestone is a list of tasks. Each task: '- [ ] M1-T3: <goal>', then indented lines: 'Acceptance:' " +
     "(checkable criteria), 'Relies on:' (doc#section references, e.g. 01-gdd.md#core-loop), 'Size: one Claude Code " +
     "session'. Tasks are small enough for one session each and ordered so each builds on the previous ones. " +
-    "Cards that are already Built are existing features: do not plan tasks for them. Exception: a card marked " +
-    "'needs rebuild' (its design changed after it was built) or 'partly built' becomes a change task that says what " +
-    "differs, with its card id in the task text.",
+    "Cards that are already Built are existing features: do not plan tasks for them.",
   "CLAUDE.md: under 60 lines. What the project is (2 lines). Where the docs are: docs/design/ (list the files). " +
     "Build order: follow docs/design/03-roadmap.md task by task, starting at the first unchecked task, and check it " +
-    "off when done. Rules: do not invent design; when a design question blocks you, append it to " +
-    "docs/design/QUESTIONS.md as '- [ ] Q (task id): question — context', pick the most conservative option and " +
-    "continue; commit once per task with the task id in the message. Build status: after finishing work for a card, " +
-    "update docs/design/STATUS.md (keep its first two lines; one '## <card id> · <title>' section per card with " +
-    "'status: in-progress|built|partial|blocked', and where they apply 'task:', 'commits:', 'files:' (repo-relative), " +
-    "'evidence:' and a one-line 'notes:'; take card ids from the task file or .dreamer/link.json). A feature you build " +
-    "that has no card goes in as '## new · <title>' with status, files and a note on what it is and why it was added. " +
-    "Put screenshots and GIFs you produce in docs/design/evidence/. When a commit belongs to exactly one card, start " +
-    "its message with [dreamer:<card id>].",
-  "CHANGELOG.md: follow the task message (first version: a '## v1' section saying 'Initial version').",
+    "off when done. Rules: do not invent design; when a design question blocks you, pick the most conservative option and " +
+    "continue; commit once per task with the task id in the message. Put screenshots and GIFs you produce in " +
+    "docs/design/evidence/.",
   "Write complete documents in clean Markdown (headings, lists, tables where useful). When every file is written, " +
     "end your turn with one short sentence.",
 ].join("\n\n");
-
-const TASK_SYSTEM = [
-  ...HANDOFF_BASE,
-  "Job: write a build task for Claude Code from the cards in scope. list_cards tells which cards to build " +
-    "('task_role: build') and which are only context ('context, not to build'): read the context cards, but never " +
-    "list them as work; say in the task only what they mean for the cards to build. read_design_doc(name) returns a " +
-    "doc of the latest design revision of the open version, when there is one; use it to align with decisions, " +
-    "never to add scope. Read every card to build with read_card and look at every image (view_attachment). Then " +
-    "call write_task(markdown, meta) exactly once, and end with one short sentence.",
-  "Source of truth: the cards. Never invent features, mechanics, numbers or story. The task must stand alone: " +
-    "Claude Code reads only this file, the repo's CLAUDE.md and docs/design/. Sections, in this order, as '## ' headings: " +
-    "1. Goal (2-3 lines). 2. Context: pointers to the repo's CLAUDE.md and docs/design/ files, only those the task " +
-    "message says exist. 3. What to build: one '### <card title> (<card id>)' subsection per card: what it is, the " +
-    "behaviour, edge cases, assets referenced (embed none; name the files as read_card gave them). 4. Acceptance " +
-    "criteria: checkable bullets per card. 5. Out of scope. 6. Report back: update docs/design/STATUS.md (keep its " +
-    "first two lines; one '## <card id> · <title>' section per card with 'status: in-progress|built|partial|blocked', " +
-    "and 'task:', 'commits:', 'files:' (repo-relative), 'evidence:', a one-line 'notes:'); append design questions to " +
-    "docs/design/QUESTIONS.md as '- [ ] Q (task id): question — context', take the most conservative option and " +
-    "continue; commit once per logical step with '[dreamer:<card id>]' at the start of the message when the commit " +
-    "belongs to one card. Do not invent design.",
-  "Rebuild cards: the task message lists a placeholder like {{DIFF:<card id>}} per rebuild card. Put each on its own " +
-    "line, exactly as given, under a 'Design change since last build' heading inside that card's subsection of " +
-    "'What to build'. Never write the diff yourself. Write the change task around it (what differs, what to keep) and " +
-    "list the files from the card's build.files as the likely places to change.",
-  "Flags: in meta.flags, list each thin spot: a card for which no acceptance criteria can be written, cards that " +
-    "contradict each other, an asset a card refers to that is missing, a card outside the job this one needs. " +
-    "{ card_id?, text, question, choices, recommended, needs_card_id? }: text is one short sentence; card_id only when " +
-    "it is one card. question: a short question the user can answer to resolve it. choices: 2-4 concrete, mutually " +
-    "exclusive answers grounded in the cards and the project (never invented scope). recommended: the one you would " +
-    "pick, copied exactly from choices. needs_card_id: only when the thin spot is a missing dependency on a card that is " +
-    "not being built (its id from list_cards or the links). An empty list is fine; do not pad it. meta.title: a short imperative title. " +
-    "meta.card_ids: exactly the cards to build. Tone: formal, neutral, concise; no emoji.",
-].join("\n\n");
-
-const REVISE_SYSTEM =
-  "You revise a build prompt for Claude Code so it reflects the user's decisions. Edit only what the decisions " +
-  "affect (lines, acceptance criteria), remove statements they contradict, keep every other byte as it is. Never " +
-  "add scope. Call write_task(markdown, meta) exactly once with the full revised prompt, then end with one short sentence.";
 
 const oneshots = new Map();
 
@@ -2426,7 +2007,7 @@ function imageResult(args, r) {
   return text(`${head}\n\n${r.text}`);
 }
 
-function handoffTools(job, mode) {
+function handoffTools(job) {
   const call = (name, input) => requestTool(`handoff_${name}`, { ...input, job });
   const wrap = (fn) => async (args) => {
     try {
@@ -2444,74 +2025,34 @@ function handoffTools(job, mode) {
       { card_id: z.string(), attachment_id: z.string() },
       wrap(async (a) => imageResult(a, await call("view_attachment", a))),
     ),
+    tool(
+      "report_progress",
+      "Tell the user which phase you are in (shown in the progress panel).",
+      { step: z.string().describe("e.g. reading, viewing images, writing 01-gdd.md"), note: z.string() },
+      wrap(async (a) => text(await call("report_progress", a))),
+    ),
+    tool(
+      "write_design_doc",
+      "Save one design doc. name must be one of: 00-overview.md, 01-gdd.md, 02-tech-design.md, 03-roadmap.md, " +
+        "04-open-questions.md, 05-assets.md, CLAUDE.md. Writing the same name again replaces it.",
+      { name: z.string(), markdown: z.string() },
+      wrap(async (a) => text(await call("write_design_doc", a))),
+    ),
   ];
-  if (mode === "revise") return handoffTools(job, "task").filter((t) => t.name === "write_task");
-  if (mode === "task") {
-    tools.push(
-      tool("read_design_doc", "Read one doc of the latest design revision of the open version (e.g. 01-gdd.md), if there is one.", { name: z.string() }, wrap(async (a) => text(await call("read_design_doc", a)))),
-      tool(
-        "write_task",
-        "Save the finished task, once. markdown is the whole task; meta lists its title, the cards it builds and the thin spots.",
-        {
-          markdown: z.string(),
-          meta: z.object({
-            title: z.string(),
-            card_ids: z.array(z.string()),
-            flags: z.array(
-              z.object({
-                card_id: z.string().optional(),
-                text: z.string(),
-                question: z.string().optional(),
-                choices: z.array(z.string()).optional(),
-                recommended: z.string().optional(),
-                needs_card_id: z.string().optional(),
-              }),
-            ),
-          }),
-        },
-        wrap(async (a) => text(await call("write_task", a))),
-      ),
-    );
-  } else if (mode === "gaps") {
-    tools.push(
-      tool(
-        "report_gaps",
-        "Report the gap check result, once: one entry per checklist item.",
-        { gaps: z.array(z.object({ item: z.string(), status: z.enum(["ok", "thin", "missing"]), note: z.string() })) },
-        wrap(async (a) => text(await call("report_gaps", a))),
-      ),
-    );
-  } else {
-    tools.push(
-      tool(
-        "report_progress",
-        "Tell the user which phase you are in (shown in the progress panel).",
-        { step: z.string().describe("e.g. reading, viewing images, writing 01-gdd.md"), note: z.string() },
-        wrap(async (a) => text(await call("report_progress", a))),
-      ),
-      tool(
-        "write_design_doc",
-        "Save one design doc. name must be one of: 00-overview.md, 01-gdd.md, 02-tech-design.md, 03-roadmap.md, " +
-          "04-open-questions.md, 05-assets.md, CLAUDE.md, CHANGELOG.md. Writing the same name again replaces it.",
-        { name: z.string(), markdown: z.string() },
-        wrap(async (a) => text(await call("write_design_doc", a))),
-      ),
-    );
-  }
   return tools;
 }
 
 function startOneshot(msg) {
-  const { job, mode, prompt } = msg;
+  const { job, prompt } = msg;
   const model = typeof msg.model === "string" && msg.model ? msg.model : null;
-  const tools = handoffTools(job, mode);
+  const tools = handoffTools(job);
   const turns = makeTurnQueue();
   const entry = { q: null, turns, cancelled: false };
   oneshots.set(job, entry);
   entry.q = query({
     prompt: turns,
     options: {
-      systemPrompt: { type: "custom", prompt: mode === "gaps" ? GAP_SYSTEM : mode === "task" ? TASK_SYSTEM : mode === "revise" ? REVISE_SYSTEM : GEN_SYSTEM },
+      systemPrompt: { type: "custom", prompt: GEN_SYSTEM },
       allowedTools: tools.map((t) => `mcp__handoff__${t.name}`),
       // No built-in tools at all (no files, shell or web), and the user's own settings are ignored.
       // Every tool offered is in allowedTools, so no permission callback is needed.
@@ -2560,251 +2101,6 @@ function cancelOneshot(job) {
   } catch {
     /* already gone */
   }
-}
-
-// ---- Repo scan: one query in the linked repo (Read, Glob, Grep only) that ends in one emit_bundle ----
-
-const SCAN_SYSTEM = [
-  "You scan a code repository (your working directory) for Dreamer, a game-design idea app, and report what is " +
-    "ALREADY BUILT as cards in one .dreamer.md bundle. You can only Read, Glob and Grep. Skip .git, node_modules, " +
-    "build/, dist/, Library/, Intermediate/, Binaries/, .vs/ and third-party or vendor folders. Start with list_cards " +
-    "(the cards Dreamer already has, and its tags), then look at the repo (README, manifests, top-level layout, then the " +
-    "code that implements each feature). Call report_progress(note) now and then with a few words on what you are on. " +
-    "When done, call emit_bundle(markdown) exactly once, then end with one short sentence.",
-  "Find user-facing features and core systems, not files or classes: 'Harpoon dash', not 'PlayerController.cpp'. One card " +
-    "per feature. Every card has stage built and a build block. Never invent: the body says what exists and how it " +
-    "behaves, taken from the code. No plans, no ideas, no guesses; if you are unsure what something does, leave it out or " +
-    "mark the build status partial and say what is missing in build.notes. Titles are concrete and at most 60 characters.",
-  "If an existing card (from list_cards) describes the same feature, put its id in the card's id key: Dreamer shows " +
-    "it as an update proposal that adds the build info. Otherwise leave id out. Reuse the existing tags (lowercase, at " +
-    "most 4 per card). Put each card in a frame named for its area (the frame key), for example Combat, Fishing, UI.",
-  "Format (nothing before or after it):\n---\ndreamer_bundle: 1\nbundle_id: scan-<yyyy-mm-dd>\ntitle: Repo scan\n" +
-    "source: dreamer-scan\ncreated: <ISO time>\n---\n<!-- card -->\n---\nref: <unique-kebab-case>\nid: <existing card id, " +
-    "only to update>\ntitle: <title>\nstage: built\ntags: [a, b]\nframe: <Area>\nbuild:\n  status: built | partial\n  " +
-    "files: [<1-5 main repo-relative files>]\n  notes: <one line>\n---\n<markdown body>\n<!-- card -->\n...\n" +
-    "Never put <!-- card --> inside a body. Keep the card count within the limit you are given: when there are more " +
-    "features, keep the most important and merge small ones.",
-].join("\n\n");
-
-function scanTools(job) {
-  const call = (name, input) => requestTool(`scan_${name}`, { ...input, job });
-  const wrap = (fn) => async (args) => {
-    try {
-      return await fn(args);
-    } catch (e) {
-      return fail(e);
-    }
-  };
-  return [
-    tool("list_cards", "The cards Dreamer already has in the open version (id, title, stage, tags, frame) and every tag in use.", {}, wrap(async () => text(await call("list_cards", {})))),
-    tool("report_progress", "Tell the user what you are on (a few words, shown in the progress panel).", { note: z.string() }, wrap(async (a) => text(await call("report_progress", a)))),
-    tool("emit_bundle", "Hand over the finished bundle, once. A rejected bundle comes back with what to fix.", { markdown: z.string() }, wrap(async (a) => text(await call("emit_bundle", a)))),
-  ];
-}
-
-function startScan(msg) {
-  const { job, cwd, prompt } = msg;
-  const model = typeof msg.model === "string" && msg.model ? msg.model : null;
-  const tools = scanTools(job);
-  const turns = makeTurnQueue();
-  const entry = { q: null, turns, cancelled: false };
-  oneshots.set(job, entry);
-  try {
-    entry.q = query({
-      prompt: turns,
-      options: {
-        cwd,
-        systemPrompt: { type: "custom", prompt: SCAN_SYSTEM },
-        // Only these built-in tools exist; Rust's scan_permission also keeps them inside the repo.
-        tools: ["Read", "Glob", "Grep"],
-        allowedTools: tools.map((t) => `mcp__scan__${t.name}`),
-        canUseTool: async (toolName, input) => {
-          try {
-            const r = await requestTool("scan_permission", { job, tool: toolName, input }, 15000);
-            return r?.behavior === "allow" ? { behavior: "allow", updatedInput: input } : { behavior: "deny", message: r?.message || "Denied." };
-          } catch (e) {
-            return { behavior: "deny", message: `Dreamer could not check this tool call (${e?.message ?? e}).` };
-          }
-        },
-        permissionMode: "default",
-        settingSources: [],
-        maxTurns: 200,
-        mcpServers: { scan: createSdkMcpServer({ name: "scan", version: "1.0.0", tools }) },
-        includePartialMessages: true,
-        ...(model ? { model } : {}),
-      },
-    });
-  } catch (e) {
-    oneshots.delete(job);
-    send({ type: "scan_done", job, ok: false, error: `Claude could not start: ${e?.message ?? e}` });
-    return;
-  }
-  turns.push({ type: "user", message: { role: "user", content: [{ type: "text", text: prompt }] }, parent_tool_use_id: null });
-  const tracker = makeTracker((o) => !entry.cancelled && o.type === "step" && send({ type: "scan_step", job, step: o.step }));
-  (async () => {
-    let done = null;
-    try {
-      for await (const m of entry.q) {
-        tracker.on(m);
-        if (m.type === "result") {
-          tracker.finish(m.is_error);
-          done = m.subtype === "success" && !m.is_error ? { ok: true } : { ok: false, error: `Claude could not finish the scan (${m.subtype}${m.is_error && m.result ? `: ${m.result}` : ""}).` };
-          turns.end();
-        }
-      }
-    } catch (e) {
-      if (!done) done = { ok: false, error: e?.message ?? String(e) };
-    }
-    oneshots.delete(job);
-    if (entry.cancelled) done = { ok: false, cancelled: true, error: "Cancelled." };
-    send({ type: "scan_done", job, ...(done ?? { ok: false, error: "Claude stopped without a result." }) });
-  })();
-}
-
-// ---- Build runs: Claude Code works on a saved task inside the repo ----
-//
-// Its own query() per task: cwd = the repo, the claude_code system prompt and the repo's project
-// settings (CLAUDE.md, .claude/), the build model. Every tool call is gated by Rust: a PreToolUse
-// hook applies the always-deny rules before any settings rule can allow a call; canUseTool asks
-// Rust for the rest (auto-allow, or the user's answer in the Build panel). Own watchdog.
-
-const BUILD_LIMITS = {
-  first: Number(process.env.DREAMER_BUILD_FIRST_MS) || 120000,
-  idle: Number(process.env.DREAMER_BUILD_IDLE_MS) || 90000,
-  tool: Number(process.env.DREAMER_BUILD_TOOL_MS) || 600000,
-};
-/** A permission ask waits for the user as long as it takes (the watchdog pauses meanwhile). */
-const ASK_WAIT_MS = 7 * 24 * 3600 * 1000;
-const builds = new Map();
-
-function buildGate(run, entry, phase) {
-  return async (toolName, input) => {
-    entry.asking++;
-    try {
-      return await requestTool("build_permission", { run, tool: toolName, input, phase }, phase === "hook" ? 15000 : ASK_WAIT_MS);
-    } catch (e) {
-      return { behavior: "deny", message: `Dreamer could not check this tool call (${e?.message ?? e}).` };
-    } finally {
-      entry.asking--;
-      entry.lastAt = Date.now();
-    }
-  };
-}
-
-function startBuild(msg) {
-  const { run, cwd, prompt } = msg;
-  const model = typeof msg.model === "string" && msg.model ? msg.model : "sonnet";
-  const turns = makeTurnQueue();
-  const entry = { q: null, turns, child: null, sid: `b${run}`, startedAt: Date.now(), lastAt: Date.now(), first: false, asking: 0, ended: false, cancelled: false };
-  builds.set(run, entry);
-  const out = (o) => {
-    if (entry.ended) return;
-    entry.lastAt = Date.now();
-    const { type, ...rest } = o;
-    if (type === "step") send({ type: "build_step", run, step: rest.step });
-    else if (type === "usage") send({ type: "build_usage", run, ...rest });
-  };
-  const tracker = makeTracker(out, `build=${run}`);
-  const ask = buildGate(run, entry, "ask");
-  const hook = buildGate(run, entry, "hook");
-  const end = (r) => {
-    if (entry.ended) return;
-    entry.ended = true;
-    clearInterval(entry.timer);
-    builds.delete(run);
-    dlog(`build_end run=${run} ok=${!!r.ok} dur_ms=${Date.now() - entry.startedAt} tools=[${tracker.toolLog().map((x) => `${x.tool}:${x.ms}ms:${x.status}`).join(",")}]`);
-    send({ type: "build_done", run, ...r });
-  };
-  try {
-    entry.q = query({
-      prompt: turns,
-      options: {
-        cwd,
-        model,
-        systemPrompt: { type: "preset", preset: "claude_code" },
-        // The repo's own settings and CLAUDE.md; not the user's global ones.
-        settingSources: ["project", "local"],
-        permissionMode: "default",
-        canUseTool: async (toolName, input) => {
-          const r = await ask(toolName, input);
-          return r?.behavior === "allow" ? { behavior: "allow", updatedInput: input } : { behavior: "deny", message: r?.message || "Denied." };
-        },
-        hooks: {
-          PreToolUse: [
-            {
-              onFailure: "block",
-              hooks: [
-                async (h) => {
-                  const r = await hook(h.tool_name, h.tool_input);
-                  return r?.behavior === "deny" ? { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: r.message } } : {};
-                },
-              ],
-            },
-          ],
-        },
-        includePartialMessages: true,
-        env: { ...claudeEnv(), CLAUDE_CODE_MAX_RETRIES: "2", ENABLE_CLAUDEAI_MCP_SERVERS: "false" },
-        spawnClaudeCodeProcess: (opts) => spawner(entry)(opts),
-      },
-    });
-  } catch (e) {
-    end({ ok: false, error: `Claude Code could not start: ${e?.message ?? e}` });
-    return;
-  }
-  turns.push({ type: "user", message: { role: "user", content: [{ type: "text", text: prompt }] }, parent_tool_use_id: null });
-  // Watchdog: first event, then between events; a running tool keeps its own limit; an ask pauses it.
-  entry.timer = setInterval(() => {
-    if (entry.ended || entry.asking > 0) return;
-    const running = tracker.running();
-    const limit = running.length ? BUILD_LIMITS.tool : entry.first ? BUILD_LIMITS.idle : BUILD_LIMITS.first;
-    const since = running.length ? Math.max(entry.lastAt, ...running.map((x) => x.startedAt)) : entry.lastAt;
-    if (Date.now() - since > limit) {
-      const why = running.length ? `a tool ran for over ${limit / 60000} min` : entry.first ? `no activity for ${limit / 1000}s` : `no reply within ${limit / 1000}s`;
-      stopBuild(run, "stalled");
-      end({ ok: false, stalled: true, error: `Claude stopped responding (${why}).` });
-    }
-  }, 1000);
-  entry.timer.unref?.();
-  (async () => {
-    let done = null;
-    try {
-      for await (const m of entry.q) {
-        if (entry.ended) break;
-        entry.lastAt = Date.now();
-        if (m.type === "stream_event" || m.type === "assistant") entry.first = true;
-        tracker.on(m);
-        if (m.type === "assistant" && !m.parent_tool_use_id) {
-          const t = (m.message?.content ?? []).filter((b) => b?.type === "text").map((b) => b.text).join("").trim();
-          if (t) send({ type: "build_text", run, text: t });
-        }
-        if (m.type === "result") {
-          tracker.finish(m.is_error);
-          done = m.subtype === "success" && !m.is_error ? { ok: true } : { ok: false, error: `Claude Code could not finish (${m.subtype}${m.is_error && m.result ? `: ${m.result}` : ""}).` };
-          turns.end();
-        }
-      }
-    } catch (e) {
-      if (!done) done = { ok: false, error: e?.message ?? String(e) };
-    }
-    if (entry.cancelled) done = { ok: false, cancelled: true, error: "Interrupted." };
-    end(done ?? { ok: false, error: "Claude Code stopped without a result." });
-  })();
-}
-
-/** Stops a build session for sure: interrupt, close, kill its Claude Code process tree. */
-function stopBuild(run, why) {
-  const entry = builds.get(run);
-  if (!entry) return;
-  if (why === "cancel") entry.cancelled = true;
-  entry.q?.interrupt?.().catch(() => {});
-  entry.turns.end();
-  try {
-    entry.q?.close?.();
-  } catch {
-    /* already gone */
-  }
-  dlog(`build_stop run=${run} why=${why}`);
-  killChild(entry);
 }
 
 // ---- Memory passes: one query per chat turn (update) or per new project (seed) ----
@@ -2916,22 +2212,11 @@ const SUMMARY_SYSTEM =
   "Write at most 250 words, plain text, terse, no preamble: what the thread is about, decisions made, open " +
   "questions, current state. Name cards by title. Do not add anything the conversation does not say.";
 
-const RECAP_SLOT = "{{RECAP}}";
-
-const RECAP_SYSTEM =
-  "You write a short recap of a conversation between a user and an assistant about game ideas. Another, " +
-  "stronger assistant will answer the user's next message from your recap plus the last few messages. " +
-  "At most 150 words, plain text, terse, no preamble: the topic, what was decided, which cards were " +
-  "discussed (by title), and what the user is trying to do now. Do not add anything the conversation does not say.";
-
 /**
  * One-shot summary of a thread's transcript: its own query, no tools. Null on failure or when it
- * runs past `timeoutMs` (it is then cut: a slow or wedged local model must never hold the turn,
- * least of all a Claude turn waiting for its recap). `local` = {baseUrl} runs it on the local model
- * through Ollama (a local thread's compaction, an escalation's recap). `turn`: stopping that turn
- * stops this too.
+ * runs past `timeoutMs` (it is then cut). `turn`: stopping that turn stops this too.
  */
-async function summarize({ transcript, model, local }, tracker, system = SUMMARY_SYSTEM, { timeoutMs = 120000, turn = null } = {}) {
+async function summarize({ transcript, model }, tracker, { timeoutMs = SUMMARY_MS, turn = null } = {}) {
   const sid = `sum${++sessionSeq}`;
   let q = null;
   let timedOut = false;
@@ -2942,12 +2227,11 @@ async function summarize({ transcript, model, local }, tracker, system = SUMMARY
     } catch {
       /* gone */
     }
-    proxyAbort(sid);
     killChild({ sid, child });
   };
   const timer = setTimeout(() => {
     timedOut = true;
-    dlog(`summary_timeout turn=${turn?.id ?? "-"} after_ms=${timeoutMs} local=${!!local}`);
+    dlog(`summary_timeout turn=${turn?.id ?? "-"} after_ms=${timeoutMs}`);
     stop();
   }, timeoutMs);
   if (turn) turn.prepQuery = { close: stop };
@@ -2957,9 +2241,9 @@ async function summarize({ transcript, model, local }, tracker, system = SUMMARY
 
 ${transcript}
 
-${system === RECAP_SYSTEM ? "Recap it." : "Summarize it."}`,
+Summarize it.`,
       options: {
-        systemPrompt: { type: "custom", prompt: system },
+        systemPrompt: { type: "custom", prompt: SUMMARY_SYSTEM },
         tools: [],
         allowedTools: [],
         permissionMode: "default",
@@ -2968,7 +2252,6 @@ ${system === RECAP_SYSTEM ? "Recap it." : "Summarize it."}`,
         includePartialMessages: true,
         spawnClaudeCodeProcess: (opts) => (child = spawner({ sid })(opts)),
         ...(model ? { model } : {}),
-        ...(local ? { env: localEnv(proxyUrl(sid, FAKE_LOCAL_URL || local.baseUrl), model) } : { env: claudeEnv() }),
       },
     });
     let out = null;
@@ -2983,17 +2266,13 @@ ${system === RECAP_SYSTEM ? "Recap it." : "Summarize it."}`,
   } finally {
     clearTimeout(timer);
     if (turn?.prepQuery?.close === stop) turn.prepQuery = null;
-    proxyAbort(sid);
   }
 }
 
 async function handleUserMessage(msg) {
-  const local = msg.backend === "local" && msg.local?.baseUrl ? { baseUrl: msg.local.baseUrl, vision: !!msg.local.vision } : null;
-  const escalated = !local && msg.escalated === true;
-  const key = sessionKey(msg.thread || "default", local ? "local" : "claude", escalated);
+  const key = msg.thread || "default";
   const model = typeof msg.model === "string" && msg.model ? msg.model : null;
-  const artifact = !local && msg.artifact?.id ? { id: String(msg.artifact.id), cap: Number(msg.artifact.cap) || DEFAULT_CREDIT_CAP } : null;
-  await proxyReady;
+  const artifact = msg.artifact?.id ? { id: String(msg.artifact.id), cap: Number(msg.artifact.cap) || DEFAULT_CREDIT_CAP } : null;
   // The UI sends one turn at a time; a new one while another runs means the UI gave up on that one.
   if (current && !current.ended) {
     const old = current;
@@ -3002,17 +2281,12 @@ async function handleUserMessage(msg) {
     sendRaw({ type: "turn_ended", id: old.id, reason: "superseded" });
     if (old.s && !old.s.closed && old.s.busy) closeSession(old.s, "superseded");
   }
-  const t = newTurn(msg, { local, artifact, model });
+  const t = newTurn(msg, { artifact, model });
   current = t;
-  // A handoff gap interview lasts until another command starts in that thread.
-  const thread = msg.thread || "default";
-  if (/^\/grill-me handoff/.test(msg.text ?? "")) gapThreads.add(thread);
-  else if (/^\//.test(msg.text ?? "")) gapThreads.delete(thread);
-  // Likewise a checklist grill.
+  const thread = key;
+  // A checklist grill lasts until another command starts in that thread.
   if (/^\/grill-me checklist/.test(msg.text ?? "")) checklistThreads.add(thread);
   else if (/^\//.test(msg.text ?? "")) checklistThreads.delete(thread);
-  // An escalation always starts fresh (a leftover from an interrupted one is dropped).
-  if (escalated && sessions.get(key)) closeSession(sessions.get(key));
   let s = sessions.get(key);
   let resume = msg.resume;
   // Still answering an earlier turn (stopped, or wedged): never queue behind it. Close that
@@ -3025,46 +2299,29 @@ async function handleUserMessage(msg) {
   }
   const sessionWasLive = !!s;
   let fullText = msg.fullText ?? msg.text;
-  let retryText = typeof msg.retryText === "string" ? msg.retryText : null;
   let useFull = !s && !resume;
   if (msg.compact) {
     // Shown as the turn's first step, with its own token count.
-    const budget = local ? SUMMARY_MS.local : SUMMARY_MS.claude;
-    t.prepUntil = Date.now() + budget + 5000;
+    t.prepUntil = Date.now() + SUMMARY_MS + 5000;
     const step = { sid: "compact", kind: "tool", tool: "compact", label: "Summarizing earlier messages…", status: "running", startedAt: Date.now() };
     emit(t, { type: "step", step });
     const tracker = makeTracker((o) => o.type === "usage" && emit(t, { ...o, phase: "compact" }));
-    const summary = await summarize({ ...msg.compact, local: msg.compact.local ? local : null }, tracker, SUMMARY_SYSTEM, { timeoutMs: budget, turn: t });
+    const summary = await summarize(msg.compact, tracker, { turn: t });
     if (t.ended) return;
     emit(t, { type: "step", step: { ...step, label: summary ? "Summarized earlier messages" : "Could not summarize earlier messages", status: summary ? "done" : "error", endedAt: Date.now() } });
     if (summary) {
-      emit(t, { type: "compacted", summary, backend: local ? "local" : "claude" });
+      emit(t, { type: "compacted", summary });
       if (s) closeSession(s);
       s = undefined;
       resume = null;
       useFull = true;
       fullText = fullText.replace(SUMMARY_SLOT, summary);
-      retryText = retryText?.replace(SUMMARY_SLOT, summary) ?? null;
     } else {
       fullText = fullText.replace(SUMMARY_SLOT, "(summary unavailable)");
-      retryText = retryText?.replace(SUMMARY_SLOT, "(summary unavailable)") ?? null;
     }
   }
-  if (msg.recap && fullText.includes(RECAP_SLOT)) {
-    // The local model recaps the thread for Claude (free); Claude gets the recap, not the transcript.
-    // Best effort, on a short budget: a slow local model must never hold up the Claude turn.
-    t.prepUntil = Date.now() + RECAP_MS + 5000;
-    const step = { sid: "recap", kind: "tool", tool: "recap", label: "Recapping the thread (local model)…", status: "running", startedAt: Date.now() };
-    emit(t, { type: "step", step });
-    const baseUrl = typeof msg.recap.baseUrl === "string" ? msg.recap.baseUrl : "http://localhost:11434";
-    const recap = await summarize({ transcript: msg.recap.transcript, model: msg.recap.model, local: { baseUrl } }, null, RECAP_SYSTEM, { timeoutMs: RECAP_MS, turn: t });
-    if (t.ended) return;
-    emit(t, { type: "step", step: { ...step, label: recap ? "Recapped the thread (local model)" : "No recap (the local model was too slow); using the last messages", status: recap ? "done" : "error", endedAt: Date.now() } });
-    fullText = fullText.replace(RECAP_SLOT, recap ?? "(recap unavailable; see the last messages below)");
-    if (!useFull) msg.text = fullText;
-  }
   if (t.ended) return;
-  const think = msg.think === true && !local;
+  const think = msg.think === true;
   // The thread's session was opened for the other mode (chat vs artifact) or is gone: reopen it.
   s = s && !s.closed ? s : sessions.get(key);
   if (s && (s.closed || s.busy)) s = undefined;
@@ -3072,9 +2329,8 @@ async function handleUserMessage(msg) {
     closeSession(s);
     s = undefined;
   }
-  s = s ?? openSession(key, resume, model, think, local, artifact);
+  s = s ?? openSession(key, resume, model, think, artifact);
   if (artifact) s.artifact = artifact;
-  s.escalated = escalated;
   // The router (or a pin) picked another model than the session runs: switch it for this turn.
   if (model && s.model !== model) {
     s.model = model;
@@ -3091,14 +2347,12 @@ async function handleUserMessage(msg) {
   s.credits = { calls: 0, units: 0, spent: 0, jobs: [], allowed: artifact?.cap ?? 0 };
   const turn = (x) => ({ type: "user", message: { role: "user", content: [{ type: "text", text: x }] }, parent_tool_use_id: null });
   t.pendingFull = turn(fullText);
-  t.retryFull = retryText ? turn(retryText) : t.pendingFull;
   s.pending = useFull ? t.pendingFull : turn(msg.text);
-  t.diag.sentChars = (useFull ? fullText.length : msg.text.length) + SYSTEM_PROMPT.length + 12000;
   t.phase = "model";
   t.modelStartedAt = Date.now();
   dlog(
-    `turn_start turn=${msg.id} thread=${key} session=${sessionWasLive ? "live" : resume ? "resume" : "fresh"} sid=${s.sid} backend=${local ? "local" : "claude"} model=${model ?? "-"} ` +
-      `sent=${useFull ? "fullText" : "text"} sentChars=${useFull ? fullText.length : msg.text.length} textChars=${msg.text.length} fullTextChars=${fullText.length} compacted=${!!msg.compact} num_ctx=${t.numCtx ?? "-"}`,
+    `turn_start turn=${msg.id} thread=${key} session=${sessionWasLive ? "live" : resume ? "resume" : "fresh"} sid=${s.sid} model=${model ?? "-"} ` +
+      `sent=${useFull ? "fullText" : "text"} sentChars=${useFull ? fullText.length : msg.text.length} textChars=${msg.text.length} fullTextChars=${fullText.length} compacted=${!!msg.compact}`,
   );
   attach(t, s);
   s.turns.push(s.pending);
@@ -3106,7 +2360,7 @@ async function handleUserMessage(msg) {
 
 // ---- One-shot completions (no tools): the Claude side of the organize pipeline ----
 // {type:"complete_start", job, system, prompt, model} -> {type:"complete_done", job, ok, text?, error?}
-// Claude only (local steps call Ollama from Rust directly). Own watchdog: first event 60 s, then 45 s.
+// Own watchdog: first event 60 s, then 45 s.
 const completions = new Map();
 function startCompletion(msg) {
   const { job } = msg;
@@ -3145,7 +2399,7 @@ function startCompletion(msg) {
           maxTurns: 1,
           includePartialMessages: true,
           spawnClaudeCodeProcess: (opts) => (entry.child = spawner({ sid })(opts)),
-          env: { ...claudeEnv(), CLAUDE_CODE_MAX_RETRIES: "2" },
+          env: { ...process.env, CLAUDE_CODE_MAX_RETRIES: "2" },
           ...(typeof msg.model === "string" && msg.model ? { model: msg.model } : {}),
         },
       });
@@ -3177,19 +2431,13 @@ rl.on("line", (line) => {
     // still end, with an error the UI shows.
     handleUserMessage(msg).catch((e) => {
       console.error(`[sidecar] could not start turn ${msg.id}: ${e?.stack ?? e}`);
-      if (current?.id === msg.id) failTurn(current, "error", `Claude could not start: ${e?.message ?? e}`, { noRetry: true });
+      if (current?.id === msg.id) failTurn(current, "error", `Claude could not start: ${e?.message ?? e}`);
       else send({ type: "error", id: msg.id, message: `Claude could not start: ${e?.message ?? e}` });
     });
   } else if (msg.type === "oneshot_start") {
     startOneshot(msg);
   } else if (msg.type === "memory_start") {
     startMemory(msg);
-  } else if (msg.type === "scan_start") {
-    startScan(msg);
-  } else if (msg.type === "build_start") {
-    startBuild(msg);
-  } else if (msg.type === "build_cancel") {
-    stopBuild(msg.run, "cancel");
   } else if (msg.type === "complete_start") {
     startCompletion(msg);
   } else if (msg.type === "complete_cancel") {
@@ -3224,8 +2472,7 @@ rl.on("line", (line) => {
       if (s.busy && !s.closed && s.turn === t) closeSession(s, "wedged");
     }, 8000).unref?.();
   } else if (msg.type === "reset_thread") {
-    // Every backend's session of that thread.
-    for (const s of [...sessions.values()].filter((x) => x.key.startsWith(`${msg.thread}#`))) {
+    for (const s of [...sessions.values()].filter((x) => x.key === msg.thread)) {
       if (s.turn && !s.turn.ended) {
         const t = s.turn;
         markEnded(t, "reset");
@@ -3253,12 +2500,8 @@ rl.on("close", () => {
   for (const s of [...sessions.values()]) closeSession(s);
   for (const job of [...oneshots.keys()]) cancelOneshot(job);
   for (const c of [...completions.values()]) c.cancel();
-  for (const run of [...builds.keys()]) stopBuild(run, "cancel");
   setTimeout(() => process.exit(0), 200);
 });
 
 console.error(`[sidecar] started: node ${process.version}, cwd ${process.cwd()}, claude ${CLAUDE_EXE || "(SDK default)"}`);
-proxyReady.then(() => {
-  dlog(`local_proxy port=${proxyPort || "(off)"}`);
-  send({ type: "ready" });
-});
+send({ type: "ready" });

@@ -716,12 +716,6 @@ pub fn seed(app: &AppHandle, state: &AppState, slug: &str) -> Result<()> {
         if n == 0 {
             out.push_str("(none)\n");
         }
-        let idx = crate::handoff::read_index(&dir);
-        if let Some(e) = idx.versions.iter().max_by(|a, b| a.created.cmp(&b.created).then(a.version.cmp(&b.version))) {
-            if let Ok(doc) = crate::handoff::read_doc_in(&dir, &e.dir, e.version, "00-overview.md") {
-                out.push_str(&format!("\n[Latest design overview, {}]\n{}\n", crate::handoff::rev_label(&e.version_title, e.version), clip(&doc, 2500)));
-            }
-        }
         out.push_str("\nCall memory_seed exactly once.");
         (out, ws.get_settings().map(|s| s.model_memory).unwrap_or_else(|_| crate::model::DEFAULT_MODEL_MEMORY.into()))
     };

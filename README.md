@@ -1,6 +1,13 @@
 # Dreamer
 
-A desktop app for collecting, linking and deepening game ideas. Each project is an infinite canvas of idea cards (Mist, Reverie, Lucid, Dream, Built), with a Claude chat panel that can add ghost cards, grill you about a card and compile a design brief.
+A pretty place to think with Claude about game ideas: an infinite canvas of cards. Claude helps you deepen an idea (grill, expand, critique), broaden it (other takes, what-ifs, related) and find inspiration (web references, visualize). When an idea is ready, Dreamer writes a design-doc pack into a repo and Claude Code takes it from there, outside Dreamer. See `docs/identity.md` for what Dreamer is and is not.
+
+## Features
+- One infinite canvas per project: cards (Mist, Reverie, Lucid, Dream, Built), checklists, images, web clips, artifacts (themes, characters, concept art, mockups), frames, links, branches, trash.
+- Claude chat per card and per project: /grill-me, /expand, /critique, /related, /organize, ghost cards and edit proposals you keep or dismiss, web access, per-project memory.
+- Handoff pack: Summarize writes design docs, a roadmap and a CLAUDE.md block into the linked repo folder, replacing the last pack.
+- `.dreamer.md` bundles: paste or drop them to add cards.
+- Presets: four themes with a shader background, per project override.
 
 First use case: a chaotic-but-chill "fish-punk" fishing game.
 
@@ -21,7 +28,10 @@ npm run tauri dev
 ## Test
 ```
 cd src-tauri && cargo test
+npx tsc --noEmit
 npm run check:themes
+npm run test:reliability
+npm run test:checklist
 ```
 
 ## Build installer

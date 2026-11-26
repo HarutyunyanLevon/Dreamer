@@ -1,4 +1,4 @@
-import { DESIGN_DOCS, GAP_CHECKLIST, type Api, type ArtifactView, type Attachment, type Canvas, type Card, type CardRole, type ChangeEvent, type ChatThreadFile, type ChecklistItem, type DesignVersion, type HandoffEvent, type HandoffEventBody, type MemoryEvent, type MemoryLogEntry, type MemoryView, type NewCard, type ProjectData, type ProjectSummary, type SavedTask, type SearchHit, type TaskFlag, type Settings, type TrashItem } from "./types";
+import { DESIGN_DOCS, type Api, type ArtifactView, type Attachment, type Canvas, type Card, type CardRole, type ChangeEvent, type ChatThreadFile, type ChecklistItem, type HandoffEvent, type HandoffEventBody, type MemoryEvent, type MemoryLogEntry, type MemoryView, type NewCard, type ProjectData, type ProjectSummary, type SearchHit, type Settings, type TrashItem } from "./types";
 
 /** Same rules as the Rust core: media paths stay under media/, clips need a url. */
 const noDesktop = async (): Promise<never> => {
@@ -37,7 +37,6 @@ function checkItems(items: ChecklistItem[]): ChecklistItem[] {
     return { ...it, id };
   });
 }
-const cleanColor = (c: string | undefined) => c?.trim() || undefined;
 
 /** A rough browser-only stand-in for the Rust scorer (title > tags > fields > body). */
 const foldText = (s: string) => s.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase();
@@ -71,7 +70,6 @@ interface MockProject {
   theme: string | null;
   handoffTarget?: string;
   handoffConfirmed?: string;
-  design: { entry: DesignVersion; docs: Record<string, string> }[];
   canvas: Canvas;
   cards: Map<string, Card>;
   trash: TrashItem[];
@@ -90,14 +88,12 @@ function mkCard(c: NewCard): Card {
     attachments: checkAttachments(c.attachments ?? []),
   };
   if (c.role) card.role = c.role;
-  const color = cleanColor(c.color);
-  if (color) card.color = color;
   if (c.items?.length) card.items = checkItems(c.items);
   return card;
 }
 
 function seedProject(slug: string, name: string): MockProject {
-  return { slug, name, theme: null, design: [], canvas: emptyCanvas(), cards: new Map(), trash: [], trashed: new Map() };
+  return { slug, name, theme: null, canvas: emptyCanvas(), cards: new Map(), trash: [], trashed: new Map() };
 }
 
 const emptyCanvas = (): Canvas => ({ version: 3, viewport: { x: 300, y: 110, zoom: 1 }, cards: {}, frames: {} });
@@ -106,9 +102,9 @@ const emptyCanvas = (): Canvas => ({ version: 3, viewport: { x: 300, y: 110, zoo
 function checkRole(p: MockProject, role: string | undefined, except?: string): CardRole | undefined {
   const r = role?.trim().toLowerCase();
   if (!r) return undefined;
-  if (r !== "tech" && r !== "decisions" && r !== "cc-questions") throw new Error(`unknown card role "${r}"`);
+  if (r !== "tech" && r !== "decisions") throw new Error(`unknown card role "${r}"`);
   const other = [...p.cards.values()].find((c) => c.role === r && c.id !== except);
-  if (other) throw new Error(`this project already has a ${r === "tech" ? "Tech & constraints" : r === "decisions" ? "Project decisions" : "From Claude Code"} card (${other.id})`);
+  if (other) throw new Error(`this project already has a ${r === "tech" ? "Tech & constraints" : "Project decisions"} card (${other.id})`);
   return r;
 }
 
@@ -130,7 +126,7 @@ function mockParse(text: string): [string, string[]][] {
 const mockRender = (s: [string, string[]][]) => s.map(([n, items]) => `## ${n}\n${items.map((i) => `- ${i}\n`).join("")}`).join("\n");
 
 export function createMockApi(): Api {
-  const settings: Settings = { version: 1, theme: "pearl-glow", hotkey: "Ctrl+Shift+Space", clipboard_hotkey: "Ctrl+Alt+Shift+V", last_project: null, show_projects: true, show_chat: true, tray_notice_shown: false, start_with_windows: true, start_hidden: true, model_chat: "sonnet", model_router: true, model_fast: "haiku", model_deep: "opus", model_export: "opus", build_model: "sonnet", model_memory: "haiku", compact_tokens: 50000, memory_cap: 600, local_chat: true, local_model: "qwen3.5:35b-a3b", spritecook_url: "https://api.spritecook.ai/mcp/", credit_cap: 4 };
+  const settings: Settings = { version: 1, theme: "pearl-glow", last_project: null, show_projects: true, show_chat: true, model_chat: "sonnet", model_router: true, model_fast: "haiku", model_deep: "opus", model_export: "opus", model_memory: "haiku", compact_tokens: 50000, memory_cap: 600, spritecook_url: "https://api.spritecook.ai/mcp/", credit_cap: 4 };
   let mockKey = "";
   /** Artifacts by "<slug>/<id>" (browser dev only: no versions are ever generated here). */
   const artifacts = new Map<string, ArtifactView>();
@@ -150,16 +146,9 @@ export function createMockApi(): Api {
     });
   };
   const projects = new Map<string, MockProject>();
-  const customThemes = new Map<string, unknown>();
   const chats = new Map<string, ChatThreadFile>();
   const listeners = new Set<(e: ChangeEvent[]) => void>();
   const handoffListeners = new Set<(e: HandoffEvent) => void>();
-  const mockTasks: SavedTask[] = [];
-  const mockFlags = (card: string, outside?: string): TaskFlag[] => [
-    { card_id: card, text: "Mock flag: no acceptance criteria could be written.", question: "What counts as done?", choices: ["Plays end to end", "Passes a unit test", "Looks right in a screenshot"], recommended: "Plays end to end" },
-    { card_id: card, text: "Mock flag: the controls are not named.", question: "Which input comes first?", choices: ["Keyboard", "Gamepad"], recommended: "Keyboard" },
-    ...(outside ? [{ card_id: card, text: "Mock flag: this needs a card outside the job.", question: "How should the missing dependency be handled?", choices: ["Stub it", "Leave it out"], recommended: "Stub it", needs_card_id: outside }] : []),
-  ];
   const memoryListeners = new Set<(e: MemoryEvent) => void>();
   const memories = new Map<string, string>();
   const memLogs = new Map<string, MemoryLogEntry[]>();
@@ -169,7 +158,6 @@ export function createMockApi(): Api {
     return { exists: memories.has(slug), text, words: text.replace(/^## .*$/gm, "").split(/\s+/).filter(Boolean).length, cap: settings.memory_cap };
   };
   let handoffTimer: ReturnType<typeof setTimeout> | undefined;
-  let handoffCommit: (() => void) | undefined;
   const emit = (slug: string) => listeners.forEach((l) => l([{ scope: "project", project: slug }]));
 
   const add = (p: MockProject, c: NewCard, x: number, y: number) => {
@@ -184,24 +172,11 @@ export function createMockApi(): Api {
   add(inbox, { title: "Neon bait", body: "Glows brighter the angrier the fish." }, 528, 0);
   projects.set("inbox-ideas", inbox);
   const fish = seedProject("fish-punk-fishing", "Fish-punk fishing");
-  const fight = add(fish, { title: "Fish that fight back", body: "What if the lake bites first?" }, 0, 10);
+  add(fish, { title: "Fish that fight back", body: "What if the lake bites first?" }, 0, 10);
   add(fish, { title: "Chill loop", body: "Cast, wait, let the combo breathe.", stage: "reverie" }, 290, -10);
   add(fish, { title: "Harpoon-rod hybrid", body: "One tool, two moods: patient and loud.", stage: "lucid" }, 540, 50);
   add(fish, { title: "Fish-punk: the dream", body: "Doom energy at a calm pace. Reel in a riff.", stage: "dream" }, 40, 230);
   add(fish, { title: "Rust-lake biome", body: "Neon bait glowing in oily water.", stage: "reverie", source: "claude", ghost: true }, 350, 260);
-  // A "From Claude Code" card (Tauri imports these from QUESTIONS.md): grouped, long, one answered.
-  const cc = (id: string, text: string, answer?: string) => ({ id, text, done: false, question: true, source: `- [ ] ${text}`, ...(answer ? { answer } : {}) });
-  add(fish, {
-    title: "From Claude Code",
-    kind: "checklist",
-    role: "cc-questions",
-    items: [
-      cc("q1", `Q (${fight.id}): How hard should a hooked fish pull back before the line snaps, and does the player get a warning beat first? — context: combat tuning; see FishFightControllerStateMachineConfiguration`),
-      cc("q2", `Q (${fight.id}): Can the fish break free mid-combo? — context: combat`, "Only on a missed beat"),
-      cc("q3", "Q (01MOCKUNKNOWN0000XYZ12): Which save slot does the tutorial use?"),
-      { id: "t1", text: "Playtest the reel timing", done: false },
-    ],
-  }, 620, 260);
   projects.set(fish.slug, fish);
 
   // `npm run dev` + `?stress=1`: a 500-card project to eyeball pan/zoom/drag performance without Tauri.
@@ -242,25 +217,17 @@ export function createMockApi(): Api {
     getSettings: async () => ({ ...settings }),
     updateSettings: async (patch) => {
       if (patch.theme) settings.theme = patch.theme;
-      if (patch.hotkey) settings.hotkey = patch.hotkey;
-      if (patch.clipboard_hotkey) settings.clipboard_hotkey = patch.clipboard_hotkey;
       if (patch.last_project !== undefined) settings.last_project = patch.last_project || null;
       if (patch.show_projects !== undefined) settings.show_projects = patch.show_projects;
       if (patch.show_chat !== undefined) settings.show_chat = patch.show_chat;
-      if (patch.tray_notice_shown !== undefined) settings.tray_notice_shown = patch.tray_notice_shown;
-      if (patch.start_with_windows !== undefined) settings.start_with_windows = patch.start_with_windows;
-      if (patch.start_hidden !== undefined) settings.start_hidden = patch.start_hidden;
       if (patch.model_chat !== undefined) settings.model_chat = patch.model_chat.trim() || "sonnet";
       if (patch.model_router !== undefined) settings.model_router = patch.model_router;
       if (patch.model_fast !== undefined) settings.model_fast = patch.model_fast.trim() || "haiku";
       if (patch.model_deep !== undefined) settings.model_deep = patch.model_deep.trim() || "opus";
       if (patch.model_export !== undefined) settings.model_export = patch.model_export.trim() || "opus";
-      if (patch.build_model !== undefined) settings.build_model = patch.build_model.trim() || "sonnet";
       if (patch.model_memory !== undefined) settings.model_memory = patch.model_memory.trim() || "haiku";
       if (patch.compact_tokens !== undefined) settings.compact_tokens = patch.compact_tokens || 50000;
       if (patch.memory_cap !== undefined) settings.memory_cap = patch.memory_cap || 600;
-      if (patch.local_chat !== undefined) settings.local_chat = patch.local_chat;
-      if (patch.local_model !== undefined) settings.local_model = patch.local_model.trim() || "qwen3.5:35b-a3b";
       if (patch.spritecook_url !== undefined) settings.spritecook_url = patch.spritecook_url.trim() || "https://api.spritecook.ai/mcp/";
       if (patch.credit_cap !== undefined) settings.credit_cap = patch.credit_cap || 4;
       return { ...settings };
@@ -313,17 +280,12 @@ export function createMockApi(): Api {
       const p = need(slug);
       const c = p.cards.get(id);
       if (!c) throw new Error(`not found: card ${id}`);
-      const { role, color, items, attachments, ...rest } = patch;
+      const { role, items, attachments, ...rest } = patch;
       const next: Card = { ...c, ...rest };
       if (role !== undefined) {
         const r = checkRole(p, role, id);
         if (r) next.role = r;
         else delete next.role;
-      }
-      if (color !== undefined) {
-        const cc = cleanColor(color);
-        if (cc) next.color = cc;
-        else delete next.color;
       }
       if (items !== undefined) next.items = checkItems(items);
       if (attachments !== undefined) next.attachments = checkAttachments(attachments);
@@ -444,11 +406,12 @@ export function createMockApi(): Api {
       window.open(url, "_blank", "noopener");
     },
     readMedia: async (_slug, rel) => (rel.startsWith("mock:") ? rel.slice(5).split("#")[0] : rel),
-    // The browser preview fakes the handoff session: a few progress events, then canned docs.
-    handoffStart: async (slug, mode, spec, gaps) => {
+    // The browser preview fakes the handoff session: a few progress events, then a done.
+    handoffStart: async (slug, spec) => {
       const p = need(slug);
       if (handoffTimer) throw new Error("A handoff session is already running.");
-      const cards = [...p.cards.values()].filter((c) => !c.ghost && (c.kind !== "sticky" || spec.include_stickies) && (c.kind !== "card" || c.role || spec.stages.includes(c.stage)));
+      if (!p.handoffTarget || p.handoffConfirmed !== p.handoffTarget) throw new Error("Link a repo folder first: the design pack is written there.");
+      const cards = [...p.cards.values()].filter((c) => !c.ghost && (c.kind !== "card" || c.role || spec.stages.includes(c.stage)));
       if (!cards.length) throw new Error("Nothing to summarize: no cards match this scope and these stages.");
       const job = `hmock${++seq}`;
       const steps: HandoffEventBody[] = [{ type: "progress", step: "reading", read: 0, total: cards.length }];
@@ -461,30 +424,18 @@ export function createMockApi(): Api {
         steps.push({ type: "usage", input: 2000 + i * 900, cacheRead: 8000 * (i + 1), cacheCreate: 0, output: 60 * (i + 1) });
         steps.push({ type: "progress", step: "reading", read: i + 1, total: cards.length });
       });
-      if (mode === "gaps") {
-        steps.push({ type: "gaps", gaps: GAP_CHECKLIST.map((item, i) => ({ item, status: i % 3 === 0 ? "ok" : i % 3 === 1 ? "thin" : "missing", note: "Mock result (browser preview)." })) }, { type: "done", mode: "gaps" });
-      } else {
-        const version = p.design.length + 1;
-        const docs: Record<string, string> = {};
-        DESIGN_DOCS.forEach((name, i) => {
-          docs[name] = name === "CHANGELOG.md" ? `# Changelog\n\n## v${version}\n\n${version === 1 ? "Initial version" : "Regenerated."}\n` : `# ${name}\n\nMock ${name} for **${p.name}** (browser preview).\n\n## Cards\n\n${cards.map((c) => `- ${c.title}`).join("\n")}\n\n- [ ] M1-T1: TBD\n${gaps?.length ? `\n## Known gaps\n\n${gaps.map((g) => `- TBD: ${g.item}`).join("\n")}\n` : ""}`;
-          if (i < 7) {
-            steps.push({ type: "step", step: { sid: `w${i}`, kind: "tool", tool: "write_design_doc", label: `Wrote ${name}`, status: "done", startedAt: t0, endedAt: t0 } });
-            steps.push({ type: "progress", step: "writing", doc: name, written: i + 1, of: 7 });
-          }
-        });
-        steps.push({ type: "progress", step: "copying" });
-        const entry: DesignVersion = { version, created: new Date().toISOString(), model: settings.model_export, scope: spec.scope.kind, docs: [...DESIGN_DOCS], cards: cards.length };
-        steps.push({ type: "done", mode: "generate", version, dir: `(in-memory)/design/v${version}`, warnings: [], repo: p.handoffTarget && p.handoffConfirmed === p.handoffTarget ? { path: p.handoffTarget, files: [] } : null });
-        handoffCommit = () => p.design.push({ entry, docs });
-      }
+      DESIGN_DOCS.forEach((name, i) => {
+        steps.push({ type: "step", step: { sid: `w${i}`, kind: "tool", tool: "write_design_doc", label: `Wrote ${name}`, status: "done", startedAt: t0, endedAt: t0 } });
+        steps.push({ type: "progress", step: "writing", doc: name, written: i + 1, of: DESIGN_DOCS.length });
+      });
+      steps.push({ type: "progress", step: "copying" });
+      steps.push({ type: "done", path: p.handoffTarget, files: DESIGN_DOCS.map((n) => `docs/design/${n}`), warnings: [] });
       const tick = () => {
         const e = steps.shift();
         if (!e) {
           handoffTimer = undefined;
           return;
         }
-        if (e.type === "done" && e.mode === "generate") handoffCommit?.();
         handoffListeners.forEach((l) => l({ ...e, job }));
         handoffTimer = setTimeout(tick, 250);
       };
@@ -494,74 +445,11 @@ export function createMockApi(): Api {
     handoffCancel: async () => {
       clearTimeout(handoffTimer);
       handoffTimer = undefined;
-      handoffCommit = undefined;
-    },
-    // Build prompts: a canned task after a short pause; saved tasks live in memory.
-    taskStart: async (slug, ids, model, revise) => {
-      const p = need(slug);
-      if (revise) {
-        const job = `hmock${++seq}`;
-        const markdown = `${revise.markdown.trimEnd()}\n\n## Decisions\n\n${revise.decisions.map((d) => `- ${d.question} ${d.answer}`).join("\n")}\n`;
-        setTimeout(() => handoffListeners.forEach((l) => l({ job, type: "done", mode: "task", markdown, title: "Revised", card_ids: ids, flags: [], model: model ?? settings.model_export, version: "", kind: "build" })), 300);
-        return job;
-      }
-      const cards = ids.map((id) => p.cards.get(id)).filter((c) => !!c);
-      if (!cards.length) throw new Error("Nothing to build: pick at least one card.");
-      const job = `hmock${++seq}`;
-      const markdown = ["# Build: " + cards.map((c) => c.title).join(", "), "## Goal", "Mock task (browser preview).", "## What to build", ...cards.map((c) => `### ${c.title} (${c.id})` + "\n\n" + c.body), "## Acceptance criteria", "- TBD", "## Report back", "Update docs/design/STATUS.md."].join("\n\n") + "\n";
-      setTimeout(() => handoffListeners.forEach((l) => l({ job, type: "done", mode: "task", markdown, title: `Build ${cards[0].title}`, card_ids: ids, flags: mockFlags(cards[0].id, [...p.cards.values()].find((c) => !ids.includes(c.id))?.id), model: model ?? settings.model_export, version: "", kind: "build" })), 400);
-      return job;
-    },
-    saveTask: async (slug, t) => {
-      const p = need(slug);
-      if (!p.handoffTarget || p.handoffConfirmed !== p.handoffTarget) throw new Error("No repo is linked for this project. Use Link repo… first.");
-      const file = `docs/design/tasks/${new Date().toISOString().slice(0, 10)}-${t.title.toLowerCase().replace(/[^a-z0-9]+/g, "-")}.md`;
-      mockTasks.push({ file, title: t.title, id: `t${++seq}`, kind: t.kind, cards: t.card_ids, created: new Date().toISOString(), version: t.version, markdown: t.markdown, flags: t.flags, flag_answers: t.flag_answers });
-      t.card_ids.forEach((id) => {
-        const c = p.cards.get(id);
-        if (c) c.build = { ...c.build, status: "queued", task: file };
-      });
-      return file;
-    },
-    listTasks: async () => [...mockTasks].reverse(),
-    markTaskDone: async (_slug, file) => {
-      const t = mockTasks.find((x) => x.file === file);
-      if (t) t.done = new Date().toISOString();
-    },
-    openTerminal: async () => {
-      throw new Error("Opening a terminal needs the desktop app.");
     },
     onHandoffEvent: async (cb) => {
       handoffListeners.add(cb);
       return () => handoffListeners.delete(cb);
     },
-    // shortcut: build runs need git and Claude Code; the browser mock only lists none.
-    buildPreflight: async () => {
-      throw new Error("Build runs need the desktop app.");
-    },
-    buildStart: async () => {
-      throw new Error("Build runs need the desktop app.");
-    },
-    buildInterrupt: async () => {},
-    buildAnswer: async () => {},
-    buildRuns: async () => [],
-    buildEvents: async () => [],
-    buildFileDiff: async () => "",
-    buildAct: async () => {
-      throw new Error("Build runs need the desktop app.");
-    },
-    buildOpenTerminal: async () => {
-      throw new Error("Opening a terminal needs the desktop app.");
-    },
-    onBuildEvent: async () => () => {},
-    listDesignVersions: async (slug) => need(slug).design.map((d) => structuredClone(d.entry)),
-    readDesignDoc: async (slug, version, name) => {
-      const d = need(slug).design.find((x) => x.entry.version === version);
-      const t = d?.docs[name];
-      if (t === undefined) throw new Error(`not found: design/v${version}/${name}`);
-      return t;
-    },
-    openDesignFolder: async () => {},
     openLogsFolder: async () => {},
     pickFolder: async () => (typeof window !== "undefined" ? window.prompt("Repo folder (browser preview)") : null),
     searchCards: async (query, project, limit = 20) => {
@@ -600,13 +488,6 @@ export function createMockApi(): Api {
         .filter((k) => k.startsWith(`${slug}/`) && k !== `${slug}/project`)
         .map((k) => k.slice(slug.length + 1))
         .reverse(),
-    listCustomThemes: async () => [...customThemes.values()],
-    saveCustomTheme: async (id, theme) => {
-      customThemes.set(id, theme);
-    },
-    deleteCustomTheme: async (id) => {
-      customThemes.delete(id);
-    },
     memoryGet: async (slug) => memView(slug),
     memorySave: async (slug, text, source) => {
       const before = memories.get(slug);
@@ -671,56 +552,18 @@ export function createMockApi(): Api {
       memoryListeners.add(cb);
       return () => memoryListeners.delete(cb);
     },
-    // In a plain browser there is no tray or process to quit.
-    quitApp: async () => {},
-    autostartEnabled: async () => settings.start_with_windows,
-    setAutostart: async (enabled) => ((settings.start_with_windows = enabled), enabled),
-    hideToTray: async () => {},
     parseBundle: noDesktop,
     applyBundle: noDesktop,
     undoBundle: noDesktop,
     scanImports: async () => [],
-    scanStart: noDesktop,
-    scanCancel: async () => {},
-    onScanEvent: async () => () => {},
-    skillStatus: async () => ({ state: "missing", path: "%USERPROFILE%\.claude\skills\dreamer-cards\SKILL.md" }),
-    skillInstall: noDesktop,
-    skillRemove: noDesktop,
     readImport: noDesktop,
     archiveImport: async () => {},
-    hotkeyStatus: async () => [null, null],
-    splitText: noDesktop,
-    onTrayNotice: async () => () => {},
-    onBuildUpdate: async () => () => {},
     linkRepo: async (slug, path) => {
       const p = need(slug);
       p.handoffTarget = path;
       p.handoffConfirmed = path;
       return summary(p);
     },
-    markBuiltNow: async (slug, id) => {
-      const c = need(slug).cards.get(id)!;
-      c.stage = "built";
-      c.build = { ...c.build, status: "built", dirty: false, built_at: new Date().toISOString() };
-      return structuredClone(c);
-    },
-    restoreBuild: async (slug, id, build, _snapshot, stage) => {
-      const c = need(slug).cards.get(id)!;
-      c.stage = stage;
-      if (build) c.build = build;
-      else delete c.build;
-      return structuredClone(c);
-    },
-    buildTexts: async (slug, id) => {
-      const c = need(slug).cards.get(id)!;
-      return { snapshot: null, current: `---
-title: ${c.title}
----
-
-${c.body}
-` };
-    },
-    openRepoFile: async () => {},
     onChange: async (cb) => {
       listeners.add(cb);
       return () => listeners.delete(cb);

@@ -5,7 +5,7 @@
  * canvas area (search focus).
  */
 export const GAP = 16;
-export const TAB_W = 30;
+const TAB_W = 30;
 
 let cache: { left: number; right: number } | null = null;
 
@@ -28,7 +28,7 @@ export function setPanelWidth(side: "left" | "right", px: number) {
 }
 
 /** Shown/hidden state of the side panels, written to <html data-left/data-right> by usePanels. */
-export const panelShown = (side: "left" | "right") => document.documentElement.dataset[side] !== "hidden";
+const panelShown = (side: "left" | "right") => document.documentElement.dataset[side] !== "hidden";
 
 /** Space a panel takes from its window edge (panel + margins, or the bookmark tab when hidden). */
 export function panelInset(side: "left" | "right"): number {

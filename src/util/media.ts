@@ -53,7 +53,7 @@ async function shrink(src: string, maxPx: number): Promise<string> {
 }
 
 /** A display URL for a media/ file, at most `maxPx` on its long side (0 = full size, not cached long). */
-export function mediaUrl(slug: string, rel: string, maxPx = 0): Promise<string> {
+function mediaUrl(slug: string, rel: string, maxPx = 0): Promise<string> {
   const key = `${slug}|${rel}|${maxPx}`;
   const hit = cache.get(key);
   if (hit) {

@@ -57,7 +57,7 @@ export function useArtifactFileUrl(slug: string | null, id: string, version: num
   return url;
 }
 
-export const isImageFile = (f: string) => /\.(png|webp|gif|jpe?g|svg)$/i.test(f);
+const isImageFile = (f: string) => /\.(png|webp|gif|jpe?g|svg)$/i.test(f);
 export const isVideoFile = (f: string) => /\.(mp4|webm)$/i.test(f);
 export const isHtmlFile = (f: string) => /\.html$/i.test(f);
 

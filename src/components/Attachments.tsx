@@ -11,7 +11,7 @@ export const isImage = (a: Attachment): a is ImageAttachment => a.type === "imag
 export const isClip = (a: Attachment): a is ClipAttachment => a.type === "clip";
 
 /** The cover is the first image; the strip shows everything else. */
-export function splitAttachments(list: Attachment[]) {
+function splitAttachments(list: Attachment[]) {
   const cover = list.find(isImage) ?? null;
   const rest = list.filter((a) => a !== cover);
   return { cover, rest };

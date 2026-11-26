@@ -43,13 +43,9 @@ pub fn get_settings(state: State<AppState>) -> Result<Settings> {
 }
 
 #[tauri::command(async)]
-pub fn update_settings(app: AppHandle, state: State<AppState>, patch: SettingsPatch) -> Result<Settings> {
-    let rehook = patch.hotkey.is_some() || patch.clipboard_hotkey.is_some();
+pub fn update_settings(state: State<AppState>, patch: SettingsPatch) -> Result<Settings> {
     let before = with_ws(&state, |ws| ws.get_settings())?.spritecook_url;
     let settings = with_ws(&state, |ws| ws.update_settings(patch))?;
-    if rehook {
-        AppState::register_hotkeys(&app, &settings.hotkey, &settings.clipboard_hotkey);
-    }
     // The sidecar gets the SpriteCook server at spawn: a new URL needs a fresh one.
     if settings.spritecook_url != before {
         crate::sidecar::shutdown(&state);
@@ -68,79 +64,15 @@ pub fn create_project(state: State<AppState>, name: String) -> Result<ProjectSum
 }
 
 #[tauri::command(async)]
-pub fn update_project(app: AppHandle, state: State<AppState>, slug: String, patch: ProjectPatch) -> Result<ProjectSummary> {
-    let retarget = patch.handoff_target.is_some();
-    let out = with_ws(&state, |ws| ws.update_project(&slug, patch))?;
-    if retarget {
-        state.refresh_questions(&app, true);
-    }
-    Ok(out)
+pub fn update_project(state: State<AppState>, slug: String, patch: ProjectPatch) -> Result<ProjectSummary> {
+    with_ws(&state, |ws| ws.update_project(&slug, patch))
 }
 
-/// "Link repo…" confirmed: sets and confirms the folder, creates the empty STATUS.md, optionally
-/// adds `.dreamer/` to the repo's .gitignore, writes the link file.
+/// "Link repo…" confirmed: sets and confirms the folder the design pack is written into.
 #[tauri::command(async)]
-pub fn link_repo(app: AppHandle, state: State<AppState>, slug: String, path: String, gitignore: bool) -> Result<ProjectSummary> {
-    let out = with_ws(&state, |ws| ws.link_repo(&slug, &path, gitignore))?;
-    state.refresh_questions(&app, true);
-    Ok(out)
+pub fn link_repo(state: State<AppState>, slug: String, path: String) -> Result<ProjectSummary> {
+    with_ws(&state, |ws| ws.link_repo(&slug, &path))
 }
-
-/// "Mark as built now" / "Clear needs rebuild".
-#[tauri::command(async)]
-pub fn mark_built_now(state: State<AppState>, slug: String, id: String) -> Result<Card> {
-    with_ws(&state, |ws| ws.mark_built_now(&slug, &id))
-}
-
-/// Undo of the above: the card's build block, snapshot and stage as they were.
-#[tauri::command(async)]
-pub fn restore_build(state: State<AppState>, slug: String, id: String, build: Option<Value>, snapshot: Option<String>, stage: Stage) -> Result<Card> {
-    with_ws(&state, |ws| ws.restore_build(&slug, &id, build, snapshot, stage))
-}
-
-/// The card's content at build time and now, for "Diff since built".
-#[tauri::command(async)]
-pub fn build_texts(state: State<AppState>, slug: String, id: String) -> Result<Value> {
-    let (snapshot, current) = with_ws(&state, |ws| ws.built_texts(&slug, &id))?;
-    Ok(serde_json::json!({ "snapshot": snapshot, "current": current }))
-}
-
-/// Opens a file of the project's repo: in VS Code when `code` is on PATH, else shown in the file
-/// manager (always the latter with `reveal`). `rel` is repo-relative and stays inside the repo.
-#[tauri::command(async)]
-pub fn open_repo_file(state: State<AppState>, slug: String, rel: String, reveal: bool) -> Result<()> {
-    let rel = rel.replace(std::path::MAIN_SEPARATOR, "/");
-    if rel.is_empty() || rel.starts_with('/') || rel.contains(':') || rel.split('/').any(|s| s.is_empty() || s == "..") {
-        return Err(AppError::Invalid(format!("not a repo-relative path: {rel:?}")));
-    }
-    let repo = with_ws(&state, |ws| ws.project_meta(&slug).map(|m| m.handoff_target))?.ok_or_else(|| AppError::NotFound("the project's repo".into()))?;
-    let path = std::path::Path::new(&repo).join(&rel);
-    if !path.exists() {
-        return Err(AppError::NotFound(path.display().to_string()));
-    }
-    let shown = path.display().to_string();
-    // `code` is a .cmd shim on Windows, so it goes through cmd: refuse characters cmd would act on.
-    let safe = !shown.contains(['&', '|', '<', '>', '^', '%', '"']);
-    if !reveal && safe {
-        #[cfg(windows)]
-        let code = {
-            use std::os::windows::process::CommandExt;
-            std::process::Command::new("cmd").args(["/C", "code", "--reuse-window", &shown]).creation_flags(0x0800_0000).status()
-        };
-        #[cfg(not(windows))]
-        let code = std::process::Command::new("code").args(["--reuse-window", &shown]).status();
-        if code.is_ok_and(|s| s.success()) {
-            return Ok(());
-        }
-    }
-    #[cfg(windows)]
-    return std::process::Command::new("explorer").arg(format!("/select,{shown}")).spawn().map(|_| ()).map_err(|e| AppError::io("show the file", e));
-    #[cfg(target_os = "macos")]
-    return std::process::Command::new("open").arg("-R").arg(&shown).spawn().map(|_| ()).map_err(|e| AppError::io("show the file", e));
-    #[cfg(all(unix, not(target_os = "macos")))]
-    return std::process::Command::new("xdg-open").arg(path.parent().unwrap_or(&path)).spawn().map(|_| ()).map_err(|e| AppError::io("show the file", e));
-}
-
 #[tauri::command(async)]
 pub fn load_project(state: State<AppState>, slug: String) -> Result<ProjectData> {
     with_ws(&state, |ws| ws.load_project(&slug))
@@ -337,78 +269,17 @@ pub fn read_media(state: State<AppState>, slug: String, rel: String) -> Result<S
     with_ws(&state, |ws| ws.read_project_file(&slug, &rel)).map(|bytes| base64::engine::general_purpose::STANDARD.encode(bytes))
 }
 
-/// Starts the handoff pack's gap check (`mode: "gaps"`) or generation (`"generate"`) as a one-shot
+/// Starts the handoff pack generation as a one-shot
 /// Claude session; progress and results arrive as `handoff-event`s tagged with the returned job id.
 #[tauri::command(async)]
-pub fn handoff_start(app: AppHandle, state: State<AppState>, slug: String, mode: crate::handoff::Mode, spec: crate::handoff::ScopeSpec, gaps: Option<Vec<crate::handoff::Gap>>) -> Result<String> {
-    crate::handoff::start(&app, &state, &slug, mode, spec, gaps.unwrap_or_default())
+pub fn handoff_start(app: AppHandle, state: State<AppState>, slug: String, spec: crate::handoff::ScopeSpec) -> Result<String> {
+    crate::handoff::start(&app, &state, &slug, spec)
 }
 
 /// Interrupts the running handoff session; nothing it produced is written.
 #[tauri::command(async)]
 pub fn handoff_cancel(state: State<AppState>) -> Result<()> {
     crate::handoff::cancel(&state)
-}
-
-/// "Make build prompt": starts the one-shot session for these cards (and their links as context).
-/// Progress and the finished task arrive as `handoff-event`s tagged with the returned job id.
-#[tauri::command(async)]
-pub fn task_start(app: AppHandle, state: State<AppState>, slug: String, ids: Vec<String>, model: Option<String>, revise: Option<crate::task::Revise>) -> Result<String> {
-    crate::task::start(&app, &state, &slug, ids, model, revise)
-}
-
-/// Writes the task into the linked repo and queues its cards. Returns the repo-relative path.
-#[tauri::command(async)]
-pub fn save_task(state: State<AppState>, slug: String, task: crate::task::TaskSave) -> Result<String> {
-    crate::task::save(&state, &slug, task)
-}
-
-#[tauri::command(async)]
-pub fn list_tasks(state: State<AppState>, slug: String) -> Result<Vec<crate::task::TaskInfo>> {
-    crate::task::list(&state, &slug)
-}
-
-#[tauri::command(async)]
-pub fn mark_task_done(state: State<AppState>, slug: String, file: String) -> Result<()> {
-    crate::task::mark_done(&state, &slug, &file)
-}
-
-/// Opens a terminal in the repo running `claude` on a saved task.
-#[tauri::command(async)]
-pub fn open_terminal(state: State<AppState>, slug: String, file: String) -> Result<()> {
-    crate::task::open_terminal(&state, &slug, &file)
-}
-
-/// design/index.json's versions, oldest first.
-#[tauri::command(async)]
-pub fn list_design_versions(state: State<AppState>, slug: String) -> Result<Vec<crate::handoff::IndexEntry>> {
-    with_ws(&state, |ws| Ok(crate::handoff::read_index(&ws.existing_project_dir(&slug)?).versions))
-}
-
-#[tauri::command(async)]
-pub fn read_design_doc(state: State<AppState>, slug: String, version: u32, name: String, dir: Option<String>) -> Result<String> {
-    with_ws(&state, |ws| crate::handoff::read_doc_in(&ws.existing_project_dir(&slug)?, dir.as_deref().unwrap_or(""), version, &name))
-}
-
-/// Shows one design revision's folder in the file manager (`dir`: the version's folder under design/).
-#[tauri::command(async)]
-pub fn open_design_folder(state: State<AppState>, slug: String, version: u32, dir: Option<String>) -> Result<()> {
-    let d = dir.unwrap_or_default();
-    if d.contains(['/', '\\']) || d.starts_with('.') {
-        return Err(AppError::Invalid(format!("invalid design folder {d:?}")));
-    }
-    let dir = with_ws(&state, |ws| Ok(crate::handoff::revision_dir(&ws.existing_project_dir(&slug)?, &d, version)))?;
-    if !dir.is_dir() {
-        return Err(AppError::NotFound(format!("{}", dir.display())));
-    }
-    #[cfg(windows)]
-    let program = "explorer";
-    #[cfg(target_os = "macos")]
-    let program = "open";
-    #[cfg(all(unix, not(target_os = "macos")))]
-    let program = "xdg-open";
-    std::process::Command::new(program).arg(&dir).spawn().map_err(|e| AppError::io("open the folder", e))?;
-    Ok(())
 }
 
 /// Shows the logs folder (sidecar.log) in the file manager, creating it if nothing was logged yet.
@@ -426,32 +297,6 @@ pub fn open_logs_folder() -> Result<()> {
     Ok(())
 }
 
-/// Scan the linked repo into a bundle; `folder` limits it to a subfolder. Events: "scan-event".
-#[tauri::command(async)]
-pub fn scan_start(app: AppHandle, state: State<AppState>, slug: String, folder: Option<String>, max: Option<usize>, model: Option<String>) -> Result<String> {
-    crate::scan::start(&app, &state, &slug, folder, max, model)
-}
-
-#[tauri::command(async)]
-pub fn scan_cancel(state: State<AppState>) -> Result<()> {
-    crate::scan::cancel(&state)
-}
-
-#[tauri::command(async)]
-pub fn skill_status() -> Result<crate::skill_card::Status> {
-    crate::skill_card::status()
-}
-
-#[tauri::command(async)]
-pub fn skill_install() -> Result<crate::skill_card::Status> {
-    crate::skill_card::install()
-}
-
-#[tauri::command(async)]
-pub fn skill_remove() -> Result<crate::skill_card::Status> {
-    crate::skill_card::remove()
-}
-
 /// Native folder picker (the handoff repo target). `None` when the user cancelled.
 #[tauri::command(async)]
 pub fn pick_folder(app: AppHandle, title: Option<String>) -> Option<String> {
@@ -461,21 +306,6 @@ pub fn pick_folder(app: AppHandle, title: Option<String>) -> Option<String> {
         d = d.set_title(t);
     }
     d.blocking_pick_folder().and_then(|p| p.into_path().ok()).map(|p| p.display().to_string())
-}
-
-#[tauri::command(async)]
-pub fn list_custom_themes(state: State<AppState>) -> Result<Vec<Value>> {
-    with_ws(&state, |ws| ws.list_custom_themes())
-}
-
-#[tauri::command(async)]
-pub fn save_custom_theme(state: State<AppState>, id: String, theme: Value) -> Result<()> {
-    with_ws(&state, |ws| ws.save_custom_theme(&id, theme))
-}
-
-#[tauri::command(async)]
-pub fn delete_custom_theme(state: State<AppState>, id: String) -> Result<()> {
-    with_ws(&state, |ws| ws.delete_custom_theme(&id))
 }
 
 #[tauri::command(async)]
@@ -520,12 +350,9 @@ pub fn claude_send(
     question: Option<String>,
     think: Option<bool>,
     pin: Option<String>,
-    resume_local: Option<String>,
-    escalate: Option<String>,
     scope_ids: Option<Vec<String>>,
     scope_name: Option<String>,
     organize: Option<String>,
-    organize_backend: Option<String>,
     organize_instruction: Option<String>,
     organize_prior: Option<serde_json::Value>,
     organize_rest: Option<bool>,
@@ -546,16 +373,7 @@ pub fn claude_send(
         question,
         think: think.unwrap_or(false),
         pin: pin.as_deref().and_then(crate::router::Tier::parse),
-        resume_local,
-        retry_with_claude: escalate.as_deref() == Some("retry"),
-        organize: organize.map(|s| {
-            let backend = match organize_backend.as_deref() {
-                Some("claude") => Some(crate::router::Backend::Claude),
-                Some("local") => Some(crate::router::Backend::Local),
-                _ => None,
-            };
-            (if matches!(s.as_str(), "frame" | "selection") { s } else { "project".to_string() }, backend)
-        }),
+        organize: organize.map(|s| if matches!(s.as_str(), "frame" | "selection") { s } else { "project".to_string() }),
         organize_instruction,
         organize_prior: organize_prior.filter(|v| v.is_object()),
         organize_rest: organize_rest.unwrap_or(false),
@@ -563,109 +381,6 @@ pub fn claude_send(
         recap_from: recap_from.filter(|a| !a.is_empty()),
     };
     crate::sidecar::send_message(&app, &state, turn)
-}
-
-fn local_cfg(state: &State<AppState>) -> Result<crate::ollama::LocalCfg> {
-    with_ws(state, |ws| Ok(crate::ollama::LocalCfg::from_settings(&ws.get_settings()?)))
-}
-
-/// The local model's state for the setup screen and the chat header (checks Ollama now).
-#[tauri::command(async)]
-pub fn ollama_status(state: State<AppState>) -> Result<crate::ollama::LocalStatus> {
-    Ok(state.ollama.status(&local_cfg(&state)?))
-}
-
-/// "Check again": starts an installed but stopped Ollama (waits up to 20 s), then checks.
-#[tauri::command(async)]
-pub fn ollama_check(state: State<AppState>) -> Result<crate::ollama::LocalStatus> {
-    Ok(state.ollama.check_again(&local_cfg(&state)?))
-}
-
-/// "Restart Ollama": stops Dreamer's Ollama (only that one), starts it, loads the model. Steps
-/// arrive as `ollama-setup` events of type "restart".
-#[tauri::command(async)]
-pub fn restart_ollama(app: AppHandle, state: State<AppState>) -> Result<crate::ollama::LocalStatus> {
-    let cfg = local_cfg(&state)?;
-    state.ollama.restart(&cfg, &|step| {
-        let _ = app.emit("ollama-setup", serde_json::json!({ "type": "restart", "step": step }));
-    }).map_err(AppError::Invalid)
-}
-
-/// Downloads the configured local model; progress arrives as `ollama-setup` events.
-#[tauri::command(async)]
-pub fn ollama_pull(app: AppHandle, state: State<AppState>) -> Result<()> {
-    let model = local_cfg(&state)?.model;
-    crate::ollama::start_pull(&app, &state.ollama, &model)
-}
-
-#[tauri::command(async)]
-pub fn ollama_cancel(state: State<AppState>) {
-    state.ollama.cancel_pull();
-}
-
-/// Opens Ollama's Windows download page (fixed URL; nothing is passed in). The manual route.
-#[tauri::command(async)]
-pub fn ollama_open_installer() -> Result<()> {
-    crate::claude_setup::open_in_browser(crate::ollama::DOWNLOAD_PAGE)
-}
-
-/// Downloads, verifies and silently runs Ollama's installer, then starts it and the model download.
-#[tauri::command(async)]
-pub fn ollama_install(app: AppHandle, state: State<AppState>) -> Result<()> {
-    crate::ollama_install::start_install(&app, &state.ollama)
-}
-
-#[tauri::command(async)]
-pub fn ollama_install_cancel(state: State<AppState>) {
-    crate::ollama_install::cancel_install(&state.ollama);
-}
-
-/// The detected GPU and the model recommended for it, with the picker's choices.
-#[tauri::command(async)]
-pub fn ollama_recommend(state: State<AppState>) -> Result<crate::ollama_install::Recommendation> {
-    let settings = with_ws(&state, |ws| ws.get_settings())?;
-    Ok(crate::ollama_install::recommend(&state.ollama, &settings))
-}
-
-/// The setup screen's model choice: saved as `local_model` (and un-declines the cloud), then
-/// downloaded unless it's a cloud model (nothing to download) or already there.
-#[tauri::command(async)]
-pub fn ollama_use_model(app: AppHandle, state: State<AppState>, model: String, download: bool) -> Result<crate::ollama::LocalStatus> {
-    let model = model.trim().to_string();
-    if !crate::ollama::valid_model_name(&model) {
-        return Err(AppError::Invalid(format!("\"{model}\" isn't a valid Ollama model name")));
-    }
-    let settings = with_ws(&state, |ws| ws.update_settings(crate::model::SettingsPatch { local_model: Some(model.clone()), local_cloud_declined: Some(false), ..Default::default() }))?;
-    let cfg = crate::ollama::LocalCfg::from_settings(&settings);
-    let st = state.ollama.status(&cfg);
-    if download && !st.pulled && !st.cloud && st.running {
-        crate::ollama::start_pull(&app, &state.ollama, &model)?;
-    }
-    Ok(st)
-}
-
-/// "No thanks" to the cloud model on a weak-GPU PC: local chat stays unusable, chat uses Claude.
-#[tauri::command(async)]
-pub fn ollama_decline_cloud(state: State<AppState>) -> Result<crate::ollama::LocalStatus> {
-    let settings = with_ws(&state, |ws| ws.update_settings(crate::model::SettingsPatch { local_cloud_declined: Some(true), ..Default::default() }))?;
-    Ok(state.ollama.status(&crate::ollama::LocalCfg::from_settings(&settings)))
-}
-
-/// "Locate ollama.exe…": a file picker; the folder of the chosen ollama.exe is saved (searched
-/// first from then on), Ollama is started from it if stopped, and the new status returned.
-/// `None` when the user cancelled.
-#[tauri::command(async)]
-pub fn ollama_locate(app: AppHandle, state: State<AppState>) -> Result<Option<crate::ollama::LocalStatus>> {
-    use tauri_plugin_dialog::DialogExt;
-    let picked = app.dialog().file().set_title("Locate ollama.exe").add_filter("ollama.exe", &["exe"]).blocking_pick_file().and_then(|p| p.into_path().ok());
-    let Some(file) = picked else { return Ok(None) };
-    let name = file.file_name().map(|n| n.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
-    if name != "ollama.exe" && name != "ollama app.exe" {
-        return Err(AppError::Invalid("Pick the file named ollama.exe (in Ollama's install folder).".into()));
-    }
-    let dir = file.parent().map(|d| d.display().to_string()).unwrap_or_default();
-    let settings = with_ws(&state, |ws| ws.update_settings(crate::model::SettingsPatch { ollama_path: Some(dir), ..Default::default() }))?;
-    Ok(Some(state.ollama.check_again(&crate::ollama::LocalCfg::from_settings(&settings))))
 }
 
 #[tauri::command(async)]
@@ -723,36 +438,6 @@ pub fn reset_chat(state: State<AppState>, slug: String, thread: String) -> Resul
     with_ws(&state, |ws| ws.reset_chat(&slug, &thread))?;
     crate::sidecar::reset_thread(&state, &slug, &thread);
     Ok(())
-}
-
-/// "Quit Dreamer" in the sidebar: stops the Claude sidecar (and everything it started), then exits.
-#[tauri::command(async)]
-pub fn quit_app(app: AppHandle) {
-    crate::quit(&app);
-}
-
-/// The real state of the Windows Run entry (what the Settings toggle shows).
-#[tauri::command(async)]
-pub fn autostart_enabled(app: AppHandle) -> bool {
-    use tauri_plugin_autostart::ManagerExt;
-    app.autolaunch().is_enabled().unwrap_or(false)
-}
-
-/// Settings toggle: enables or disables the Run entry, remembers the choice, and returns the real state.
-#[tauri::command(async)]
-pub fn set_autostart(app: AppHandle, state: State<'_, AppState>, enabled: bool) -> Result<bool> {
-    use tauri_plugin_autostart::ManagerExt;
-    let al = app.autolaunch();
-    if enabled { al.enable() } else { al.disable() }.map_err(|e| crate::error::AppError::Invalid(e.to_string()))?;
-    state.ws.lock().map_err(|_| crate::error::AppError::Invalid("workspace lock poisoned".into()))?
-        .update_settings(crate::model::SettingsPatch { start_with_windows: Some(enabled), ..Default::default() })?;
-    Ok(al.is_enabled().unwrap_or(enabled))
-}
-
-/// The tray notice's "Keep running": remember it was seen, hide the window to the tray.
-#[tauri::command(async)]
-pub fn hide_to_tray(app: AppHandle) {
-    crate::hide_to_tray(&app);
 }
 
 #[cfg(test)]
@@ -920,66 +605,4 @@ pub fn read_import(state: State<AppState>, path: String) -> Result<String> {
 #[tauri::command(async)]
 pub fn archive_import(state: State<AppState>, path: String) -> Result<()> {
     with_ws(&state, |ws| ws.archive_import(&path))
-}
-
-/// Why each global shortcut failed to register: [quick capture, clipboard], None = fine.
-#[tauri::command]
-pub fn hotkey_status() -> [Option<String>; 2] {
-    crate::state::HOTKEY_ERRORS.lock().map(|e| e.clone()).unwrap_or([None, None])
-}
-
-/// "Split into cards" on the local model. Runs off the main thread (it can take a minute).
-#[tauri::command(async)]
-pub fn split_text(state: State<AppState>, text: String) -> Result<crate::clipboard::SplitResult> {
-    crate::clipboard::split_local(&state, &text)
-}
-
-// ---------- build runs (build_run.rs) ----------
-
-#[tauri::command(async)]
-pub fn build_preflight(state: State<AppState>, slug: String) -> Result<Value> {
-    crate::build_run::preflight(&state, &slug)
-}
-
-/// `dirty`: what to do with uncommitted changes ("stash" | "continue").
-#[tauri::command(async)]
-pub fn build_start(app: AppHandle, state: State<AppState>, slug: String, tasks: Vec<String>, dirty: String) -> Result<Value> {
-    crate::build_run::start(&app, &state, &slug, tasks, &dirty)
-}
-
-#[tauri::command(async)]
-pub fn build_interrupt(state: State<AppState>, run: String) -> Result<()> {
-    crate::build_run::interrupt(&state, &run)
-}
-
-/// `decision`: "once" | "prefix" | "deny" (with an optional reason for Claude).
-#[tauri::command(async)]
-pub fn build_answer(state: State<AppState>, run: String, req: String, decision: String, reason: Option<String>) -> Result<()> {
-    crate::build_run::answer(&state, &run, &req, &decision, reason)
-}
-
-#[tauri::command(async)]
-pub fn build_runs(state: State<AppState>, slug: String) -> Result<Vec<Value>> {
-    crate::build_run::list(&state, &slug)
-}
-
-#[tauri::command(async)]
-pub fn build_events(state: State<AppState>, slug: String, run: String) -> Result<Vec<Value>> {
-    crate::build_run::events(&state, &slug, &run)
-}
-
-#[tauri::command(async)]
-pub fn build_file_diff(state: State<AppState>, slug: String, run: String, file: String) -> Result<String> {
-    crate::build_run::file_diff(&state, &slug, &run, &file)
-}
-
-/// "merge" | "delete" | "keep" the run's branch.
-#[tauri::command(async)]
-pub fn build_act(state: State<AppState>, slug: String, run: String, action: String) -> Result<Value> {
-    crate::build_run::act(&state, &slug, &run, &action)
-}
-
-#[tauri::command(async)]
-pub fn build_open_terminal(state: State<AppState>, slug: String) -> Result<()> {
-    crate::build_run::open_terminal(&state, &slug)
 }

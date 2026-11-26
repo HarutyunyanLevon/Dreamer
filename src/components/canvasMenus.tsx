@@ -3,10 +3,9 @@ import type { Workspace } from "../state/useWorkspace";
 import { STAGES, STAGE_LABEL } from "../theme/types";
 import type { Rect } from "./cardGeometry";
 import type { MenuItem, MenuSection } from "./ContextMenu";
-import { CONVERTIBLE, KIND_LABEL, isAnswered, SWATCHES, SWATCH_LABEL, hasStage, labelSize, swatchOf, type LabelSize } from "./kinds";
+import { CONVERTIBLE, KIND_LABEL, isAnswered, SWATCHES, SWATCH_LABEL, hasStage, swatchOf } from "./kinds";
 import { isClip, isImage } from "./Attachments";
 import { pickBundle } from "./Import";
-import { openScan } from "./Scan";
 import type { ArtifactType } from "../api";
 import { ARTIFACT_LABEL, ARTIFACT_TYPES, artifactType } from "./artifacts/prompts";
 
@@ -106,8 +105,6 @@ function canvasMenu(p: { x: number; y: number }, env: MenuEnv): MenuSection[] {
             {
               items: [
                 { label: "Card (Mist)", icon: stageDot("mist"), run: add("card") },
-                { label: "Sticky", run: add("sticky") },
-                { label: "Text label", run: add("label") },
                 { label: "Checklist", run: add("checklist") },
                 { label: "Question list", run: add("questions") },
                 { label: "Frame", run: add("frame") },
@@ -144,17 +141,7 @@ function canvasMenu(p: { x: number; y: number }, env: MenuEnv): MenuSection[] {
           submenu: [
             {
               items: [
-                {
-                  label: "Gap check…",
-                  run: () =>
-                    env.askClaude(
-                      null,
-                      "Gap check: go through this project's cards and list the most important gaps: core decisions not made yet, questions nobody has answered, contradictions between cards, and parts of the game no card covers. Then propose up to 3 ghost cards for the biggest gaps.",
-                      { prefill: true },
-                    ),
-                },
                 { label: "Summarize project…", run: () => env.ws.openHandoff({ kind: "project" }) },
-                { label: "Scan repo for built features…", run: openScan },
               ],
             },
           ],
@@ -210,7 +197,7 @@ function claudeCardMenu(c: Card, env: MenuEnv): MenuItem {
     { label: "Critique", run: ask("/critique") },
   ];
   if (hasImages) items.push({ label: "Describe images", run: ask("/describe") });
-  items.push({ label: "Summarize from here…", run: () => env.ws.openHandoff({ kind: "card", id: c.id }) }, { label: "Make build prompt", run: () => env.ws.openTask({ kind: "card", id: c.id }) });
+  items.push({ label: "Summarize from here…", run: () => env.ws.openHandoff({ kind: "card", id: c.id }) });
   return { label: "Claude", submenu: [{ items }] };
 }
 
@@ -258,7 +245,6 @@ function artifactMenu(c: Card, env: MenuEnv): MenuSection[] {
 
 function cardMenu(c: Card, env: MenuEnv): MenuSection[] {
   const { ws } = env;
-  const isLabel = c.kind === "label";
   const addItems: MenuItem[] = [
     { label: "Image…", run: () => env.pickImages({ cardId: c.id }) },
     { label: "Web clip…", run: () => env.promptClip({ cardId: c.id }) },
@@ -282,19 +268,6 @@ function cardMenu(c: Card, env: MenuEnv): MenuSection[] {
       submenu: [{ items: CONVERTIBLE.filter((k) => k !== c.kind).map((k) => ({ label: KIND_LABEL[k], run: () => void ws.convertKind(c.id, k) })) }],
     },
   ];
-  if (c.kind === "sticky") {
-    arrange.push({
-      label: "Color",
-      submenu: [{ items: SWATCHES.map((sw) => ({ label: SWATCH_LABEL[sw], icon: swatch(sw), checked: swatchOf(c.color) === sw, run: () => void ws.updateCard(c.id, { color: sw }) })) }],
-    });
-  }
-  if (isLabel) {
-    const sizes: [LabelSize, string][] = [["s", "Small"], ["m", "Medium"], ["l", "Large"]];
-    arrange.push({
-      label: "Size",
-      submenu: [{ items: sizes.map(([sz, name]) => ({ label: name, checked: labelSize(c) === sz, run: () => void ws.updateCard(c.id, { fields: { ...c.fields, size: sz } }) })) }],
-    });
-  }
   arrange.push(
     { label: "Wrap in frame", hint: "Ctrl+G", run: () => env.wrap([c.id]) },
     pinItem(c.id, env),
@@ -306,7 +279,7 @@ function cardMenu(c: Card, env: MenuEnv): MenuSection[] {
       title: "Add",
       items: [
         { label: "Open", hint: "Enter", run: () => env.openEditor(c) },
-        { label: "Add", disabled: isLabel ? "Labels don't show images or clips" : undefined, submenu: [{ items: addItems }] },
+        { label: "Add", submenu: [{ items: addItems }] },
         stageMenu([c], env),
         ...(answered.length ? [{ label: "Clear answered", run: () => void env.ws.deleteChecklistItems(c.id, answered.map((i) => i.id)) }] : []),
       ],
@@ -439,7 +412,6 @@ function multiMenu(cards: Card[], env: MenuEnv): MenuSection[] {
         { label: "Merge with Claude", run: () => env.merge(ids) },
         { label: "Summarize selection…", run: () => env.ws.openHandoff({ kind: "selection", ids: cards.map((c) => c.id) }) },
         { label: "Organize with Claude", run: () => env.ws.requestChat({ text: "/organize selection", send: true }) },
-        { label: "Make build prompt", run: () => env.ws.openTask({ kind: "selection", ids: cards.map((c) => c.id) }) },
       ],
     },
     {
@@ -538,7 +510,6 @@ function frameMenu(id: string, env: MenuEnv): MenuSection[] {
       items: [
         { label: "Summarize this frame…", disabled: empty, run: () => env.ws.openHandoff({ kind: "frames", ids: [id] }) },
         { label: "Organize this frame", disabled: empty, run: () => env.ws.requestChat({ text: `/organize frame ${id}`, send: true }) },
-        { label: "Make build prompt", disabled: empty, run: () => env.ws.openTask({ kind: "frames", ids: [id] }) },
       ],
     },
     {

@@ -27,7 +27,6 @@ tags: [fishing, input]
 frame: Harbour                 # optional, overrides the header
 links: [{to: net, label: needs}]   # to = a ref of this bundle or a card id
 fields: {difficulty: 2}        # optional
-build: {status: built, files: [src/fish.ts], commits: [abc123], notes: done}   # optional
 ---
 Markdown body until the next `<!-- card -->` line or the end of the file.
 A `---` line inside the body is fine.
@@ -41,20 +40,20 @@ A `---` line inside the body is fine.
 | Unknown header or card key | ignored, warning |
 | Unknown `source` | `other`, warning |
 | Unknown `stage` | `mist`, warning |
-| `stage: built` | stage Built plus a `build` block (`status: built` unless given) |
+| `build:` key | ignored (build status is not tracked in Dreamer); `stage: built` is just the Built stage |
 | Duplicate `ref` | renamed `ref-2`, warning |
 | Missing `ref` | made up, warning |
 | Link to an unknown ref | dropped, warning |
 | Bad YAML in one card | that card skipped, warning; the rest import |
 | No `bundle_id` | made from the title and refs (stable for the same content), warning |
 
-**Detection** (`bundle::detect`, `looksLikeBundle`): after an optional fence, the first non-blank line is `---` and the header contains `dreamer_bundle`. Plain cards with front matter are not bundles.
+**Detection** (`looksLikeBundle`): after an optional fence, the first non-blank line is `---` and the header contains `dreamer_bundle`. Plain cards with front matter are not bundles.
 
 ## Import
 
 1. **Target.** Project by slug/name (case-insensitive), else the open project. Version by title, else the open one. Frames by title on that version's root canvas; missing frames are created to the right of existing content. An unresolved project or version makes the preview ask.
 2. **Per card.**
-   - `id` given and the card exists: update proposal (the normal proposal flow; the `build` block shows in the diff).
+   - `id` given and the card exists: update proposal (the normal proposal flow).
    - else `bundle_id` + `ref` equals a card's stored `import`: update proposal, or replace the ghost if it is still a ghost.
    - else a new ghost card with `import: {bundle_id, ref, source}`.
 3. **Placement.** Deterministic grid (the organize layout helper) at the paste/drop point or inside the target frame; never overlapping.

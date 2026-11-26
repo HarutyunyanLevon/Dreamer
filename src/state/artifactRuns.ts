@@ -7,7 +7,7 @@ import { claudeApi } from "../api/claudeIndex";
  * SpriteCook job progress), whether SpriteCook could make images in an artifact's last session, and
  * the SpriteCook credit balance (chat header). Fed by claude-events; read with the hooks below.
  */
-export interface ArtifactRun {
+interface ArtifactRun {
   turn: string;
   label: string;
   /** 0..1 when SpriteCook reports it, else null (indeterminate bar). */
@@ -15,13 +15,13 @@ export interface ArtifactRun {
   credits: number;
   startedAt: number;
 }
-export interface Balance {
+interface Balance {
   credits: number | null;
   /** "no_key" = no SpriteCook key saved; anything else is a failed check. */
   error: string | null;
   loading: boolean;
 }
-export type SpritecookNote = { reason: "no_key" | "unreachable"; at: number };
+type SpritecookNote = { reason: "no_key" | "unreachable"; at: number };
 
 let runs: Record<string, ArtifactRun> = {};
 let notes: Record<string, SpritecookNote> = {};

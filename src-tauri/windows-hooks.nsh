@@ -7,9 +7,11 @@
   ${If} ${Silent}
     Delete "$DESKTOP\${PRODUCTNAME}.lnk"
   ${EndIf}
+  ; Older versions started with Windows; that entry is gone for good.
+  DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "Dreamer"
 !macroend
 
 !macro NSIS_HOOK_POSTUNINSTALL
-  ; Dreamer's "start with Windows" entry (tauri-plugin-autostart does not remove it).
+  ; The leftover "start with Windows" entry of older versions.
   DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "Dreamer"
 !macroend

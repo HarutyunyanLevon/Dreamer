@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, type BuildUpdate, type OrganizePlanData, type OrganizeScope } from "../api";
+import { api, type OrganizePlanData, type OrganizeScope } from "../api";
 import { claudeApi, type ClaudeEvent, type ClaudeStatus, type SearchResultRef } from "../api/claudeIndex";
-import type { ActivityStep, Backend, LocalFallback, ModelTier, RouteReason, TokenUsage } from "../api/claude";
+import type { ActivityStep, ModelTier, TokenUsage } from "../api/claude";
 import { artifactRuns } from "./artifactRuns";
 
 let seq = 0;
@@ -48,14 +48,6 @@ function closeSteps(steps: ActivityStep[] | undefined, status: "done" | "error")
 /** What a finished turn's steps keep in the thread file. */
 const trimThinking = (steps: ActivityStep[] | undefined) => steps?.map((s) => (s.text && s.text.length > THINKING_KEEP ? { ...s, text: `${s.text.slice(0, THINKING_KEEP)}…` } : s));
 
-/** "Build update: 3 built, 1 new, 1 blocked" (only what happened). */
-export function buildLine(u: BuildUpdate): string {
-  const parts = [
-    [u.built.length, "built"], [u.partial.length, "partly built"], [u.in_progress.length, "in progress"], [u.new.length, "new"], [u.blocked.length, "blocked"],
-  ].filter(([n]) => n).map(([n, w]) => `${n} ${w}`);
-  return `Build update: ${parts.join(", ") || "nothing new"}`;
-}
-
 /** The thread's context size after its last turn (header meter). */
 export interface ThreadContext {
   tokens: number;
@@ -63,7 +55,7 @@ export interface ThreadContext {
 }
 
 /** `item`: the handoff gap item it settles (the answer goes to the Tech or Project decisions card); `itemId`: the checklist item it answers (checklist grill). */
-export interface AskedQuestion {
+interface AskedQuestion {
   id: string;
   question: string;
   choices: string[];
@@ -102,9 +94,7 @@ export interface ChatMessage {
   /** Pages Claude fetched with WebFetch this turn ("Save as clip"). */
   fetched?: { url: string; saved?: boolean }[];
   /** "compacted": a faint divider where the thread was summarized into a fresh session (text is empty). */
-  kind?: "compacted" | "build";
-  /** kind "build": what a STATUS.md change did, with jump links. */
-  build?: BuildUpdate;
+  kind?: "compacted";
   at?: string;
   summary?: string;
   /** A /grill-me turn: show only a typing indicator while streaming, never the streamed text. */
@@ -129,44 +119,31 @@ export interface ChatMessage {
   tier?: ModelTier;
   retried?: boolean;
   retriedFrom?: string;
-  /** Where the turn ran (local model or Claude); `escalated`: a one-turn Claude visit from a local thread. */
-  backend?: Backend;
-  escalated?: boolean;
-  /** Why it went to Claude instead of the local model; `routeNote`: what was wrong with Ollama. */
-  routeReason?: RouteReason | null;
-  routeNote?: string | null;
-  /** The fallback note offers "Restart" (Ollama installed, stopped or stuck). */
-  routeCanRestart?: boolean;
-  /** A local turn that failed: the reply offers "Retry with Claude". */
-  fallback?: LocalFallback;
   // ---- transient (never saved) ----
   /** When the turn was sent / when its last activity event arrived (ms): elapsed time and stall warning. */
   startedAt?: number;
   lastEventAt?: number;
-  /** Waiting for Ollama to load the model before the turn runs. */
-  localLoading?: boolean;
   /** Tokens of the thread summary that ran before this turn. */
   compactUsage?: TokenUsage;
   /** The memory pass after this turn is running: its tokens so far. */
   memoryBusy?: { input: number; output: number };
 }
 
-const TRANSIENT: (keyof ChatMessage)[] = ["localLoading", "streaming", "startedAt", "lastEventAt", "compactUsage", "memoryBusy"];
+const TRANSIENT: (keyof ChatMessage)[] = ["streaming", "startedAt", "lastEventAt", "compactUsage", "memoryBusy"];
 
-/** An organize turn: its scope, the user's optional instruction, and a backend they forced (Redo). */
+/** An organize turn: its scope and the user's optional instruction. */
 export interface OrganizeReq {
   scope: OrganizeScope;
   /** frame / selection: the cards in scope; `name` = the frame's title. */
   ids?: string[];
   name?: string;
   instruction: string;
-  backend?: Backend | null;
   /** The plan this one continues from: a revision, or only its unplaced cards (`rest`). */
   prior?: OrganizePlanData | null;
   rest?: boolean;
 }
 
-type SendOpts = { quiet?: boolean; web?: boolean; selection?: string[]; memory?: boolean; question?: string; think?: boolean; pin?: ModelTier | null; escalate?: "retry"; organize?: OrganizeReq; artifact?: string; recapFrom?: string };
+type SendOpts = { quiet?: boolean; web?: boolean; selection?: string[]; memory?: boolean; question?: string; think?: boolean; pin?: ModelTier | null; organize?: OrganizeReq; artifact?: string; recapFrom?: string };
 type ArtifactEscalation = Extract<ClaudeEvent, { type: "artifact_escalate" }>;
 
 type LinkProposal = Extract<ClaudeEvent, { type: "link_proposal" }>;
@@ -176,10 +153,8 @@ interface Thread {
   slug: string;
   thread: string;
   messages: ChatMessage[];
-  /** The thread's Claude session (used when local chat is off or unavailable). */
+  /** The thread's Claude session. */
   sessionId?: string;
-  /** The thread's local-model session (Ollama). */
-  localSessionId?: string;
   context?: ThreadContext;
   loaded: boolean;
   /** Settles once the thread file has been read (so a first send can resume its session). */
@@ -244,7 +219,7 @@ export function useClaudeChat(opts: { slug: string | null; thread: string; onLin
           for (const k of TRANSIENT) delete out[k];
           return out;
         });
-        api.saveChat(t.slug, t.thread, { version: 1, sessionId: t.sessionId, localSessionId: t.localSessionId, messages }).catch(() => {});
+        api.saveChat(t.slug, t.thread, { version: 1, sessionId: t.sessionId, messages }).catch(() => {});
       }, SAVE_DEBOUNCE_MS),
     );
   }, []);
@@ -287,7 +262,6 @@ export function useClaudeChat(opts: { slug: string | null; thread: string; onLin
       .then((file) => {
         t.messages = [...(Array.isArray(file.messages) ? (file.messages as ChatMessage[]).map(migrateQuestion) : []), ...t.messages];
         t.sessionId = file.sessionId ?? t.sessionId;
-        t.localSessionId = file.localSessionId ?? t.localSessionId;
         if (!t.context && typeof file.last_input_tokens === "number" && file.last_input_tokens > 0) {
           t.context = { tokens: file.last_input_tokens, window: file.context_window || DEFAULT_CONTEXT_WINDOW };
         }
@@ -325,10 +299,6 @@ export function useClaudeChat(opts: { slug: string | null; thread: string; onLin
           return;
         }
         if (e.type === "turn_ended") return;
-        if (e.type === "text_reset") {
-          update(idToKey.current.get(e.id), (ms) => ms.map((m) => (m.id === e.id ? { ...m, text: "", lastEventAt: at } : m)));
-          return;
-        }
         if (e.type === "message_done" || (e.type === "error" && e.id)) {
           finished.current.add(e.id!);
           aliveAt.current.delete(e.id!);
@@ -345,27 +315,21 @@ export function useClaudeChat(opts: { slug: string | null; thread: string; onLin
           const u = { input: e.input, cacheRead: e.cacheRead, cacheCreate: e.cacheCreate, output: e.output, ...(e.calls ? { calls: e.calls } : {}) };
           update(idToKey.current.get(e.id), (ms) => ms.map((m) => (m.id === e.id ? { ...m, ...(e.phase === "compact" ? { compactUsage: u } : { usage: u }), lastEventAt: at } : m)));
         } else if (e.type === "model_note") {
-          // A local retry keeps the model; a fast->main retry names the new one.
-          update(idToKey.current.get(e.id), (ms) => ms.map((m) => (m.id === e.id ? (e.localRetry ? { ...m, lastEventAt: at } : { ...m, model: e.model, retried: e.retried, retriedFrom: e.from, lastEventAt: at }) : m)));
+          // A fast->main retry names the new model.
+          update(idToKey.current.get(e.id), (ms) => ms.map((m) => (m.id === e.id ? { ...m, model: e.model, retried: e.retried, retriedFrom: e.from, lastEventAt: at } : m)));
         } else if (e.type === "route") {
           update(
             idToKey.current.get(e.id),
-            (ms) => ms.map((m) => (m.id === e.id ? { ...m, backend: e.backend, model: e.model, escalated: e.escalated, routeReason: e.reason ?? null, routeNote: e.note ?? null, routeCanRestart: e.canRestart ?? false, localLoading: false, lastEventAt: at } : m)),
+            (ms) => ms.map((m) => (m.id === e.id ? { ...m, model: e.model, lastEventAt: at } : m)),
             true,
           );
-        } else if (e.type === "local-wait") {
-          update(idToKey.current.get(e.id), (ms) => ms.map((m) => (m.id === e.id ? { ...m, localLoading: true, lastEventAt: at } : m)));
         } else if (e.type === "memory_progress") {
           update(idToKey.current.get(e.id), (ms) => ms.map((m) => (m.id === e.id ? { ...m, memoryBusy: e.active ? { input: e.input, output: e.output } : undefined } : m)));
         } else if (e.type === "message_done") {
           const key = idToKey.current.get(e.id);
           const t = key ? threads.current.get(key) : undefined;
-          // An escalation ran in a throwaway Claude session: the thread keeps its own session and context.
-          if (t && e.sessionId && !e.escalated) {
-            if (e.backend === "local") t.localSessionId = e.sessionId;
-            else t.sessionId = e.sessionId;
-          }
-          const tokens = e.escalated ? 0 : e.contextTokens ?? e.inputTokens;
+          if (t && e.sessionId) t.sessionId = e.sessionId;
+          const tokens = e.contextTokens ?? e.inputTokens;
           if (t && tokens) {
             t.context = { tokens, window: e.contextWindow || t.context?.window || DEFAULT_CONTEXT_WINDOW };
             if (key === currentKey.current) setContext(t.context);
@@ -383,11 +347,8 @@ export function useClaudeChat(opts: { slug: string | null; thread: string; onLin
                       steps: trimThinking(closeSteps(m.steps, e.isError ? "error" : "done")),
                       usage: e.usage ?? m.usage,
                       durationMs: e.durationMs ?? (m.startedAt ? at - m.startedAt : undefined),
-                      // A local turn keeps the model name from its route event (the plain Ollama name).
-                      model: m.backend === "local" ? m.model ?? e.model : e.model ?? m.model,
+                      model: e.model ?? m.model,
                       tier: e.tier ?? m.tier,
-                      backend: e.backend ?? m.backend,
-                      ...(e.fallback ? { fallback: e.fallback } : {}),
                       ...(e.artifact ? { artifact: { id: e.artifact.id, credits: e.artifact.credits, paidCalls: e.artifact.paidCalls } } : {}),
                       ...(e.retried ? { retried: true, retriedFrom: e.retriedFrom } : {}),
                     }
@@ -401,8 +362,7 @@ export function useClaudeChat(opts: { slug: string | null; thread: string; onLin
           const key = idToKey.current.get(e.id);
           const t = key ? threads.current.get(key) : undefined;
           if (t) {
-            if (e.backend === "local") t.localSessionId = undefined;
-            else t.sessionId = undefined;
+            t.sessionId = undefined;
             t.context = t.context ? { ...t.context, tokens: 0 } : undefined;
             if (key === currentKey.current) setContext(t.context ?? null);
           }
@@ -519,7 +479,7 @@ export function useClaudeChat(opts: { slug: string | null; thread: string; onLin
       update(key, (ms) => [...ms, { id: `${id}-u`, role: "user", text: displayText ?? text }, { id, role: "claude", text: "", streaming: true, quiet: opts?.quiet, startedAt: now, lastEventAt: now, ...(opts?.organize ? { organizeReq: opts.organize } : {}), ...(opts?.artifact ? { artifact: { id: opts.artifact } } : {}) }], true);
       if (opts?.artifact) artifactRuns.start(opts.artifact, id);
       // A thread opened a moment ago (e.g. from the canvas context menu) may still be loading.
-      Promise.resolve(t.loaded ? undefined : t.loading).then(() => claudeApi.send(t.slug, id, text, context, t.thread, t.sessionId, { web: opts?.web, selection: opts?.selection, memory: opts?.memory, question: opts?.question, think: opts?.think, pin: opts?.pin, resumeLocal: t.localSessionId, escalate: opts?.escalate, organize: opts?.organize?.scope, scopeIds: opts?.organize?.ids ?? null, scopeName: opts?.organize?.name ?? null, organizeBackend: opts?.organize?.backend ?? null, organizeInstruction: opts?.organize?.instruction ?? null, organizePrior: opts?.organize?.prior ?? null, organizeRest: opts?.organize?.rest ?? false, artifact: opts?.artifact ?? null, recapFrom: opts?.recapFrom ?? null })).catch((e) => {
+      Promise.resolve(t.loaded ? undefined : t.loading).then(() => claudeApi.send(t.slug, id, text, context, t.thread, t.sessionId, { web: opts?.web, selection: opts?.selection, memory: opts?.memory, question: opts?.question, think: opts?.think, pin: opts?.pin, organize: opts?.organize?.scope, scopeIds: opts?.organize?.ids ?? null, scopeName: opts?.organize?.name ?? null, organizeInstruction: opts?.organize?.instruction ?? null, organizePrior: opts?.organize?.prior ?? null, organizeRest: opts?.organize?.rest ?? false, artifact: opts?.artifact ?? null, recapFrom: opts?.recapFrom ?? null })).catch((e) => {
         update(key, (ms) => ms.map((m) => (m.id === id ? { ...m, text: String(e), streaming: false, isError: true } : m)), true);
         finishBusy(id);
       });
@@ -543,54 +503,6 @@ export function useClaudeChat(opts: { slug: string | null; thread: string; onLin
       return true;
     },
     [update, sendText],
-  );
-
-  /**
-   * "Retry with Claude" on a failed local turn: drops it and its user message, then sends the same
-   * turn to Claude once (with the local model's recap of the thread). The next turn is local again.
-   */
-  const retryWithClaude = useCallback(
-    (replyId: string) => {
-      const key = currentKey.current;
-      if (!key || busyId.current) return;
-      const t = threads.current.get(key);
-      const args = sentArgs.current.get(replyId);
-      const user = t?.messages.find((m) => m.id === `${replyId}-u`);
-      if (!args && !user) return;
-      update(key, (ms) => ms.filter((m) => m.id !== replyId && m.id !== `${replyId}-u`), true);
-      if (args) sendText(args.text, args.context, args.displayText, { ...args.opts, escalate: "retry" });
-      else sendText(user!.text, undefined, undefined, { escalate: "retry" });
-    },
-    [update, sendText],
-  );
-
-  /** "Retry locally" after a restart: sends the same turn again on the local model, as a new reply (the Claude reply stays). */
-  const retryLocally = useCallback(
-    (replyId: string) => {
-      if (busyId.current) return;
-      const args = sentArgs.current.get(replyId);
-      const key = currentKey.current;
-      const user = key ? threads.current.get(key)?.messages.find((m) => m.id === `${replyId}-u`) : undefined;
-      if (args) sendText(args.text, args.context, args.displayText, args.opts);
-      else if (user) sendText(user.text);
-    },
-    [sendText],
-  );
-
-  /** A STATUS.md change as a line in the project thread (also when that thread is not the open one). */
-  const addBuildNote = useCallback(
-    (u: BuildUpdate) => {
-      const msg: ChatMessage = { id: `build-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, role: "claude", kind: "build", text: buildLine(u), at: new Date().toISOString(), build: u };
-      const key = keyOf(u.slug, "project");
-      if (threads.current.has(key)) update(key, (ms) => [...ms, msg], true);
-      else {
-        api
-          .loadChat(u.slug, "project")
-          .then((file) => api.saveChat(u.slug, "project", { ...file, messages: [...(Array.isArray(file.messages) ? file.messages : []), msg] }))
-          .catch(() => {});
-      }
-    },
-    [update],
   );
 
   /** Marks a question form sent, with the answers (by question id; absent = skipped). */
@@ -685,7 +597,7 @@ export function useClaudeChat(opts: { slug: string | null; thread: string; onLin
       aliveAt.current.delete(id);
       void claudeApi.interrupt({ hard: true });
       const text = `No response from Dreamer's Claude helper for ${Math.round(LAST_RESORT_MS / 1000)}s. Retry to send it again.`;
-      update(key, (ms) => ms.map((x) => (x.id === id ? { ...x, text, streaming: false, isError: true, ...(x.backend === "local" ? { fallback: "stalled" as const } : {}), steps: trimThinking(closeSteps(x.steps, "error")) } : x)), true);
+      update(key, (ms) => ms.map((x) => (x.id === id ? { ...x, text, streaming: false, isError: true, steps: trimThinking(closeSteps(x.steps, "error")) } : x)), true);
       finishBusy(id);
     }, 5000);
     return () => clearInterval(timer);
@@ -700,7 +612,6 @@ export function useClaudeChat(opts: { slug: string | null; thread: string; onLin
     await api.resetChat(t.slug, t.thread);
     t.messages = [];
     t.sessionId = undefined;
-    t.localSessionId = undefined;
     t.context = undefined;
     if (currentKey.current === key) {
       setMessages([]);
@@ -708,7 +619,5 @@ export function useClaudeChat(opts: { slug: string | null; thread: string; onLin
     }
   }, []);
 
-  return { status, refreshStatus, messages, busy, context, addBuildNote, sendText, retry, retryWithClaude, retryLocally, retryStalled, answerQuestions, answerCredit, markFetchSaved, setOrganize, undoMemory, interrupt, reset };
+  return { status, refreshStatus, messages, busy, context, sendText, retry, retryStalled, answerQuestions, answerCredit, markFetchSaved, setOrganize, undoMemory, interrupt, reset };
 }
-
-export type ClaudeChat = ReturnType<typeof useClaudeChat>;

@@ -23,7 +23,6 @@ pub struct PlanCard {
     pub action: &'static str,
     pub card_id: Option<String>,
     pub frame: Option<String>,
-    pub has_build: bool,
 }
 
 #[derive(Serialize)]
@@ -120,7 +119,6 @@ impl Workspace {
                     action,
                     card_id,
                     frame: c.frame.clone().or(r.frame.clone()),
-                    has_build: c.build.is_some(),
                 }
             })
             .collect();
@@ -265,10 +263,7 @@ impl Workspace {
         for (i, (c, a)) in b.cards.iter().zip(&acts).enumerate() {
             match a {
                 Act::Update(id) => {
-                    let mut p = json!({ "title": c.title, "body": c.body, "tags": c.tags, "stage": c.stage, "reason": reason, "created": now() });
-                    if let Some(bd) = &c.build {
-                        p["build"] = bd.clone();
-                    }
+                    let p = json!({ "title": c.title, "body": c.body, "tags": c.tags, "stage": c.stage, "reason": reason, "created": now() });
                     self.write_proposal(&slug, id, &p)?;
                     res.proposals.push(id.clone());
                     ids[i] = Some(id.clone());
@@ -283,7 +278,6 @@ impl Workspace {
                         self.trash_card(&slug, old, "replaced by a re-sent bundle")?;
                         res.replaced.push(old.clone());
                     }
-                    let build = c.build.clone();
                     let card = self.create_card(
                         &slug,
                         NewCard {
@@ -297,7 +291,6 @@ impl Workspace {
                             x: Some(x),
                             y: Some(y),
                             import: Some(ImportRef { bundle_id: b.header.bundle_id.clone(), r#ref: c.r#ref.clone(), source: source.clone() }),
-                            build,
                             ..Default::default()
                         },
                     )?;
@@ -346,29 +339,22 @@ impl Workspace {
 
     // ----- watched drop folders -----
 
-    /// `<workspace>/import/` and each project's `<repo>/.dreamer/outbox/` (project slug for the latter).
-    fn import_dirs(&self) -> Vec<(PathBuf, Option<String>)> {
-        let mut v = vec![(self.root.join("import"), None)];
-        for p in self.list_projects().unwrap_or_default() {
-            if let Some(t) = self.project_meta(&p.slug).ok().and_then(|m| m.handoff_target).filter(|t| !t.trim().is_empty()) {
-                v.push((PathBuf::from(t).join(".dreamer").join("outbox"), Some(p.slug)));
-            }
-        }
-        v
+    /// The watched drop folder: `<workspace>/import/`.
+    fn import_dir(&self) -> PathBuf {
+        self.root.join("import")
     }
 
     /// New `*.dreamer.md` files waiting in the drop folders.
     pub fn scan_imports(&self) -> Vec<ImportOffer> {
         let mut out = Vec::new();
-        for (dir, project) in self.import_dirs() {
-            let Ok(rd) = fs::read_dir(&dir) else { continue };
+        if let Ok(rd) = fs::read_dir(self.import_dir()) {
             for e in rd.filter_map(|e| e.ok()) {
                 let path = e.path();
                 if !path.is_file() || !path.file_name().is_some_and(|n| n.to_string_lossy().to_lowercase().ends_with(".dreamer.md")) {
                     continue;
                 }
                 let Some(b) = fs::read_to_string(&path).ok().and_then(|t| bundle::parse(&t).ok()) else { continue };
-                out.push(ImportOffer { path: path.to_string_lossy().into_owned(), title: b.header.title, source: b.header.source, count: b.cards.len(), project: project.clone() });
+                out.push(ImportOffer { path: path.to_string_lossy().into_owned(), title: b.header.title, source: b.header.source, count: b.cards.len() });
             }
         }
         out
@@ -377,7 +363,7 @@ impl Workspace {
     fn check_import_path(&self, path: &str) -> Result<PathBuf> {
         let p = PathBuf::from(path);
         let parent = p.parent().ok_or_else(|| AppError::Invalid("bad path".into()))?;
-        if self.import_dirs().iter().any(|(d, _)| d == parent) { Ok(p) } else { Err(AppError::Invalid("not in an import folder".into())) }
+        if parent == self.import_dir() { Ok(p) } else { Err(AppError::Invalid("not in an import folder".into())) }
     }
 
     pub fn read_import(&self, path: &str) -> Result<String> {
@@ -405,7 +391,6 @@ pub struct ImportOffer {
     pub title: String,
     pub source: String,
     pub count: usize,
-    pub project: Option<String>,
 }
 
 #[cfg(test)]
@@ -434,7 +419,7 @@ mod tests {
         assert!(a.meta.ghost && a.meta.source == Source::Claude);
         assert_eq!(a.meta.import.as_ref().unwrap().r#ref, "a");
         assert_eq!(a.meta.links[0].to, res.created[1]);
-        assert!(ws.read_card(&slug, &res.created[1]).unwrap().meta.extra.contains_key("build"));
+        assert!(!ws.read_card(&slug, &res.created[1]).unwrap().meta.extra.contains_key("build"), "bundle build blocks are ignored");
         // No two cards overlap, each sits inside its frame.
         let d = ws.load_project(&slug).unwrap();
         let cv = &d.canvas;
@@ -450,7 +435,6 @@ mod tests {
         assert_eq!((again.cards[0].action, again.cards[1].action), ("update", "replace"));
         let r2 = ws.apply_bundle(B, &t).unwrap();
         assert_eq!((r2.created.len(), r2.proposals.len(), r2.replaced.len(), r2.frames.len()), (1, 1, 1, 0));
-        assert!(ws.read_proposal(&slug, &res.created[0]).unwrap()["build"].is_null());
         ws.undo_import(&r2).unwrap();
         assert!(ws.read_proposal(&slug, &res.created[0]).is_none());
         assert!(ws.read_card(&slug, &res.created[1]).is_ok());

@@ -14,7 +14,7 @@ const ART_MODES: (ArtMode | null)[] = [null, { mode: "pixel", pixelSize: 16 }, {
 const modeKey = (m: ArtMode | null | undefined) => (m ? `${m.mode}:${m.mode === "pixel" ? m.pixelSize ?? 32 : ""}` : "");
 
 /** The theme picker of an artifact header: the active theme (default) or a specific one. */
-export function ThemeSelect({ slug, view, onChange }: { slug: string; view: View; onChange: (v: View) => void }) {
+function ThemeSelect({ slug, view, onChange }: { slug: string; view: View; onChange: (v: View) => void }) {
   const [themes, setThemes] = useState<ArtifactThemeRef[]>([]);
   useEffect(() => {
     api.artifactThemes(slug).then(setThemes).catch(() => setThemes([]));
@@ -40,7 +40,7 @@ export function ThemeSelect({ slug, view, onChange }: { slug: string; view: View
 }
 
 /** Art mode: from the theme (default) or a per-artifact override. */
-export function ArtModeSelect({ slug, view, onChange }: { slug: string; view: View; onChange: (v: View) => void }) {
+function ArtModeSelect({ slug, view, onChange }: { slug: string; view: View; onChange: (v: View) => void }) {
   const inherited = view.type === "theme" ? null : view.inherited?.spec.artMode;
   return (
     <select

@@ -1,5 +1,5 @@
 import { Fragment, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { api, TECH_GAP_ITEM, type Card, type OrganizePlanData, type ProjectData } from "../api";
+import { api, type Card, type OrganizePlanData, type ProjectData } from "../api";
 import { openQuestions } from "./kinds";
 import { useClaudeChat, type ChatMessage } from "../state/useClaudeChat";
 import type { Workspace } from "../state/useWorkspace";
@@ -9,14 +9,9 @@ import type { usePanels } from "../state/usePanels";
 import { ScrollArea } from "../ui/Scroll";
 import { Modal } from "../ui/Modal";
 import { ActivitySummary, LiveActivity, Tokens, fmtTokens, modelLabel } from "./Activity";
-import { isCloudModel } from "../api/claude";
-import type { LocalStatus, ModelTier } from "../api/claude";
-import type { SkillStatus, SpritecookKeyStatus } from "../api";
-import { claudeApi } from "../api/claudeIndex";
-import { LocalSetup } from "./LocalSetup";
-import { RESTART_LABEL, useOllamaRestart } from "../state/useOllamaRestart";
+import type { ModelTier } from "../api/claude";
+import type { SpritecookKeyStatus } from "../api";
 import { ThreadMenu } from "./chat/ThreadMenu";
-import { Popover } from "./chat/Popover";
 import { PanelMenu } from "./chat/PanelMenu";
 import { ModelChip } from "./chat/ModelChip";
 import { ActionMenu, filterActions, type ChatAction } from "./chat/ActionMenu";
@@ -25,8 +20,6 @@ import type { OrganizeReq } from "../state/useClaudeChat";
 import { cardRect } from "./cardGeometry";
 import { centerInside } from "./Frames";
 import { refreshBalance, useBalance } from "../state/artifactRuns";
-import { buildRuns, liveRunOf, useBuildRuns } from "../state/buildRuns";
-import { BuildPanel } from "./BuildPanel";
 
 /**
  * "/organize [project | selection | frame <id>] [instruction]" -> the request (default: the project).
@@ -100,13 +93,11 @@ export function ChatPanel({ ws, panels }: { ws: Workspace; panels: Pick<ReturnTy
   // put while other cards are selected or opened.
   const pinned = ws.active ? panels.pins[ws.active] ?? null : null;
   const thread = pinned ?? ws.contextCardId ?? "project";
-  const builds = useBuildRuns();
-  const building = liveRunOf(builds, ws.active);
   const chat = useClaudeChat({
     slug: ws.active,
     thread,
     onLinkProposal: (p) => ws.addGhostLink({ slug: p.slug, from: p.from, to: p.to, label: p.label, reason: p.reason }),
-    // A chat turn (usually local) asked for a visual: Claude makes it in a new artifact card, with
+    // A chat turn asked for a visual: Claude makes it in a new artifact card, with
     // a recap of the thread that asked. The request waits until that chat turn has finished.
     onArtifactEscalate: (e, from) => {
       if (from.slug !== ws.active) return;
@@ -118,17 +109,6 @@ export function ChatPanel({ ws, panels }: { ws: Workspace; panels: Pick<ReturnTy
       );
     },
   });
-  // STATUS.md changed in the repo: a line in the project thread, whatever thread is open.
-  const addBuildNote = chat.addBuildNote;
-  useEffect(() => {
-    let un: (() => void) | undefined;
-    let gone = false;
-    api.onBuildUpdate((u) => (u.built.length + u.partial.length + u.in_progress.length + u.new.length + u.blocked.length > 0 || u.warnings.length > 0) && addBuildNote(u)).then((f) => (gone ? f() : (un = f)), () => {});
-    return () => {
-      gone = true;
-      un?.();
-    };
-  }, [addBuildNote]);
   const [text, setText] = useState("");
   const [confirmReset, setConfirmReset] = useState(false);
   const [showModels, setShowModels] = useState(false);
@@ -147,19 +127,11 @@ export function ChatPanel({ ws, panels }: { ws: Workspace; panels: Pick<ReturnTy
   /** A tier pinned from the header chip (null = Auto, the router decides). Beats the router. */
   const [modelPin, setModelPin] = useState<ModelTier | null>(null);
   const [tierModels, setTierModels] = useState<Record<ModelTier, string> & { router: boolean }>({ fast: "haiku", main: "sonnet", deep: "opus", router: true });
-  /** Local chat (Ollama): the setting and the last status check. */
-  const [localOn, setLocalOn] = useState(true);
-  const [localModel, setLocalModel] = useState("");
-  const [localStatus, setLocalStatus] = useState<LocalStatus | null>(null);
-  const [showLocal, setShowLocal] = useState(false);
   const loadTierModels = useCallback(() => {
     api
       .getSettings()
       .then((s) => {
         setTierModels({ fast: s.model_fast, main: s.model_chat, deep: s.model_deep, router: s.model_router });
-        setLocalOn(s.local_chat);
-        setLocalModel(s.local_model);
-        if (s.local_chat) claudeApi.localStatus().then(setLocalStatus).catch(() => setLocalStatus(null));
       })
       .catch(() => {});
   }, []);
@@ -170,23 +142,8 @@ export function ChatPanel({ ws, panels }: { ws: Workspace; panels: Pick<ReturnTy
     window.addEventListener("dreamer:open-settings", open);
     return () => window.removeEventListener("dreamer:open-settings", open);
   }, []);
-  // Startup may find and prepare a local model after the panel loaded its settings.
-  useEffect(() => {
-    let unsub: (() => void) | undefined;
-    let disposed = false;
-    claudeApi
-      .onLocalSetupEvent((e) => {
-        if (e.type === "detected" || e.type === "done") loadTierModels();
-      })
-      .then((u) => (disposed ? u() : (unsub = u)))
-      .catch(() => {});
-    return () => {
-      disposed = true;
-      unsub?.();
-    };
-  }, [loadTierModels]);
-  /** A pinned tier's name: with local chat on, fast and main both run on the local model. */
-  const tierName = (t: ModelTier) => (localOn && t !== "deep" ? "Local" : modelLabel(tierModels[t]) ?? t);
+  /** A pinned tier's name. */
+  const tierName = (t: ModelTier) => modelLabel(tierModels[t]) ?? t;
   const panelRef = useRef<HTMLElement | null>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
 
@@ -323,25 +280,16 @@ export function ChatPanel({ ws, panels }: { ws: Workspace; panels: Pick<ReturnTy
     if (ok) chat.markFetchSaved(m.id, url);
   };
 
-  /**
-   * A handoff gap interview answer: "platform & tech" goes on the Tech & constraints card, every
-   * other item on the Project decisions card. Either is created when the project has none yet.
-   */
-  const recordGapAnswer = (item: string, question: string, choice: string) =>
-    ws.appendToRoleCard(item.trim().toLowerCase() === TECH_GAP_ITEM ? "tech" : "decisions", `**${item}:** ${question}
-**A:** ${choice}`, "record answer");
-
   /** A sent question form: one reply message, and each answer recorded where its question points. */
   const answer = (m: ChatMessage, answers: Record<string, string | undefined>) => {
     const qs = m.questions ?? [];
     chat.answerQuestions(m.id, answers);
     const got = qs.flatMap((q) => (answers[q.id] ? [{ q, a: answers[q.id]! }] : []));
-    for (const { q, a } of got) if (q.item && !q.itemId) void recordGapAnswer(q.item, q.question, a);
     const card = contextCard && ws.data?.cards.find((c) => c.id === contextCard.id);
     const byItem = new Map(got.flatMap(({ q, a }) => (q.itemId ? [[q.itemId, a] as const] : [])));
-    const plain = got.filter(({ q }) => !q.item && !q.itemId);
+    const plain = got.filter(({ q }) => !q.itemId);
     if (card && byItem.size) {
-      // One updateCard = one undo step (on the cc-questions card it also writes QUESTIONS.md back).
+      // One updateCard = one undo step.
       void ws.updateCard(card.id, { items: (card.items ?? []).map((i) => (byItem.has(i.id) ? { ...i, answer: byItem.get(i.id) } : i)) });
     } else if (card && plain.length) {
       const add = plain.map(({ q, a }) => `**Q:** ${q.question}\n**A:** ${a}`).join("\n\n");
@@ -352,8 +300,6 @@ export function ChatPanel({ ws, panels }: { ws: Workspace; panels: Pick<ReturnTy
   };
 
   const canAct = !chat.busy && !!ws.active;
-  /** The most recent reply: the only one that offers "Retry locally". */
-  const lastReplyId = [...chat.messages].reverse().find((m) => m.role === "claude" && !m.kind)?.id;
   const group = contextCard ? "card" : "project";
   const needCard = contextCard ? undefined : { short: "Open a card first", long: "Select a card on the canvas (or a recent one in the thread menu) to open its own thread, then run this." };
   const summarize = () => ws.openHandoff(contextCard ? { kind: "card", id: contextCard.id } : { kind: "project" });
@@ -368,15 +314,12 @@ export function ChatPanel({ ws, panels }: { ws: Workspace; panels: Pick<ReturnTy
           { id: "describe", label: "/describe", desc: "Describe the images on this card", group: "card", command: "/describe", run: () => send("/describe") },
         ] satisfies ChatAction[])
       : []),
-    ...(contextCard
-      ? ([{ id: "build-prompt", label: "Make build prompt", desc: "Turn this card into a task for Claude Code", group: "card", run: () => ws.openTask({ kind: "card", id: contextCard.id }) }] satisfies ChatAction[])
-      : []),
     { id: "summarize", label: "Summarize", desc: "Turn the project into design docs for Claude Code", group: "project", run: summarize },
     { id: "org-project", label: "Organize the project", desc: "Claude proposes a tidy-up plan you review", group: "project", command: "/organize", run: () => runOrganize({ scope: "project", instruction: "" }) },
     { id: "org-selection", label: "Organize the selection", desc: "Claude proposes a plan for the selected cards", group: "project", command: "/organize selection", run: () => send("/organize selection") },
   ];
   const byId = (id: string) => actions.find((a) => a.id === id)!;
-  const suggestions = (contextCard ? ["grill", "related", "build-prompt"] : ["summarize", "org-project", "grill"]).map(byId);
+  const suggestions = (contextCard ? ["grill", "related", "summarize"] : ["summarize", "org-project", "grill"]).map(byId);
 
   // "/" typed first opens the menu filtered by what follows (until Esc, or no item matches).
   const slashQuery = text.startsWith("/") && !text.includes("\n") && text !== slashDismissed ? text.slice(1) : null;
@@ -403,34 +346,12 @@ export function ChatPanel({ ws, panels }: { ws: Workspace; panels: Pick<ReturnTy
   };
 
   const ctxTip = chat.context && chat.context.tokens > 0 ? contextTip(chat.context.tokens, chat.context.window, compactTokens) : null;
-  const autoHelp = localOn
-    ? `Auto: the local model (${localModel}) for chat; Claude for Think, web and Retry with Claude.`
-    : tierModels.router
-      ? "Auto: a small model for simple actions, the chat model otherwise."
-      : "Auto (router off): the chat model.";
+  const autoHelp = tierModels.router ? "Auto: a small model for simple actions, the chat model otherwise." : "Auto (router off): the chat model.";
 
-  const tabs = (
-    <div className="seg panel-view-tabs" role="tablist" aria-label="Right panel">
-      <button type="button" role="tab" aria-selected={builds.tab === "chat"} className={"chip" + (builds.tab === "chat" ? " on" : "")} onClick={() => buildRuns.showTab("chat")}>Chat</button>
-      <button type="button" role="tab" aria-selected={builds.tab === "build"} className={"chip" + (builds.tab === "build" ? " on" : "")} onClick={() => buildRuns.showTab("build")}>
-        Build{building && <span className={"build-tab-dot" + (building.info.asks.length ? " ask" : "")} aria-label={building.info.asks.length ? "waiting for you" : "running"} />}
-      </button>
-    </div>
-  );
-  if (builds.tab === "build") {
-    return (
-      <aside id="chat-panel" className="glass chat" aria-label="Build" data-wheel-boundary="" ref={panelRef}>
-        <div className="panel-resize" role="separator" aria-orientation="vertical" aria-label="Resize chat panel" title="Drag to resize, double-click to reset" {...panels.resize.right} />
-        <header className="chat-head">{tabs}</header>
-        <BuildPanel ws={ws} />
-      </aside>
-    );
-  }
   return (
     <aside id="chat-panel" className="glass chat" aria-label="Claude chat" data-wheel-boundary="" ref={panelRef}>
       <div className="panel-resize" role="separator" aria-orientation="vertical" aria-label="Resize chat panel" title="Drag to resize, double-click to reset" {...panels.resize.right} />
       <header className="chat-head">
-        {tabs}
         <div className="orb small" aria-hidden="true" />
         <span className="chat-title">Claude</span>
         <ThreadMenu
@@ -459,7 +380,6 @@ export function ChatPanel({ ws, panels }: { ws: Workspace; panels: Pick<ReturnTy
           </div>
         )}
       </header>
-      {showLocal && <LocalSetup onClose={() => setShowLocal(false)} onStatus={setLocalStatus} turnBusy={chat.busy} />}
       {showModels && (
         <ModelSettings
           onClose={() => {
@@ -526,9 +446,6 @@ export function ChatPanel({ ws, panels }: { ws: Workspace; panels: Pick<ReturnTy
             retryDisabled={chat.busy}
             onStop={() => chat.interrupt()}
             onRetryStalled={() => chat.retryStalled(m.id)}
-            onRetryWithClaude={() => chat.retryWithClaude(m.id)}
-            onRetryLocally={m.id === lastReplyId ? () => chat.retryLocally(m.id) : undefined}
-            onOpenLocalSetup={() => setShowLocal(true)}
             onCredit={(allow) => chat.answerCredit(m.id, allow)}
             onOpenSettings={() => setShowModels(true)}
             onRetry={() => {
@@ -545,17 +462,17 @@ export function ChatPanel({ ws, panels }: { ws: Workspace; panels: Pick<ReturnTy
               ws={ws}
               busy={chat.busy}
               onChange={(patch) => chat.setOrganize(m.id, patch)}
-              onRedo={(backend) => {
+              onRedo={() => {
                 const user = chat.messages.find((x) => x.id === `${m.id}-u`);
                 const req: OrganizeReq = m.organizeReq ?? { scope: m.organize!.plan.scope, ids: m.organize!.plan.scopeIds ?? undefined, name: m.organize!.plan.scopeName, instruction: user?.text ?? "" };
                 // Redo makes the whole plan again (not only the rest of a partial one).
-                runOrganize({ ...req, instruction: req.rest ? "" : req.instruction, backend, prior: null, rest: false }, `${req.rest ? "Organize" : user?.text ?? "Organize"} (${backend === "claude" ? "with Claude" : "locally"})`);
+                runOrganize({ ...req, instruction: req.rest ? "" : req.instruction, prior: null, rest: false }, req.rest ? "Organize" : user?.text ?? "Organize");
               }}
-              onRevise={(ask) => runOrganize({ ...planScope(m.organize!.plan), instruction: ask, backend: m.backend ?? null, prior: m.organize!.plan }, `Revise the plan: ${ask}`, reviseText(m.organize!.plan, ask))}
-              onFinish={(backend) =>
+              onRevise={(ask) => runOrganize({ ...planScope(m.organize!.plan), instruction: ask, prior: m.organize!.plan }, `Revise the plan: ${ask}`, reviseText(m.organize!.plan, ask))}
+              onFinish={() =>
                 runOrganize(
-                  { ...planScope(m.organize!.plan), instruction: "", backend, prior: m.organize!.plan, rest: true },
-                  backend === "claude" ? "Finish the plan with Claude" : "Retry the rest locally",
+                  { ...planScope(m.organize!.plan), instruction: "", prior: m.organize!.plan, rest: true },
+                  "Finish the plan",
                   `/organize: place the ${m.organize!.plan.unplaced?.length ?? 0} unplaced cards into the plan's frames.`,
                 )
               }
@@ -651,7 +568,7 @@ export function ChatPanel({ ws, panels }: { ws: Workspace; panels: Pick<ReturnTy
             className={"comp-btn comp-tog" + (web ? " on" : "")}
             aria-pressed={web}
             aria-label="Web access for this message"
-            title={web ? `Web on for this message: Claude may search and fetch pages${localOn ? " (this message goes to Claude, not the local model)" : ""}` : "Let Claude search the web for this message"}
+            title={web ? `Web on for this message: Claude may search and fetch pages` : "Let Claude search the web for this message"}
             disabled={!canAct}
             onClick={() => setWeb((w) => !w)}
           >
@@ -677,10 +594,6 @@ export function ChatPanel({ ws, panels }: { ws: Workspace; panels: Pick<ReturnTy
             onPin={setModelPin}
             tierName={tierName}
             autoHelp={autoHelp}
-            localOn={localOn}
-            localStatus={localStatus}
-            localModel={localModel}
-            onLocalSetup={() => setShowLocal(true)}
             onModels={() => setShowModels(true)}
           />
           {chat.busy ? (
@@ -710,9 +623,6 @@ function ChatBubble({
   onEditMemory,
   saveTarget,
   onRetry,
-  onRetryWithClaude,
-  onRetryLocally,
-  onOpenLocalSetup,
   retryDisabled,
   onStop,
   onRetryStalled,
@@ -723,11 +633,6 @@ function ChatBubble({
   onCredit: (allow: boolean) => void;
   onOpenSettings: () => void;
   onRetry: () => void;
-  /** A failed local turn: send it to Claude once. */
-  onRetryWithClaude: () => void;
-  /** After a restart, on the most recent turn only: send it again on the local model. */
-  onRetryLocally?: () => void;
-  onOpenLocalSetup: () => void;
   retryDisabled: boolean;
   /** Stop / Retry offered by a stalled live turn. */
   onStop: () => void;
@@ -748,12 +653,6 @@ function ChatBubble({
   const live = message.role === "claude" && message.streaming;
   const compacting = message.steps?.some((s) => s.sid === "compact" && s.status === "running");
   const activity = live ? (
-    <>
-      {message.localLoading && (
-        <div className="model-note" role="status">
-          Loading local model…
-        </div>
-      )}
     <LiveActivity
       steps={message.steps}
       usage={compacting ? message.compactUsage : message.usage}
@@ -763,34 +662,16 @@ function ChatBubble({
       onStop={onStop}
       onRetry={onRetryStalled}
     />
-    </>
   ) : message.role === "claude" && !message.failure ? (
-    // Turns with a backend show model and tokens in the badge under the reply instead.
+    // Turns with a model show it and the tokens in the badge under the reply instead.
     <ActivitySummary
       steps={message.steps}
-      usage={message.backend ? undefined : message.usage}
+      usage={message.model ? undefined : message.usage}
       durationMs={message.durationMs}
-      model={message.backend ? undefined : message.model}
       retriedFrom={message.retried ? message.retriedFrom : undefined}
     />
   ) : null;
-  const localFailed = message.role === "claude" && !live && message.backend === "local" && (!!message.fallback || (message.isError && !message.failure));
-  // A turn that still produced something usable (text, a question card, a ghost card, a change)
-  // shows a small grey note; the red banner is only for a turn with nothing to show.
-  const usable = !!message.text?.trim() || !!message.questions || !!message.organize || !!message.proposals?.length || !!message.steps?.some((s) => s.kind === "tool" && s.status === "done" && USABLE_TOOLS.has(s.tool ?? ""));
-  const retryClaude = localFailed && usable ? (
-    <StepFailedNote message={message} retryDisabled={retryDisabled} onRetryWithClaude={onRetryWithClaude} />
-  ) : localFailed && (
-    <div className="chat-failure">
-      <div className="chat-failure-line">
-        <span>{FALLBACK_TEXT[message.fallback ?? "error"]}</span>
-        <button type="button" className="chip" disabled={retryDisabled} onClick={onRetryWithClaude} title="Send this message to Claude once, with a recap of the thread; the next message is local again">
-          Retry with Claude
-        </button>
-      </div>
-    </div>
-  );
-  const badge = message.role === "claude" && !live && !message.failure && <ModelBadge message={message} busy={retryDisabled} onRetryLocally={onRetryLocally} onOpenLocalSetup={onOpenLocalSetup} />;
+  const badge = message.role === "claude" && !live && !message.failure && <ModelBadge message={message} />;
   const memBusy = message.memoryBusy && (
     <div className="memory-line busy" aria-live="polite">
       <span className="memory-text">
@@ -798,23 +679,6 @@ function ChatBubble({
       </span>
     </div>
   );
-  if (message.kind === "build" && message.build) {
-    const u = message.build;
-    const jumps = [...u.built, ...u.partial, ...u.in_progress, ...u.new, ...u.blocked];
-    return (
-      <div className="build-line" role="status">
-        <b>{message.text}</b>
-        {jumps.length > 0 && (
-          <div className="jumps">
-            {jumps.map((j) => (
-              <button key={j.id} type="button" className="jump" title="Open this card" onClick={() => onOpenCard(j.id, u.slug)}>{j.title || "Untitled"}</button>
-            ))}
-          </div>
-        )}
-        {u.warnings.map((w, i) => <span key={i} className="warn">{w}</span>)}
-      </div>
-    );
-  }
   if (message.kind === "compacted") {
     return (
       <button type="button" className="chat-compacted" title={message.summary || "Summary unavailable"} onClick={() => setShowSummary((v) => !v)}>
@@ -853,7 +717,6 @@ function ChatBubble({
         </div>
       )}
       {badge}
-      {retryClaude}
       {memBusy}
       {mem}
       </>
@@ -862,11 +725,6 @@ function ChatBubble({
   const showText = message.role === "user" || !!message.text;
   return (
     <>
-      {message.routeReason === "size" && (
-        <div className="model-note" role="note">
-          {message.routeNote ? `${message.routeNote[0].toUpperCase()}${message.routeNote.slice(1)}` : "A large scope"}: this plan uses Claude.
-        </div>
-      )}
       {message.role === "claude" && !live && activity}
       {message.searches?.map((s, i) => (
         <div key={i} className="search-trace" aria-label={`Searched cards: ${s.query}`}>
@@ -928,8 +786,7 @@ function ChatBubble({
         </div>
       )}
       {badge}
-      {retryClaude}
-      {message.isError && !message.failure && !live && message.backend !== "local" && (
+      {message.isError && !message.failure && !live && (
         <div className="chat-failure">
           <div className="chat-failure-line">
             <button type="button" className="chip" disabled={retryDisabled} onClick={onRetry}>
@@ -1092,131 +949,19 @@ function BalanceChip({ onSettings }: { onSettings: () => void }) {
   );
 }
 
-/** Tools whose success is visible output of a turn (see `usable` above). */
-const USABLE_TOOLS = new Set(["create_card", "ask_question", "ask_questions", "propose_link", "merge_cards", "propose_edit", "propose_organize", "propose_artifact", "escalate_artifact", "remember", "forget"]);
-
-/** "One step failed · Details", with "Retry with Claude" in a ⋯ menu: the turn's output stands. */
-function StepFailedNote({ message, retryDisabled, onRetryWithClaude }: { message: ChatMessage; retryDisabled: boolean; onRetryWithClaude: () => void }) {
-  const [open, setOpen] = useState(false);
-  const [details, setDetails] = useState(false);
-  const btn = useRef<HTMLButtonElement | null>(null);
-  const failed = message.steps?.filter((s) => s.kind === "tool" && s.status === "error") ?? [];
+/** Under each reply: "Claude · Opus · ↑ 12k ↓ 300". */
+function ModelBadge({ message: m }: { message: ChatMessage }) {
+  if (!m.model) return null;
   return (
-    <div className="step-failed">
-      <div className="step-failed-line">
-        <span>One step failed</span>
-        <span aria-hidden="true">·</span>
-        <button type="button" className="memory-act" aria-expanded={details} onClick={() => setDetails((v) => !v)}>
-          Details
-        </button>
-        <button ref={btn} type="button" className="step-failed-more" aria-haspopup="menu" aria-expanded={open} aria-label="More actions" title="More actions" onClick={() => setOpen((v) => !v)}>
-          ⋯
-        </button>
-      </div>
-      {details && (
-        <div className="step-failed-details">
-          {failed.length ? failed.map((s) => <div key={s.sid}>{s.label || s.tool}{s.detail ? `: ${s.detail}` : ""}</div>) : FALLBACK_TEXT[message.fallback ?? "error"]}
-        </div>
-      )}
-      {open && (
-        <Popover anchor={btn} onClose={() => setOpen(false)} label="Reply actions">
-          <button
-            type="button"
-            role="menuitem"
-            className="menu-item cm-item"
-            disabled={retryDisabled}
-            title="Send this message to Claude once, with a recap of the thread; the next message is local again"
-            onClick={() => {
-              setOpen(false);
-              onRetryWithClaude();
-            }}
-          >
-            <span className="cm-label">Retry with Claude</span>
-          </button>
-        </Popover>
+    <div className="model-badge claude">
+      Claude · {modelLabel(m.model) ?? "Claude"}
+      {m.usage && (
+        <>
+          {" · "}
+          <Tokens usage={m.usage} />
+        </>
       )}
     </div>
-  );
-}
-
-const FALLBACK_TEXT: Record<string, string> = {
-  error: "The local model couldn't answer.",
-  empty: "The local model gave no answer.",
-  tool: "A tool call by the local model failed.",
-  vision: "The local model can't look at images.",
-  stalled: "The local model stopped responding (it was retried once).",
-};
-
-const REASON_TEXT: Record<string, string> = { think: "Think harder", web: "web", retry: "retried with Claude", unavailable: "local model unavailable", size: "large scope" };
-
-/** Under each reply: "local · qwen3.5:35b-a3b" or "Claude · Opus · Think harder · ↑ 12k ↓ 300". */
-function ModelBadge({ message: m, busy, onRetryLocally, onOpenLocalSetup }: { message: ChatMessage; busy: boolean; onRetryLocally?: () => void; onOpenLocalSetup: () => void }) {
-  const rs = useOllamaRestart();
-  const [back, setBack] = useState(false);
-  if (!m.backend) return null;
-  if (m.backend === "local") {
-    return (
-      <div className="model-badge local" title={m.model && isCloudModel(m.model) ? "Answered by an Ollama cloud model through Ollama (no Claude usage)" : "Answered by the local model through Ollama (no Claude usage)"}>
-        local · {m.model && isCloudModel(m.model) ? `${m.model} (cloud)` : m.model}
-      </div>
-    );
-  }
-  const reason = m.routeReason ? REASON_TEXT[m.routeReason] : null;
-  return (
-    <>
-      {m.routeReason === "unavailable" && (
-        <div className="model-note" role="note">
-          {back ? (
-            <>
-              Local model is back.{" "}
-              {onRetryLocally && (
-                <button type="button" className="memory-act" disabled={busy} onClick={onRetryLocally}>
-                  Retry locally
-                </button>
-              )}
-            </>
-          ) : (
-            <>
-              Local model unavailable{m.routeNote ? `: ${m.routeNote}` : "."} This reply used Claude.
-              {m.routeCanRestart && rs.fails >= 2 ? (
-                <>
-                  {" "}
-                  <button type="button" className="memory-act" onClick={onOpenLocalSetup}>
-                    Open Local model settings
-                  </button>
-                </>
-              ) : (
-                m.routeCanRestart && (
-                  <>
-                    {" "}
-                    <button
-                      type="button"
-                      className="memory-act"
-                      disabled={busy || !!rs.step}
-                      title={busy ? "Wait for the reply to finish" : "Stop Ollama, start it again and load the model"}
-                      onClick={() => void rs.restart().then((st) => st?.ready && setBack(true))}
-                    >
-                      {rs.step ? RESTART_LABEL[rs.step] : "Restart"}
-                    </button>
-                  </>
-                )
-              )}
-              {rs.error && <span role="alert"> {rs.error}</span>}
-            </>
-          )}
-        </div>
-      )}
-      <div className="model-badge claude" title={m.escalated ? "One Claude turn with a recap of this thread; the next message is local again" : undefined}>
-        Claude · {modelLabel(m.model) ?? "Claude"}
-        {reason && <> · {reason}</>}
-        {m.usage && (
-          <>
-            {" · "}
-            <Tokens usage={m.usage} />
-          </>
-        )}
-      </div>
-    </>
   );
 }
 
@@ -1250,79 +995,32 @@ function ContextMeter({ tokens, window, compactTokens }: { tokens: number; windo
 const MODEL_SUGGESTIONS = ["sonnet", "opus", "haiku", "fable"];
 
 /** Settings: which Claude model the chat and the handoff pack use (aliases or full model ids). */
-/** "Claude Code card skill": installs dreamer-cards into the user's ~/.claude/skills (asks before writing). */
-function SkillRow({ onError }: { onError: (e: string) => void }) {
-  const [st, setSt] = useState<SkillStatus | null>(null);
-  const [ask, setAsk] = useState(false);
-  useEffect(() => {
-    api.skillStatus().then(setSt).catch(() => setSt(null));
-  }, []);
-  const run = (f: () => Promise<SkillStatus>) => {
-    setAsk(false);
-    f().then(setSt).catch((e) => onError(String(e)));
-  };
-  const state = st?.state;
-  return (
-    <div className="model-form">
-      <div>
-        Claude Code card skill{" "}
-        <span className="chat-sub">
-          {state === "current" ? "installed" : state === "outdated" ? "installed (updates at next start)" : state === "edited" ? "Update available (your edited copy differs)" : state === "missing" ? "not installed" : "needs the desktop app"}
-        </span>
-      </div>
-      <p className="chat-sub">Lets Claude Code write Dreamer cards (a .dreamer.md bundle) when you ask it to log ideas or built features.</p>
-      {ask && st && <p className="chat-sub">{state === "edited" ? "This replaces your edited copy at " : "This writes "}<code>{st.path}</code></p>}
-      <div className="editor-actions">
-        {st && (state === "missing" || state === "edited" || state === "outdated") && (
-          <button type="button" className="btn" onClick={() => (ask ? run(api.skillInstall) : setAsk(true))}>
-            {ask ? "Confirm" : state === "missing" ? "Install" : "Update"}
-          </button>
-        )}
-        {st && state !== "missing" && (
-          <button type="button" className="btn" onClick={() => run(api.skillRemove)}>Remove</button>
-        )}
-        {ask && <button type="button" className="btn" onClick={() => setAsk(false)}>Not now</button>}
-      </div>
-    </div>
-  );
-}
-
 function ModelSettings({ onClose, onError }: { onClose: () => void; onError: (e: string) => void }) {
   const [chatModel, setChatModel] = useState<string | null>(null);
   const [exportModel, setExportModel] = useState("");
-  const [buildModel, setBuildModel] = useState("");
   const [router, setRouter] = useState(true);
   const [fastModel, setFastModel] = useState("");
   const [deepModel, setDeepModel] = useState("");
   const [memoryModel, setMemoryModel] = useState("");
   const [compactTokens, setCompactTokens] = useState("");
   const [memoryCap, setMemoryCap] = useState("");
-  const [localChat, setLocalChat] = useState(true);
-  const [localModel, setLocalModel] = useState("");
-  const [autostart, setAutostart] = useState<boolean | null>(null);
-  const [startHidden, setStartHidden] = useState(true);
   const [scUrl, setScUrl] = useState("");
   const [creditCap, setCreditCap] = useState("");
   const [scKey, setScKey] = useState<SpritecookKeyStatus | null>(null);
   const [newKey, setNewKey] = useState("");
   useEffect(() => {
-    api.autostartEnabled().then(setAutostart).catch(() => setAutostart(false));
     api.spritecookKeyStatus().then(setScKey).catch(() => setScKey(null));
     api
       .getSettings()
       .then((s) => {
-        setStartHidden(s.start_hidden);
         setChatModel(s.model_chat);
         setExportModel(s.model_export);
-        setBuildModel(s.build_model);
         setRouter(s.model_router);
         setFastModel(s.model_fast);
         setDeepModel(s.model_deep);
         setMemoryModel(s.model_memory);
         setCompactTokens(String(s.compact_tokens));
         setMemoryCap(String(s.memory_cap));
-        setLocalChat(s.local_chat);
-        setLocalModel(s.local_model);
         setScUrl(s.spritecook_url);
         setCreditCap(String(s.credit_cap));
       })
@@ -1330,7 +1028,7 @@ function ModelSettings({ onClose, onError }: { onClose: () => void; onError: (e:
   }, [onError]);
   const save = async () => {
     try {
-      await api.updateSettings({ model_chat: chatModel ?? "", model_router: router, model_fast: fastModel, model_deep: deepModel, model_export: exportModel, build_model: buildModel, model_memory: memoryModel, compact_tokens: Math.max(0, Math.floor(Number(compactTokens)) || 0), memory_cap: Math.max(0, Math.floor(Number(memoryCap)) || 0), local_chat: localChat, local_model: localModel, spritecook_url: scUrl, credit_cap: Math.max(0, Math.floor(Number(creditCap)) || 0) });
+      await api.updateSettings({ model_chat: chatModel ?? "", model_router: router, model_fast: fastModel, model_deep: deepModel, model_export: exportModel, model_memory: memoryModel, compact_tokens: Math.max(0, Math.floor(Number(compactTokens)) || 0), memory_cap: Math.max(0, Math.floor(Number(memoryCap)) || 0), spritecook_url: scUrl, credit_cap: Math.max(0, Math.floor(Number(creditCap)) || 0) });
       if (newKey.trim()) await api.spritecookSetKey(newKey.trim());
       onClose();
     } catch (e) {
@@ -1347,14 +1045,6 @@ function ModelSettings({ onClose, onError }: { onClose: () => void; onError: (e:
           void save();
         }}
       >
-        <label className="check-row">
-          <input type="checkbox" checked={localChat} disabled={chatModel === null} onChange={(e) => setLocalChat(e.target.checked)} />
-          Chat on a local model (Ollama); Claude only for Think, web and Retry with Claude
-        </label>
-        <label>
-          Local model (Ollama)
-          <input className="name-input" value={localModel} disabled={chatModel === null || !localChat} placeholder="qwen3.5:35b-a3b" onChange={(e) => setLocalModel(e.target.value)} />
-        </label>
         <label className="check-row">
           <input type="checkbox" checked={router} disabled={chatModel === null} onChange={(e) => setRouter(e.target.checked)} />
           Route chat messages to the cheapest fitting model
@@ -1376,10 +1066,6 @@ function ModelSettings({ onClose, onError }: { onClose: () => void; onError: (e:
           <input className="name-input" list="claude-models" value={exportModel} disabled={chatModel === null} placeholder="opus" onChange={(e) => setExportModel(e.target.value)} />
         </label>
         <label>
-          Build runs (Claude Code in the repo; Claude only)
-          <input className="name-input" list="claude-models" value={buildModel} disabled={chatModel === null} placeholder="sonnet" onChange={(e) => setBuildModel(e.target.value)} />
-        </label>
-        <label>
           Thread summaries
           <input className="name-input" list="claude-models" value={memoryModel} disabled={chatModel === null} placeholder="haiku" onChange={(e) => setMemoryModel(e.target.value)} />
         </label>
@@ -1391,8 +1077,6 @@ function ModelSettings({ onClose, onError }: { onClose: () => void; onError: (e:
           Project memory cap (words)
           <input className="name-input" inputMode="numeric" value={memoryCap} disabled={chatModel === null} placeholder="600" onChange={(e) => setMemoryCap(e.target.value)} />
         </label>
-        <h4 className="settings-sub" id="integrations-settings">Integrations</h4>
-        <SkillRow onError={onError} />
         <h4 className="settings-sub" id="spritecook-settings">SpriteCook (artifact images)</h4>
         <label>
           API key {scKey?.hasKey ? <span className="chat-sub">saved: {scKey.masked}</span> : <span className="chat-sub">not set: themes and mockups still work, images don't</span>}
@@ -1416,28 +1100,6 @@ function ModelSettings({ onClose, onError }: { onClose: () => void; onError: (e:
           <input className="name-input" inputMode="numeric" value={creditCap} disabled={chatModel === null} placeholder="4" onChange={(e) => setCreditCap(e.target.value)} />
         </label>
         <p className="chat-sub">The key is kept in the Windows credential store, never in the workspace.</p>
-        <label className="check-row">
-          <input
-            type="checkbox"
-            checked={autostart === true}
-            disabled={autostart === null}
-            onChange={(e) => {
-              api.setAutostart(e.target.checked).then(setAutostart).catch((er) => onError(String(er)));
-            }}
-          />
-          Start Dreamer when Windows starts
-        </label>
-        <label className="check-row">
-          <input
-            type="checkbox"
-            checked={startHidden}
-            onChange={(e) => {
-              setStartHidden(e.target.checked);
-              api.updateSettings({ start_hidden: e.target.checked }).catch((er) => onError(String(er)));
-            }}
-          />
-          Start hidden in the tray
-        </label>
         <datalist id="claude-models">
           {MODEL_SUGGESTIONS.map((m) => <option key={m} value={m} />)}
         </datalist>

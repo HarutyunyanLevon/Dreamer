@@ -1,117 +1,35 @@
 mod artifacts;
-mod build_run;
 mod bundle;
 mod claude_setup;
-mod clipboard;
 mod clip;
 mod commands;
 mod credentials;
 mod ctx;
 mod error;
 mod handoff;
-#[doc(hidden)]
-pub mod harness;
 mod memory;
 mod model;
-mod ollama;
-mod ollama_install;
 mod organize;
 mod organize_pipeline;
 mod proc_guard;
-mod questions;
 mod router;
-mod scan;
 mod search;
 mod sidecar;
-mod skill_card;
 mod sidecar_log;
 mod state;
-mod status;
 mod storage;
-mod task;
 mod watcher;
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use tauri::{
-    menu::{Menu, MenuItem},
-    tray::TrayIconBuilder,
-    AppHandle, Emitter, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent,
-};
+use tauri::{AppHandle, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder};
 
-/// Set while the one-time "still running in the tray" notice is on screen, so a second click on
-/// the window's X hides it (never a dead X, even if the page doesn't answer).
-static TRAY_NOTICE_PENDING: AtomicBool = AtomicBool::new(false);
-
-/// Quits for real (tray "Quit", sidebar "Quit Dreamer"): ends the Claude sidecar's whole process
-/// tree, then exits. `RunEvent::Exit` below also stops the sidecar, for any other way out.
+/// Ends the Claude sidecar's whole process tree, then exits. `RunEvent::Exit` below also stops
+/// the sidecar, for any other way out.
 pub fn quit(app: &AppHandle) {
     sidecar::shutdown(&app.state::<state::AppState>());
     app.exit(0);
 }
 
-/// Hides the main window to the tray and remembers that the tray notice has been seen.
-pub fn hide_to_tray(app: &AppHandle) {
-    TRAY_NOTICE_PENDING.store(false, Ordering::SeqCst);
-    if let Ok(ws) = app.state::<state::AppState>().ws.lock() {
-        let _ = ws.update_settings(model::SettingsPatch { tray_notice_shown: Some(true), ..Default::default() });
-    }
-    if let Some(w) = app.get_webview_window("main") {
-        let _ = w.hide();
-    }
-}
-use tauri_plugin_global_shortcut::ShortcutState;
-
-/// When the capture popup was last shown. Losing focus within `CAPTURE_BLUR_GRACE` of being
-/// shown doesn't close it: Windows' focus-stealing rules can hand a freshly shown window focus
-/// and take it straight back, and hide-on-blur would then make the popup vanish before you type.
-static CAPTURE_SHOWN_AT: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
-const CAPTURE_BLUR_GRACE: std::time::Duration = std::time::Duration::from_millis(400);
-
-fn mark_capture_shown() {
-    if let Ok(mut t) = CAPTURE_SHOWN_AT.lock() {
-        *t = Some(std::time::Instant::now());
-    }
-}
-
-/// Should a focus loss close the capture popup now? (Not right after it was shown.)
-fn capture_blur_closes() -> bool {
-    CAPTURE_SHOWN_AT.lock().ok().and_then(|t| *t).is_none_or(|t| t.elapsed() >= CAPTURE_BLUR_GRACE)
-}
-
-/// Lazily creates (or shows) the small always-on-top "Catch a thought" popup.
-fn show_capture_window(app: &AppHandle) {
-    mark_capture_shown();
-    if let Some(w) = app.get_webview_window("capture") {
-        let _ = w.show();
-        let _ = w.set_focus();
-        return;
-    }
-    let built = WebviewWindowBuilder::new(app, "capture", WebviewUrl::App("index.html?capture=1".into()))
-        .title("Catch a thought")
-        .inner_size(440.0, 236.0)
-        .resizable(false)
-        .decorations(false)
-        .always_on_top(true)
-        .skip_taskbar(true)
-        .center()
-        .visible(true)
-        .focused(true)
-        .build();
-    // Clicking anywhere outside the popup closes it (the page discards the typed text on blur).
-    if let Ok(w) = built {
-        let handle = w.clone();
-        w.on_window_event(move |event| {
-            if let WindowEvent::Focused(false) = event {
-                if capture_blur_closes() {
-                    let _ = handle.hide();
-                }
-            }
-        });
-    }
-}
-
-/// Shows the main window, creating it on first use. It isn't in tauri.conf.json: an autostart
-/// boot (tray + hotkey only) must not pay for the webview, the shader or the file watcher.
+/// Shows the main window, creating it on first use.
 fn show_main_window(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.unminimize();
@@ -126,37 +44,13 @@ fn show_main_window(app: &AppHandle) {
         // Without this Windows swallows file drops, so the page never sees dropped images or bundles.
         .disable_drag_drop_handler()
         .build();
-    let Ok(w) = built else { return };
-    // Heavy work starts with the first show: file watcher and QUESTIONS.md import.
-    app.state::<state::AppState>().refresh_questions(app, true);
-
-    // Minimize to tray: closing the main window hides it instead of quitting the app. The
-    // first time, the page shows a one-time notice instead (keep running / quit), so the
-    // tray behaviour is discoverable; a second X while it's showing just hides.
-    let handle = w.clone();
-    w.on_window_event(move |event| {
-        // Coming back to Dreamer: get the local model loaded before the next message (at most every 5 min).
-        if let WindowEvent::Focused(true) = event {
-            let app = handle.app_handle().clone();
-            std::thread::spawn(move || ollama::warm_if_stale(&app, std::time::Duration::from_secs(300)));
-        }
-        if let WindowEvent::CloseRequested { api, .. } = event {
-            api.prevent_close();
-            let seen = handle
-                .state::<state::AppState>()
-                .ws
-                .lock()
-                .ok()
-                .and_then(|ws| ws.get_settings().ok())
-                .map(|s| s.tray_notice_shown)
-                .unwrap_or(true);
-            if !seen && !TRAY_NOTICE_PENDING.swap(true, Ordering::SeqCst) {
-                let _ = handle.emit("tray-notice", ());
-            } else {
-                hide_to_tray(handle.app_handle());
-            }
-        }
-    });
+    if built.is_err() {
+        return;
+    }
+    let state = app.state::<state::AppState>();
+    if let Ok(root) = state.ws.lock().map(|w| w.root.clone()) {
+        state.start_watching(app, root);
+    }
 }
 
 /// The app's compiled config and assets (shared with the headless reliability harness).
@@ -164,15 +58,9 @@ pub(crate) fn context() -> tauri::Context<tauri::Wry> {
     tauri::generate_context!()
 }
 
-/// Launched by the Windows Run entry (not by the user opening the app).
-fn is_autostart_launch() -> bool {
-    std::env::args().any(|a| a == "--autostart")
-}
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // One taskbar identity for the pinned shortcut, the window and the tray, however the app was
-    // launched (Start menu, pin, autostart Run entry): the identifier, which the NSIS installer
+    // One taskbar identity for the pinned shortcut and the window: the identifier, which the NSIS installer
     // also stamps on the Start menu shortcut.
     #[cfg(windows)]
     {
@@ -182,64 +70,12 @@ pub fn run() {
     tauri::Builder::default()
         // A second launch (Start menu, double-click) just shows the running instance's window.
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| show_main_window(app)))
-        .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, Some(vec!["--autostart"])))
-        // Only used from Rust (the handoff folder picker); no dialog permission for the UI.
         .plugin(tauri_plugin_dialog::init())
-        .plugin(
-            tauri_plugin_global_shortcut::Builder::new()
-                .with_handler(|app, shortcut, event| {
-                    if event.state == ShortcutState::Pressed {
-                        if state::CLIPBOARD_SHORTCUT.lock().ok().and_then(|c| *c) == Some(*shortcut) {
-                            clipboard::clipboard_to_inbox(app);
-                        } else {
-                            show_capture_window(app);
-                        }
-                    }
-                })
-                .build(),
-        )
         .setup(|app| {
             let state = state::AppState::init(app.handle())?;
             app.manage(state);
 
-            let show_item = MenuItem::with_id(app, "show", "Show Dreamer", true, None::<&str>)?;
-            let capture_item = MenuItem::with_id(app, "capture", "Catch a thought", true, None::<&str>)?;
-            let quit_item = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show_item, &capture_item, &quit_item])?;
-            let mut tray = TrayIconBuilder::new().menu(&menu).show_menu_on_left_click(true).on_menu_event(|app, event| match event.id.0.as_str() {
-                "show" => show_main_window(app),
-                "capture" => show_capture_window(app),
-                "quit" => quit(app),
-                _ => {}
-            });
-            // Simplified pearl (icons/tray.svg) that stays legible at 16px.
-            tray = tray.icon(tauri::include_image!("icons/tray.png")).tooltip("Dreamer");
-            tray.build(app)?;
-
-            // Keep the Run entry in step with the setting (first run, reinstalls). Never in debug
-            // builds, so `tauri dev` doesn't register the dev exe.
-            let settings = app.state::<state::AppState>().ws.lock().ok().and_then(|ws| ws.get_settings().ok());
-            #[cfg(not(debug_assertions))]
-            if settings.as_ref().is_none_or(|s| s.start_with_windows) {
-                use tauri_plugin_autostart::ManagerExt;
-                let al = app.autolaunch();
-                if !al.is_enabled().unwrap_or(true) {
-                    let _ = al.enable();
-                }
-            }
-            if is_autostart_launch() {
-                // Autostart never shows the one-time "still in the tray" notice.
-                if let Ok(ws) = app.state::<state::AppState>().ws.lock() {
-                    let _ = ws.update_settings(model::SettingsPatch { tray_notice_shown: Some(true), ..Default::default() });
-                }
-            }
-            // Find and prepare a local model (Ollama) if one is installed; never blocks startup.
-            ollama::spawn_auto_setup(app.handle());
-            skill_card::auto_update();
-            let hidden = is_autostart_launch() && settings.as_ref().is_none_or(|s| s.start_hidden);
-            if !hidden {
-                show_main_window(app.handle());
-            }
+            show_main_window(app.handle());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -251,19 +87,6 @@ pub fn run() {
             commands::create_project,
             commands::update_project,
             commands::link_repo,
-            commands::mark_built_now,
-            commands::restore_build,
-            commands::build_texts,
-            commands::build_preflight,
-            commands::build_start,
-            commands::build_interrupt,
-            commands::build_answer,
-            commands::build_runs,
-            commands::build_events,
-            commands::build_file_diff,
-            commands::build_act,
-            commands::build_open_terminal,
-            commands::open_repo_file,
             commands::load_project,
             commands::save_canvas,
             commands::migration_status,
@@ -290,30 +113,10 @@ pub fn run() {
             commands::claude_setup_cancel,
             commands::claude_open_login_url,
             commands::claude_send,
-            commands::ollama_status,
-            commands::ollama_check,
-            commands::restart_ollama,
-            commands::ollama_install,
-            commands::ollama_install_cancel,
-            commands::ollama_recommend,
-            commands::ollama_use_model,
-            commands::ollama_decline_cloud,
-            commands::ollama_locate,
-            commands::ollama_pull,
-            commands::ollama_cancel,
-            commands::ollama_open_installer,
             commands::claude_interrupt,
             commands::search_cards,
             commands::handoff_start,
             commands::handoff_cancel,
-            commands::task_start,
-            commands::save_task,
-            commands::list_tasks,
-            commands::mark_task_done,
-            commands::open_terminal,
-            commands::list_design_versions,
-            commands::read_design_doc,
-            commands::open_design_folder,
             commands::open_logs_folder,
             commands::pick_folder,
             commands::delete_project,
@@ -321,9 +124,6 @@ pub fn run() {
             commands::save_chat,
             commands::reset_chat,
             commands::list_chats,
-            commands::list_custom_themes,
-            commands::save_custom_theme,
-            commands::delete_custom_theme,
             commands::dismiss_proposal,
             commands::restore_proposal,
             commands::memory_get,
@@ -332,10 +132,6 @@ pub fn run() {
             commands::memory_revert,
             commands::memory_undo,
             commands::memory_seed,
-            commands::quit_app,
-            commands::hide_to_tray,
-            commands::autostart_enabled,
-            commands::set_autostart,
             commands::artifact_create,
             commands::artifact_get,
             commands::artifact_update,
@@ -353,20 +149,13 @@ pub fn run() {
             commands::apply_bundle,
             commands::undo_bundle,
             commands::scan_imports,
-            commands::scan_start,
-            commands::scan_cancel,
-            commands::skill_status,
-            commands::skill_install,
-            commands::skill_remove,
             commands::read_import,
             commands::archive_import,
-            commands::hotkey_status,
-            commands::split_text,
         ])
         .build(context())
         .expect("error while building Dreamer")
         .run(|app, event| {
-            // However the app ends (tray Quit, app.exit, last window gone), the sidecar tree goes too.
+            // However the app ends (app.exit, last window gone), the sidecar tree goes too.
             if let RunEvent::Exit = event {
                 sidecar::shutdown(&app.state::<state::AppState>());
             }
